@@ -180,12 +180,16 @@ interface ChatStore {
   completeThinking: (sessionId: string, msgId: string) => void
   appendToolUse: (sessionId: string, msgId: string, toolUse: ToolUseBlock) => void
   updateToolUseInput: (sessionId: string, msgId: string, toolUseId: string, input: Record<string, unknown>) => void
+  appendContentBlock: (sessionId: string, msgId: string, block: ContentBlock) => void
 
   // Streaming state (per-session)
   streamingMessageId: string | null
   /** Per-session streaming message map — allows concurrent agents across sessions */
   streamingMessages: Record<string, string>
   setStreamingMessageId: (sessionId: string, id: string | null) => void
+  /** Image generation state (per-message) - using Record instead of Set for Immer compatibility */
+  generatingImageMessages: Record<string, boolean>
+  setGeneratingImage: (msgId: string, generating: boolean) => void
 
   // Helpers
   getActiveSession: () => Session | undefined
@@ -334,6 +338,7 @@ export const useChatStore = create<ChatStore>()(
     activeSessionId: null,
     streamingMessageId: null,
     streamingMessages: {},
+    generatingImageMessages: {},
     _loaded: false,
 
     loadSessionMessages: async (sessionId, force = false) => {
@@ -1035,6 +1040,25 @@ export const useChatStore = create<ChatStore>()(
       if (msg) dbFlushMessage(sessionId, msg, idx)
     },
 
+    appendContentBlock: (sessionId, msgId, block) => {
+      set((state) => {
+        const session = state.sessions.find((s) => s.id === sessionId)
+        if (!session) return
+        const msg = session.messages.find((m) => m.id === msgId)
+        if (!msg) return
+
+        if (typeof msg.content === 'string') {
+          msg.content = [{ type: 'text', text: msg.content }, block]
+        } else {
+          ;(msg.content as ContentBlock[]).push(block)
+        }
+      })
+      const session = get().sessions.find((s) => s.id === sessionId)
+      const msg = session?.messages.find((m) => m.id === msgId)
+      const idx = session?.messages.indexOf(msg!) ?? 0
+      if (msg) dbFlushMessageImmediate(sessionId, msg, idx)
+    },
+
     setStreamingMessageId: (sessionId, id) => set((state) => {
       if (id) {
         state.streamingMessages[sessionId] = id
@@ -1044,6 +1068,14 @@ export const useChatStore = create<ChatStore>()(
       // Sync convenience field when updating the active session
       if (sessionId === state.activeSessionId) {
         state.streamingMessageId = id
+      }
+    }),
+
+    setGeneratingImage: (msgId, generating) => set((state) => {
+      if (generating) {
+        state.generatingImageMessages[msgId] = true
+      } else {
+        delete state.generatingImageMessages[msgId]
       }
     }),
 

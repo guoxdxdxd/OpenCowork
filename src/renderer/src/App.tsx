@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Layout } from './components/layout/Layout'
 import { Toaster } from './components/ui/sonner'
 import { ConfirmDialogProvider } from './components/ui/confirm-dialog'
@@ -92,6 +93,7 @@ function App(): React.JSX.Element {
   const backgroundColor = useSettingsStore((s) => s.backgroundColor)
   const fontFamily = useSettingsStore((s) => s.fontFamily)
   const fontSize = useSettingsStore((s) => s.fontSize)
+  const { t } = useTranslation('common')
 
   // Initialize plugin auto-reply agent loop listener
   usePluginAutoReply()
@@ -245,13 +247,25 @@ function App(): React.JSX.Element {
       const sessions = _useChatStore.getState().sessions
       if (!sessions.some((s) => s.id === targetSessionId)) return
 
-      const statusLabel = event.status === 'success' ? '✅ 成功' : event.status === 'error' ? '❌ 失败' : '⚠️ 中止'
+      const statusLabel =
+        event.status === 'success'
+          ? t('app.cron.status.success')
+          : event.status === 'error'
+            ? t('app.cron.status.error')
+            : t('app.cron.status.stopped')
+      const toolCallLabel = t('app.cron.toolCallCount', { count: event.toolCallCount ?? 0 })
       const content = [
         `<system-reminder>`,
-        `Cron 任务 "${event.jobName || event.jobId}" 执行完成 (${statusLabel}, ${event.toolCallCount} tool calls)`,
+        t('app.cron.runFinished', {
+          jobName: event.jobName || event.jobId,
+          statusLabel,
+          toolCallLabel,
+        }),
         `</system-reminder>`,
         '',
-        event.error ? `**Error:** ${event.error}` : (event.outputSummary || '(no output)'),
+        event.error
+          ? t('app.cron.errorDetail', { message: event.error })
+          : event.outputSummary || t('app.cron.noOutput'),
       ].join('\n')
 
       const msg: UnifiedMessage = {
@@ -289,26 +303,26 @@ function App(): React.JSX.Element {
       console.log('[App] Update available:', d)
 
       useNotifyStore.getState().push(
-        `🎉 新版本 ${d.newVersion} 可用`,
-        d.releaseNotes || '点击“立即更新”开始更新',
+        t('app.update.availableTitle', { version: d.newVersion }),
+        d.releaseNotes || t('app.update.availableDescription'),
         {
           type: 'info',
           persistent: true,
           actions: [
             {
-              label: '立即更新',
+              label: t('app.update.actions.updateNow'),
               onClick: async () => {
-                toast.info('开始下载更新...')
+                toast.info(t('app.update.downloading'))
                 const result = await window.electron.ipcRenderer.invoke('update:download')
                 if (!result.success) {
-                  toast.error('下载失败', { description: result.error })
+                  toast.error(t('app.update.downloadFailed'), { description: result.error })
                 }
               },
             },
             {
-              label: '稍后提醒',
+              label: t('app.update.actions.remindLater'),
               onClick: () => {
-                toast.info('已推迟更新')
+                toast.info(t('app.update.delayed'))
               },
             },
           ],
@@ -318,14 +332,14 @@ function App(): React.JSX.Element {
 
     const offUpdateDownloaded = ipcClient.on('update:downloaded', (data: unknown) => {
       const d = data as { version: string }
-      toast.success('更新已下载', {
-        description: `版本 ${d.version} 将在应用重启后安装`,
+      toast.success(t('app.update.downloadedTitle'), {
+        description: t('app.update.downloadedDescription', { version: d.version }),
       })
     })
 
     const offUpdateError = ipcClient.on('update:error', (data: unknown) => {
       const d = data as { error: string }
-      toast.error('更新失败', { description: d.error })
+      toast.error(t('app.update.failed'), { description: d.error })
     })
 
     return () => {
@@ -333,7 +347,7 @@ function App(): React.JSX.Element {
       offUpdateDownloaded()
       offUpdateError()
     }
-  }, [])
+  }, [t])
 
   // Sync i18n language with settings store
   const language = useSettingsStore((s) => s.language)
@@ -353,13 +367,13 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const handler = (e: PromiseRejectionEvent): void => {
       console.error('[Unhandled Rejection]', e.reason)
-      toast.error('Unhandled Error', {
+      toast.error(t('app.errors.unhandledTitle'), {
         description: e.reason?.message || String(e.reason),
       })
     }
     window.addEventListener('unhandledrejection', handler)
     return () => window.removeEventListener('unhandledrejection', handler)
-  }, [])
+  }, [t])
 
   return (
     <ErrorBoundary>

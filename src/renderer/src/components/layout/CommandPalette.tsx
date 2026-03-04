@@ -40,6 +40,7 @@ const MODEL_PRESETS: Record<ProviderType, string[]> = {
   anthropic: ['claude-sonnet-4-5-20250929', 'claude-opus-4-5-20251101', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-20250514', 'claude-opus-4-20250514', '', 'claude-3-5-haiku-20241022'],
   'openai-chat': ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o3-mini', 'o4-mini',],
   'openai-responses': ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o3-mini', 'o4-mini', 'gpt-5', 'gpt-5.1', 'gpt-5.2', 'gpt-5.2-mini', 'gpt-5.2-codex', 'gpt-5.1-codex-mini', 'gpt-5.3-codex'],
+  'openai-images': ['dall-e-3', 'dall-e-2', 'gpt-image-1'],
 }
 
 export function CommandPalette(): React.JSX.Element {

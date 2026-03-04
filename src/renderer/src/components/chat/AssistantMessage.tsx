@@ -12,6 +12,9 @@ import { Avatar, AvatarFallback } from '@renderer/components/ui/avatar'
 import { useTypewriter } from '@renderer/hooks/use-typewriter'
 import { Copy, Check, ChevronsDownUp, ChevronsUpDown, Bug, ImageDown } from 'lucide-react'
 import { FadeIn, ScaleIn } from '@renderer/components/animate-ui'
+import { ImageGeneratingLoader } from './ImageGeneratingLoader'
+import { ImagePreview } from './ImagePreview'
+import { useChatStore } from '@renderer/stores/chat-store'
 import type {
   ContentBlock,
   TokenUsage,
@@ -510,7 +513,14 @@ export function AssistantMessage({
 
   const effectiveLiveToolCallMap = isStreaming ? (liveToolCallMap ?? null) : null
 
+  const isGeneratingImage = useChatStore((s) => msgId ? !!s.generatingImageMessages[msgId] : false)
+
   const renderContent = (): React.JSX.Element => {
+    // Show image generation loader when generating images
+    if (isGeneratingImage && isStreaming) {
+      return <ImageGeneratingLoader />
+    }
+
     // Show thinking indicator when streaming just started
     if (isStreaming && typeof content === 'string' && content.length === 0) {
       return (
@@ -813,6 +823,18 @@ export function AssistantMessage({
                       )
                     })}
                   </div>
+                )
+              }
+              case 'image': {
+                const imgBlock = block as Extract<ContentBlock, { type: 'image' }>
+                const imgSrc = imgBlock.source.type === 'base64'
+                  ? `data:${imgBlock.source.mediaType};base64,${imgBlock.source.data}`
+                  : imgBlock.source.url ?? ''
+                if (!imgSrc) return null
+                return (
+                  <ScaleIn key={item.index} className="w-full origin-left">
+                    <ImagePreview src={imgSrc} alt="Generated image" />
+                  </ScaleIn>
                 )
               }
               case 'tool_use':

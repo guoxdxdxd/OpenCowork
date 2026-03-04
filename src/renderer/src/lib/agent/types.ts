@@ -1,4 +1,4 @@
-import type { ProviderConfig, ToolDefinition, UnifiedMessage, TokenUsage, ToolResultContent, RequestDebugInfo, RequestTiming } from '../api/types'
+import type { ProviderConfig, ToolDefinition, UnifiedMessage, TokenUsage, ToolResultContent, RequestDebugInfo, RequestTiming, ImageBlock } from '../api/types'
 import type { CompressionConfig } from './context-compression'
 
 // --- Tool Call Runtime State ---
@@ -81,6 +81,7 @@ export type AgentEvent =
       thinkingEncryptedContent: string
       thinkingEncryptedProvider: 'anthropic' | 'openai-responses'
     }
+  | { type: 'image_generated'; imageBlock: ImageBlock }
   | { type: 'message_end'; usage?: TokenUsage; timing?: RequestTiming }
   | { type: 'tool_use_streaming_start'; toolCallId: string; toolName: string }
   | { type: 'tool_use_args_delta'; toolCallId: string; partialInput: Record<string, unknown> }

@@ -284,6 +284,7 @@
     "capabilities": "Capabilities",
     "supportsVision": "Supports vision (image input)",
     "supportsFunctionCall": "Supports function calling",
+    "supportsThinking": "Supports extended thinking",
     "oauthLogin": "OAuth Login",
     "oauthConnected": "Connected",
     "oauthNotConnected": "Not connected",

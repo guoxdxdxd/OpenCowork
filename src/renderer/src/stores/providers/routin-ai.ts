@@ -8,8 +8,57 @@ export const routinAiPreset: BuiltinProviderPreset = {
   homepage: 'https://routin.ai',
   apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
   defaultEnabled: true,
-  defaultModel: 'mimo-v2-flash',
+  defaultModel: 'glm-5',
   defaultModels: [
+    // ── Z.AI / GLM (智谱) ──
+    {
+      id: 'glm-5',
+      name: 'GLM 5',
+      icon: 'chatglm',
+      enabled: true,
+      contextLength: 202_752,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.14,
+      outputPrice: 0.56
+    },
+    {
+      id: 'glm-4.5',
+      name: 'GLM 4.5',
+      icon: 'chatglm',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.07,
+      outputPrice: 0.28
+    },
+    {
+      id: 'glm-4.7',
+      name: 'GLM 4.7',
+      icon: 'chatglm',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.38,
+      outputPrice: 1.7
+    },
+    {
+      id: 'glm-4.7-flash',
+      name: 'GLM 4.7 Flash',
+      icon: 'chatglm',
+      enabled: true,
+      contextLength: 202_752,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.14,
+      outputPrice: 0.56
+    },
     {
       id: "mimo-v2-flash", name: "Mimo V2 Flash",
       icon: 'mimo',
@@ -644,60 +693,184 @@ export const routinAiPreset: BuiltinProviderPreset = {
       }
     },
     // ── Google Gemini ──
-    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview', icon: 'gemini', enabled: true, contextLength: 1_048_576, maxOutputTokens: 65_536, supportsVision: true, supportsFunctionCall: true, inputPrice: 0.5, outputPrice: 3, supportsThinking: true, thinkingConfig: { bodyParams: { reasoning_effort: 'medium' } } },
-    { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview', icon: 'gemini', enabled: true, contextLength: 1_048_576, maxOutputTokens: 65_536, supportsVision: true, supportsFunctionCall: true, inputPrice: 2, outputPrice: 12, supportsThinking: true, thinkingConfig: { bodyParams: { reasoning_effort: 'medium' } } },
-    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview', icon: 'gemini', enabled: true, contextLength: 1_048_576, maxOutputTokens: 65_536, supportsVision: true, supportsFunctionCall: true, inputPrice: 2, outputPrice: 12, supportsThinking: true, thinkingConfig: { bodyParams: { reasoning_effort: 'medium' } } },
-    // ── Z.AI / GLM (智谱) ──
     {
-      id: 'glm-4.5',
-      name: 'GLM 4.5',
-      icon: 'chatglm',
+      id: 'gemini-3-flash-preview',
+      name: 'Gemini 3 Flash Preview',
+      icon: 'gemini',
       enabled: true,
       contextLength: 1_048_576,
-      maxOutputTokens: 8_192,
-      supportsVision: false,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 0.07,
-      outputPrice: 0.28
+      inputPrice: 0.5,
+      outputPrice: 3,
     },
     {
-      id: 'glm-4.7',
-      name: 'GLM 4.7',
-      icon: 'chatglm',
+      id: 'gemini-3-pro-preview',
+      name: 'Gemini 3 Pro Preview',
+      icon: 'gemini',
       enabled: true,
       contextLength: 1_048_576,
-      maxOutputTokens: 8_192,
-      supportsVision: false,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 0.38,
-      outputPrice: 1.7
+      inputPrice: 2,
+      outputPrice: 12
     },
     {
-      id: 'glm-4.7-flash',
-      name: 'GLM 4.7 Flash',
-      icon: 'chatglm',
-      enabled: true,
-      contextLength: 202_752,
-      maxOutputTokens: 8_192,
-      supportsVision: false,
+      id: 'gemini-3.1-pro-preview',
+      name: 'Gemini 3.1 Pro Preview',
+      icon: 'gemini', enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 0.14,
-      outputPrice: 0.56
+      inputPrice: 2,
+      outputPrice: 12
+    },
+    // ── ByteDance Doubao ──
+    {
+      id: 'doubao-seed-2-0-code-preview-260215',
+      name: 'Doubao Seed 2.0 Code Preview (260215)',
+      icon: 'doubao',
+      enabled: true,
+      supportsVision: true,
+      inputPrice: 3.2,
+      outputPrice: 16,
+      cacheHitPrice: 0.64
     },
     {
-      id: 'glm-5',
-      name: 'GLM 5',
-      icon: 'chatglm',
+      id: 'doubao-seed-code-preview-latest',
+      name: 'Doubao Seed Code Preview (Latest)',
+      icon: 'doubao',
       enabled: true,
-      contextLength: 202_752,
-      maxOutputTokens: 8_192,
-      supportsVision: false,
-      supportsFunctionCall: true,
-      inputPrice: 0.14,
-      outputPrice: 0.56
+      supportsVision: true,
+      inputPrice: 3.2,
+      outputPrice: 16,
+      cacheHitPrice: 0.64
     },
-    { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', icon: 'claude', type: 'anthropic', enabled: true, contextLength: 200_000, maxOutputTokens: 64_384, supportsVision: true, supportsFunctionCall: true, inputPrice: 5, outputPrice: 25, cacheCreationPrice: 6.25, cacheHitPrice: 0.5, supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 } },
-    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', icon: 'claude', type: 'anthropic', enabled: true, contextLength: 200_000, maxOutputTokens: 64_384, supportsVision: true, supportsFunctionCall: true, inputPrice: 3, outputPrice: 15, cacheCreationPrice: 3.75, cacheHitPrice: 0.3, supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 } },
+    {
+      id: 'doubao-seed-2-0-mini-260215',
+      name: 'Doubao Seed 2.0 Mini (260215)',
+      icon: 'doubao',
+      enabled: true,
+      supportsVision: true,
+      contextLength: 256_000,
+      inputPrice: 0.2,
+      outputPrice: 2,
+      cacheHitPrice: 0.04,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: {
+        },
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'medium'
+      },
+    },
+    {
+      id: 'doubao-seed-2.0-code',
+      name: 'Doubao Seed 2.0 Code',
+      icon: 'doubao',
+      enabled: true,
+    },
+    {
+      id: 'doubao-seed-2-0-pro-260215',
+      name: 'Doubao Seed 2.0 Pro (260215)',
+      icon: 'doubao',
+      enabled: true,
+      supportsVision: true,
+      inputPrice: 3.2,
+      outputPrice: 16,
+      cacheHitPrice: 0.64,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: {
+        },
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'medium'
+      },
+    },
+    {
+      id: 'doubao-seed-2-0-lite-260215',
+      name: 'Doubao Seed 2.0 Lite (260215)',
+      icon: 'doubao',
+      enabled: true,
+      supportsVision: true,
+      inputPrice: 0.6,
+      outputPrice: 3.6,
+      cacheHitPrice: 0.12,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: {
+        },
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'medium'
+      },
+    },
+    {
+      id: 'doubao-seedream-4-5-251128',
+      name: 'Doubao Seedream 4.5 (251128)',
+      icon: 'doubao',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images'
+    },
+    {
+      id: 'doubao-seedream-4-0-250828',
+      name: 'Doubao Seedream 4.0 (250828)',
+      icon: 'doubao',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images'
+    },
+    {
+      id: 'doubao-seedream-5-0-260128',
+      name: 'Doubao Seedream 5.0 (260128)',
+      icon: 'doubao',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images'
+    },
+    {
+      id: 'doubao-seedream-3-0-t2i-250415',
+      name: 'Doubao Seedream 3.0 T2I (250415)',
+      icon: 'doubao',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images'
+    },
+    {
+      id: 'claude-opus-4-6',
+      name: 'Claude Opus 4.6',
+      icon: 'claude', type: 'anthropic',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 64_384,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 25,
+      cacheCreationPrice: 6.25,
+      cacheHitPrice: 0.5,
+      supportsThinking: true,
+      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+    },
+    {
+      id: 'claude-sonnet-4-6',
+      name: 'Claude Sonnet 4.6',
+      icon: 'claude',
+      type: 'anthropic',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 64_384,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 3,
+      outputPrice: 15,
+      cacheCreationPrice: 3.75,
+      cacheHitPrice: 0.3,
+      supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+    },
     {
       id: 'claude-sonnet-4-5-20250929',
       name: 'Claude Sonnet 4.5',
@@ -769,8 +942,141 @@ export const routinAiPreset: BuiltinProviderPreset = {
         forceTemperature: 1
       }
     },
-    { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', icon: 'claude', type: 'anthropic', enabled: true, contextLength: 200_000, maxOutputTokens: 64_384, supportsVision: true, supportsFunctionCall: true, inputPrice: 15, outputPrice: 75, cacheCreationPrice: 18.75, cacheHitPrice: 1.5, supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 } },
-    { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', icon: 'claude', type: 'anthropic', enabled: true, contextLength: 200_000, maxOutputTokens: 8_192, supportsVision: true, supportsFunctionCall: true, inputPrice: 0.8, outputPrice: 4, cacheCreationPrice: 1, cacheHitPrice: 0.08, supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 8000 } }, forceTemperature: 1 } },
+    {
+      id: 'claude-opus-4-20250514',
+      name: 'Claude Opus 4',
+      icon: 'claude',
+      type: 'anthropic',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 64_384,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 15,
+      outputPrice: 75,
+      cacheCreationPrice: 18.75,
+      cacheHitPrice: 1.5,
+      supportsThinking: true,
+      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+    },
+    {
+      id: 'claude-3-5-haiku-20241022',
+      name: 'Claude 3.5 Haiku',
+      icon: 'claude',
+      type: 'anthropic',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.8, outputPrice: 4,
+      cacheCreationPrice: 1, cacheHitPrice: 0.08,
+      supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 8000 } }, forceTemperature: 1 }
+    },
+    // ── Qwen3 ──
+    {
+      id: 'qwen3-32b',
+      name: 'Qwen3 32B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 32_768,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.3,
+      outputPrice: 1.2,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { enable_thinking: true },
+        disabledBodyParams: { enable_thinking: false }
+      }
+    },
+    {
+      id: 'qwen3-coder-480b',
+      name: 'Qwen3 Coder 480B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.22,
+      outputPrice: 1.0,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { enable_thinking: true },
+        disabledBodyParams: { enable_thinking: false }
+      }
+    },
+    // ── Qwen3.5 ──
+    {
+      id: 'qwen3.5-27b',
+      name: 'Qwen3.5 27B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.3,
+      outputPrice: 1.2,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } }
+      }
+    },
+    {
+      id: 'qwen3.5-35b-a3b',
+      name: 'Qwen3.5 35B-A3B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.25,
+      outputPrice: 1.0,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } }
+      }
+    },
+    {
+      id: 'qwen3.5-122b-a10b',
+      name: 'Qwen3.5 122B-A10B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.5,
+      outputPrice: 2.0,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } }
+      }
+    },
+    {
+      id: 'qwen3.5-397b-a17b',
+      name: 'Qwen3.5 397B-A17B',
+      icon: 'qwen',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 1.0,
+      outputPrice: 4.0,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } }
+      }
+    },
 
   ],
 }

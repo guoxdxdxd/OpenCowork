@@ -83,6 +83,12 @@
     "closeTab": "关闭",
     "search": "搜索",
     "clear": "清屏",
+    "copy": "复制",
+    "paste": "粘贴",
+    "selectAll": "全选",
+    "copied": "已复制到剪贴板",
+    "copyFailed": "复制失败",
+    "pasteFailed": "粘贴失败",
     "disconnectedMessage": "SSH 会话已断开",
     "errorMessage": "连接错误"
   },

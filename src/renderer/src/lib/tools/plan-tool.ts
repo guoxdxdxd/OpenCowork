@@ -17,22 +17,6 @@ function inferTitleFromContent(content: string): string {
   return first.slice(0, 80) || 'Plan'
 }
 
-function normalizeSummary(input: unknown): string[] | undefined {
-  if (!input) return undefined
-  if (Array.isArray(input)) {
-    const items = input.map((item) => String(item).trim()).filter(Boolean)
-    return items.length > 0 ? items : undefined
-  }
-  if (typeof input === 'string') {
-    const lines = input
-      .split('\n')
-      .map((line) => line.replace(/^[-*]\s+/, '').trim())
-      .filter(Boolean)
-    return lines.length > 0 ? lines : undefined
-  }
-  return undefined
-}
-
 // ── EnterPlanMode ──
 
 const enterPlanModeHandler: ToolHandler = {
@@ -126,8 +110,8 @@ const savePlanHandler: ToolHandler = {
   definition: {
     name: 'SavePlan',
     description:
-      'Save the current plan content and summary for the Plan panel. ' +
-      'Use this after writing the plan in chat. Provide a concise summary (3-6 bullets).',
+      'Save the current plan content for the Plan panel. ' +
+      'Use this after writing the plan in chat. The full plan content will be displayed to the user.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -137,14 +121,7 @@ const savePlanHandler: ToolHandler = {
         },
         content: {
           type: 'string',
-          description: 'Full plan content as written in the chat response.',
-        },
-        summary: {
-          anyOf: [
-            { type: 'array', items: { type: 'string' } },
-            { type: 'string' },
-          ],
-          description: 'Concise summary bullets (3-6). Array of strings or a newline-delimited string.',
+          description: 'Full plan content as written in the chat response. This will be displayed in the Plan panel.',
         },
       },
       required: ['content'],
@@ -161,16 +138,14 @@ const savePlanHandler: ToolHandler = {
       return JSON.stringify({ error: 'Plan content is empty.' })
     }
 
-    const summary = normalizeSummary(input.summary)
-    const specJson = summary ? JSON.stringify({ summary, version: 1 }) : undefined
     const title = input.title ? String(input.title) : inferTitleFromContent(content)
 
     const planStore = usePlanStore.getState()
     let plan = planStore.getPlanBySession(sessionId)
     if (!plan) {
-      plan = planStore.createPlan(sessionId, title, { content, specJson, status: 'drafting' })
+      plan = planStore.createPlan(sessionId, title, { content, status: 'drafting' })
     } else {
-      planStore.updatePlan(plan.id, { title, content, specJson, status: 'drafting' })
+      planStore.updatePlan(plan.id, { title, content, status: 'drafting' })
     }
     planStore.setActivePlan(plan.id)
 
@@ -178,7 +153,6 @@ const savePlanHandler: ToolHandler = {
       status: 'saved',
       plan_id: plan.id,
       title,
-      summary_count: summary?.length ?? 0,
     })
   },
   requiresApproval: () => false,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal as XTerm, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -11,8 +11,16 @@ import { IPC } from '@renderer/lib/ipc/channels'
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { Badge } from '@renderer/components/ui/badge'
 import { Button } from '@renderer/components/ui/button'
-import { RotateCcw } from 'lucide-react'
+import { RotateCcw, Copy, Clipboard } from 'lucide-react'
 import { useTheme } from 'next-themes'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+  ContextMenuSeparator,
+} from '@renderer/components/ui/context-menu'
+import { toast } from 'sonner'
 
 interface SshTerminalProps {
   sessionId: string
@@ -75,6 +83,7 @@ export function SshTerminal({ sessionId, connectionName: _connectionName }: SshT
   const fitAddonRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const lastSeqRef = useRef(0)
+  const [hasSelection, setHasSelection] = useState(false)
 
   const session = useSshStore((s) => s.sessions[sessionId])
 
@@ -111,6 +120,12 @@ export function SshTerminal({ sessionId, connectionName: _connectionName }: SshT
     termRef.current = term
     fitAddonRef.current = fitAddon
     searchAddonRef.current = searchAddon
+
+    // Track selection changes
+    const selectionDisposable = term.onSelectionChange(() => {
+      const selection = term.getSelection()
+      setHasSelection(selection.length > 0)
+    })
 
     // Send keyboard input to SSH
     const dataDisposable = term.onData((data) => {
@@ -233,6 +248,7 @@ export function SshTerminal({ sessionId, connectionName: _connectionName }: SshT
       dataDisposable.dispose()
       binaryDisposable.dispose()
       resizeDisposable.dispose()
+      selectionDisposable.dispose()
       outputCleanup()
       window.removeEventListener('resize', handleWindowResize)
       resizeObserver.disconnect()
@@ -262,6 +278,42 @@ export function SshTerminal({ sessionId, connectionName: _connectionName }: SshT
     await store.connect(session.connectionId)
   }, [session, sessionId])
 
+  const handleCopy = useCallback(() => {
+    const term = termRef.current
+    if (!term) return
+
+    const selection = term.getSelection()
+    if (selection) {
+      navigator.clipboard.writeText(selection).then(
+        () => {
+          toast.success(t('terminal.copied'))
+        },
+        () => {
+          toast.error(t('terminal.copyFailed'))
+        }
+      )
+    }
+  }, [t])
+
+  const handlePaste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) {
+        ipcClient.send(IPC.SSH_DATA, { sessionId, data: text })
+      }
+    } catch {
+      toast.error(t('terminal.pasteFailed'))
+    }
+  }, [sessionId, t])
+
+  const handleSelectAll = useCallback(() => {
+    termRef.current?.selectAll()
+  }, [])
+
+  const handleClear = useCallback(() => {
+    termRef.current?.clear()
+  }, [])
+
   return (
     <div className="relative flex flex-col h-full overflow-hidden bg-background">
       {/* Disconnected overlay */}
@@ -287,13 +339,34 @@ export function SshTerminal({ sessionId, connectionName: _connectionName }: SshT
         </div>
       )}
 
-      {/* Terminal container */}
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-hidden px-1 py-1"
-        onClick={handleContainerClick}
-        style={{ minHeight: 0 }}
-      />
+      {/* Terminal container with context menu */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={containerRef}
+            className="flex-1 overflow-hidden px-1 py-1"
+            onClick={handleContainerClick}
+            style={{ minHeight: 0 }}
+          />
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onClick={handleCopy} disabled={!hasSelection}>
+            <Copy className="size-4 mr-2" />
+            {t('terminal.copy')}
+          </ContextMenuItem>
+          <ContextMenuItem onClick={handlePaste}>
+            <Clipboard className="size-4 mr-2" />
+            {t('terminal.paste')}
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={handleSelectAll}>
+            {t('terminal.selectAll')}
+          </ContextMenuItem>
+          <ContextMenuItem onClick={handleClear}>
+            {t('terminal.clear')}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   )
 }

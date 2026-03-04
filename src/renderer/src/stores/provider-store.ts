@@ -179,6 +179,7 @@ interface ProviderStore {
   providers: AIProvider[]
   activeProviderId: string | null
   activeModelId: string
+  activeFastProviderId: string | null
   activeFastModelId: string
   activeTranslationProviderId: string | null
   activeTranslationModelId: string
@@ -202,6 +203,7 @@ interface ProviderStore {
   // Active selection
   setActiveProvider: (providerId: string) => void
   setActiveModel: (modelId: string) => void
+  setActiveFastProvider: (providerId: string) => void
   setActiveFastModel: (modelId: string) => void
   setActiveTranslationProvider: (providerId: string) => void
   setActiveTranslationModel: (modelId: string) => void
@@ -236,6 +238,7 @@ export const useProviderStore = create<ProviderStore>()(
       providers: [],
       activeProviderId: null,
       activeModelId: '',
+      activeFastProviderId: null,
       activeFastModelId: '',
       activeTranslationProviderId: null,
       activeTranslationModelId: '',
@@ -273,6 +276,8 @@ export const useProviderStore = create<ProviderStore>()(
             s.activeSpeechProviderId === id ? null : s.activeSpeechProviderId,
           activeSpeechModelId:
             s.activeSpeechProviderId === id ? '' : s.activeSpeechModelId,
+          activeFastProviderId: s.activeFastProviderId === id ? null : s.activeFastProviderId,
+          activeFastModelId: s.activeFastProviderId === id ? '' : s.activeFastModelId,
         })),
 
       toggleProviderEnabled: (id) =>
@@ -337,12 +342,39 @@ export const useProviderStore = create<ProviderStore>()(
 
         const defaultModelId = resolveProviderDefaultModelId(provider)
 
-        set({ activeProviderId: providerId, activeModelId: defaultModelId })
+        set((state) => {
+          const nextState: Partial<ProviderStore> = {
+            activeProviderId: providerId,
+            activeModelId: defaultModelId,
+          }
+
+          if (!state.activeFastProviderId) {
+            nextState.activeFastProviderId = providerId
+            nextState.activeFastModelId = defaultModelId
+          }
+
+          return nextState as ProviderStore
+        })
       },
 
       setActiveModel: (modelId) => set({ activeModelId: modelId }),
 
-      setActiveFastModel: (modelId) => set({ activeFastModelId: modelId }),
+      setActiveFastProvider: (providerId) => {
+        const provider = get().providers.find((p) => p.id === providerId)
+        if (!provider) return
+        const defaultModelId = resolveProviderDefaultModelId(provider)
+        set({ activeFastProviderId: providerId, activeFastModelId: defaultModelId })
+      },
+
+      setActiveFastModel: (modelId) =>
+        set((state) => {
+          const providerId = state.activeFastProviderId ?? state.activeProviderId
+          if (!providerId) return {}
+          const provider = state.providers.find((p) => p.id === providerId)
+          if (!provider) return {}
+          const modelExists = provider.models.some((m) => m.id === modelId)
+          return modelExists ? { activeFastModelId: modelId } : {}
+        }),
 
       setActiveTranslationProvider: (providerId) => {
         const provider = get().providers.find((p) => p.id === providerId)
@@ -388,7 +420,19 @@ export const useProviderStore = create<ProviderStore>()(
         const provider = providers.find((p) => p.id === activeProviderId)
         if (!provider) return null
         const activeModel = provider.models.find((m) => m.id === activeModelId)
-        const requestType = activeModel?.type ?? provider.type
+
+        // Override provider type for image category models
+        let requestType = activeModel?.type ?? provider.type
+        if (activeModel?.category === 'image') {
+          requestType = 'openai-images'
+          console.log('[Provider Store] Image model detected, routing to openai-images provider', {
+            modelId: activeModelId,
+            originalType: activeModel?.type,
+            providerType: provider.type,
+            finalType: requestType
+          })
+        }
+
         const normalizedBaseUrl = provider.baseUrl
           ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
           : undefined
@@ -452,7 +496,19 @@ export const useProviderStore = create<ProviderStore>()(
         const provider = get().providers.find((p) => p.id === providerId)
         if (!provider) return null
         const model = provider.models.find((m) => m.id === modelId)
-        const requestType = model?.type ?? provider.type
+
+        // Override provider type for image category models
+        let requestType = model?.type ?? provider.type
+        if (model?.category === 'image') {
+          requestType = 'openai-images'
+          console.log('[Provider Store] Image model detected in getProviderConfigById, routing to openai-images provider', {
+            modelId,
+            originalType: model?.type,
+            providerType: provider.type,
+            finalType: requestType
+          })
+        }
+
         const normalizedBaseUrl = provider.baseUrl
           ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
           : undefined
@@ -480,13 +536,29 @@ export const useProviderStore = create<ProviderStore>()(
       },
 
       getFastProviderConfig: () => {
-        const { providers, activeProviderId, activeFastModelId } = get()
-        if (!activeProviderId) return null
-        const provider = providers.find((p) => p.id === activeProviderId)
+        const { providers, activeProviderId, activeFastProviderId, activeFastModelId } = get()
+        const providerId = activeFastProviderId ?? activeProviderId
+        if (!providerId) return null
+        const provider = providers.find((p) => p.id === providerId)
         if (!provider) return null
-        const model = activeFastModelId || provider.models[0]?.id || ''
+        const model =
+          (activeFastModelId && provider.models.some((m) => m.id === activeFastModelId)
+            ? activeFastModelId
+            : resolveProviderDefaultModelId(provider)) || ''
         const fastModel = provider.models.find((m) => m.id === model)
-        const requestType = fastModel?.type ?? provider.type
+
+        // Override provider type for image category models
+        let requestType = fastModel?.type ?? provider.type
+        if (fastModel?.category === 'image') {
+          requestType = 'openai-images'
+          console.log('[Provider Store] Image model detected in getFastProviderConfig, routing to openai-images provider', {
+            modelId: model,
+            originalType: fastModel?.type,
+            providerType: provider.type,
+            finalType: requestType
+          })
+        }
+
         const normalizedBaseUrl = provider.baseUrl
           ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
           : undefined
@@ -543,6 +615,7 @@ export const useProviderStore = create<ProviderStore>()(
         providers: state.providers,
         activeProviderId: state.activeProviderId,
         activeModelId: state.activeModelId,
+        activeFastProviderId: state.activeFastProviderId,
         activeFastModelId: state.activeFastModelId,
         activeTranslationProviderId: state.activeTranslationProviderId,
         activeTranslationModelId: state.activeTranslationModelId,

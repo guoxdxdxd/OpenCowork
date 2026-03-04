@@ -100,6 +100,7 @@ export type StreamEventType =
   | 'tool_call_start'
   | 'tool_call_delta'
   | 'tool_call_end'
+  | 'image_generated'
   | 'message_end'
   | 'error'
   | 'request_debug'
@@ -114,6 +115,7 @@ export interface StreamEvent {
   toolName?: string
   argumentsDelta?: string
   toolCallInput?: Record<string, unknown>
+  imageBlock?: ImageBlock
   stopReason?: string
   usage?: TokenUsage
   timing?: RequestTiming
@@ -166,7 +168,7 @@ export interface ThinkingConfig {
 
 // --- AI Provider Management ---
 
-export type ProviderType = 'anthropic' | 'openai-chat' | 'openai-responses'
+export type ProviderType = 'anthropic' | 'openai-chat' | 'openai-responses' | 'openai-images'
 export type ResponseSummary = 'auto' | 'concise' | 'detailed'
 
 export type AuthMode = 'apiKey' | 'oauth' | 'channel'
@@ -347,6 +349,10 @@ export interface ProviderConfig {
   requestOverrides?: RequestOverrides
   /** Optional prompt name to use for Responses instructions */
   instructionsPrompt?: string
+  /** OpenAI organization header */
+  organization?: string
+  /** OpenAI project header */
+  project?: string
 }
 
 // --- Provider Interface ---

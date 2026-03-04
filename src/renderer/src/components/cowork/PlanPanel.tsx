@@ -1,4 +1,4 @@
-import { ClipboardList, FileText, Loader2, Play, PenLine } from 'lucide-react'
+import { ClipboardList, FileText, Loader2, PenLine, CheckCircle } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@renderer/components/ui/badge'
@@ -35,31 +35,6 @@ function StatusBadge({ status }: { status: PlanStatus }): React.JSX.Element {
   )
 }
 
-function extractPlanSummary(plan: Plan): string[] {
-  if (plan.specJson) {
-    try {
-      const parsed = JSON.parse(plan.specJson) as { summary?: unknown }
-      if (Array.isArray(parsed.summary)) {
-        const items = parsed.summary.map((item) => String(item).trim()).filter(Boolean)
-        if (items.length > 0) return items.slice(0, 6)
-      }
-    } catch {
-      // Ignore malformed specJson
-    }
-  }
-
-  if (plan.content) {
-    const lines = plan.content.split('\n').map((line) => line.trim()).filter(Boolean)
-    const bullets = lines
-      .filter((line) => /^[-*]\s+/.test(line))
-      .map((line) => line.replace(/^[-*]\s+/, '').trim())
-    const source = bullets.length > 0 ? bullets : lines
-    return source.slice(0, 6)
-  }
-
-  return []
-}
-
 function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
   const { t } = useTranslation(['cowork', 'common'])
   const planMode = useUIStore((s) => s.planMode)
@@ -69,12 +44,10 @@ function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
   const [rejectOpen, setRejectOpen] = useState(false)
   const [rejectFeedback, setRejectFeedback] = useState('')
 
-  const summary = extractPlanSummary(plan)
-  const hasSummary = summary.length > 0
   const canApprove = !!plan.content && (plan.status === 'drafting' || plan.status === 'rejected') && !isRunning
   const canReject = canApprove
 
-  const handleImplement = (): void => {
+  const handleConfirmExecute = (): void => {
     sendImplementPlan(plan.id)
   }
 
@@ -82,10 +55,6 @@ function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
     usePlanStore.getState().setActivePlan(plan.id)
     usePlanStore.getState().updatePlan(plan.id, { status: 'drafting' })
     enterPlanMode()
-  }
-
-  const handleApprove = (): void => {
-    usePlanStore.getState().approvePlan(plan.id)
   }
 
   const handleRejectConfirm = (): void => {
@@ -111,26 +80,17 @@ function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
 
       <Separator />
 
-      {/* Summary */}
+      {/* Plan Content */}
       <div className="space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-          {t('plan.summary', { defaultValue: 'Plan Summary' })}
+          {t('plan.content', { defaultValue: 'Plan Content' })}
         </p>
-        {hasSummary ? (
-          <ul className="list-disc pl-4 text-xs space-y-1 text-foreground/90">
-            {summary.map((item, idx) => (
-              <li key={`${plan.id}-summary-${idx}`} className="leading-snug">
-                {item}
-              </li>
-            ))}
-          </ul>
+        {plan.content ? (
+          <div className="text-xs text-foreground/90 whitespace-pre-wrap leading-relaxed max-h-[400px] overflow-y-auto rounded-md border border-border/50 bg-muted/30 p-3">
+            {plan.content}
+          </div>
         ) : (
           <p className="text-xs text-muted-foreground/70">
-            {t('plan.noSummary', { defaultValue: 'No summary saved yet.' })}
-          </p>
-        )}
-        {!plan.content && (
-          <p className="text-xs text-muted-foreground/60">
             {t('plan.noContent', { defaultValue: 'No plan content saved yet.' })}
           </p>
         )}
@@ -148,9 +108,10 @@ function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
             <Button
               size="sm"
               className="h-7 gap-1.5 bg-green-600 hover:bg-green-700 text-white"
-              onClick={handleApprove}
+              onClick={handleConfirmExecute}
             >
-              {t('plan.approve', { defaultValue: 'Approve' })}
+              <CheckCircle className="size-3" />
+              {t('plan.confirmExecute', { defaultValue: 'Confirm Execute' })}
             </Button>
             {canReject && (
               <Button
@@ -163,16 +124,6 @@ function PlanContent({ plan }: { plan: Plan }): React.JSX.Element {
               </Button>
             )}
           </>
-        )}
-        {plan.status === 'approved' && !isRunning && (
-          <Button
-            size="sm"
-            className="h-7 gap-1.5 bg-violet-600 hover:bg-violet-700 text-white"
-            onClick={handleImplement}
-          >
-            <Play className="size-3" />
-            {t('plan.implement', { defaultValue: 'Implement' })}
-          </Button>
         )}
         {(plan.status === 'approved' || plan.status === 'implementing') && !planMode && !isRunning && (
           <Button

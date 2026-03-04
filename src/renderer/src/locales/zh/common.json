@@ -83,5 +83,35 @@
     "cowork": "协作",
     "code": "编程"
   },
-  "contextWindow": "上下文窗口"
+  "contextWindow": "上下文窗口",
+  "app": {
+    "cron": {
+      "status": {
+        "success": "✅ 成功",
+        "error": "❌ 失败",
+        "stopped": "⚠️ 中止"
+      },
+      "toolCallCount": "{{count}} 次工具调用",
+      "runFinished": "Cron 任务 \"{{jobName}}\" 执行完成（{{statusLabel}}，{{toolCallLabel}}）",
+      "errorDetail": "**错误：** {{message}}",
+      "noOutput": "（无输出）"
+    },
+    "update": {
+      "availableTitle": "🎉 新版本 {{version}} 可用",
+      "availableDescription": "点击“立即更新”开始下载",
+      "actions": {
+        "updateNow": "立即更新",
+        "remindLater": "稍后提醒"
+      },
+      "downloading": "开始下载更新...",
+      "downloadFailed": "下载失败",
+      "delayed": "已推迟更新",
+      "downloadedTitle": "更新已下载",
+      "downloadedDescription": "版本 {{version}} 将在重启后安装",
+      "failed": "更新失败"
+    },
+    "errors": {
+      "unhandledTitle": "未处理的错误"
+    }
+  }
 }

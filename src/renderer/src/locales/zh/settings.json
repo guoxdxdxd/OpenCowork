@@ -284,6 +284,7 @@
     "capabilities": "能力",
     "supportsVision": "支持视觉（图片输入）",
     "supportsFunctionCall": "支持函数调用",
+    "supportsThinking": "支持扩展思考",
     "oauthLogin": "OAuth 登录",
     "oauthConnected": "已连接",
     "oauthNotConnected": "未连接",

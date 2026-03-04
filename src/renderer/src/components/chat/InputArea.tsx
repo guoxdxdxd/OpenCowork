@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { useState as useLocalState } from 'react'
+import { toast } from 'sonner'
 import {
   Send,
   FolderOpen,
@@ -9,10 +10,9 @@ import {
   X,
   Trash2,
   ImagePlus,
-  Brain,
-  ChevronDown,
   ClipboardList,
-  Globe
+  Globe,
+  Wand2
 } from 'lucide-react'
 import { nanoid } from 'nanoid'
 import { Button } from '@renderer/components/ui/button'
@@ -20,8 +20,7 @@ import { Textarea } from '@renderer/components/ui/textarea'
 import { Spinner } from '@renderer/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useProviderStore } from '@renderer/stores/provider-store'
-import type { AIModelConfig, ReasoningEffortLevel } from '@renderer/lib/api/types'
-import { Popover, PopoverContent, PopoverTrigger } from '@renderer/components/ui/popover'
+import type { AIModelConfig } from '@renderer/lib/api/types'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { updateWebSearchToolRegistration } from '@renderer/lib/tools'
 import { useUIStore, type AppMode } from '@renderer/stores/ui-store'
@@ -51,6 +50,14 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger
 } from '@renderer/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@renderer/components/ui/dialog'
 
 function ContextRing(): React.JSX.Element | null {
   const chatView = useUIStore((s) => s.chatView)
@@ -280,8 +287,48 @@ export function InputArea({
   const debouncedTokens = useDebouncedTokens(text)
   const [selectedSkill, setSelectedSkill] = React.useState<string | null>(null)
   const [attachedImages, setAttachedImages] = React.useState<ImageAttachment[]>([])
+  const [isOptimizing, setIsOptimizing] = React.useState(false)
+  const [optimizingText, setOptimizingText] = React.useState('')
+  const [optimizationOptions, setOptimizationOptions] = React.useState<Array<{title: string; focus: string; content: string}>>([])
+  const [showOptimizationDialog, setShowOptimizationDialog] = React.useState(false)
+  const [selectedOptionIndex, setSelectedOptionIndex] = React.useState(0)
+  const currentLanguage = useSettingsStore((state) => state.language)
+  const contentScrollRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
+  const [inputHeight, setInputHeight] = React.useState<number | null>(null)
+  const dragRef = React.useRef<{ startY: number; startH: number } | null>(null)
+  const containerRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    const onMouseMove = (e: MouseEvent): void => {
+      if (!dragRef.current) return
+      const delta = dragRef.current.startY - e.clientY
+      const newH = Math.min(500, Math.max(120, dragRef.current.startH + delta))
+      setInputHeight(newH)
+    }
+    const onMouseUp = (): void => {
+      if (dragRef.current) {
+        dragRef.current = null
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [])
+
+  const handleDragStart = React.useCallback((e: React.MouseEvent) => {
+    const el = containerRef.current
+    if (!el) return
+    dragRef.current = { startY: e.clientY, startH: el.offsetHeight }
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+  }, [])
   const [sentHistory, setSentHistory] = React.useState<InputHistoryEntry[]>([])
   const [historyCursor, setHistoryCursor] = React.useState<number | null>(null)
   const historyDraftRef = React.useRef<InputHistoryDraft | null>(null)
@@ -303,30 +350,6 @@ export function InputArea({
     const model = activeProvider.models.find((m) => m.id === activeModelId)
     return model?.supportsVision ?? false
   }, [activeProvider, activeModelId])
-  const activeModelConfig = React.useMemo(() => {
-    if (!activeProvider) return null
-    return activeProvider.models.find((m) => m.id === activeModelId) ?? null
-  }, [activeProvider, activeModelId])
-  const supportsThinking = activeModelConfig?.supportsThinking ?? false
-  const reasoningEffortLevels = activeModelConfig?.thinkingConfig?.reasoningEffortLevels
-  const defaultReasoningEffort =
-    activeModelConfig?.thinkingConfig?.defaultReasoningEffort ?? 'medium'
-  const thinkingEnabled = useSettingsStore((s) => s.thinkingEnabled)
-  const reasoningEffort = useSettingsStore((s) => s.reasoningEffort)
-  const toggleThinking = React.useCallback(() => {
-    const store = useSettingsStore.getState()
-    if (!store.thinkingEnabled && reasoningEffortLevels) {
-      // When enabling thinking on a model with levels, set to default level
-      useSettingsStore
-        .getState()
-        .updateSettings({ thinkingEnabled: true, reasoningEffort: defaultReasoningEffort })
-    } else {
-      useSettingsStore.getState().updateSettings({ thinkingEnabled: !store.thinkingEnabled })
-    }
-  }, [reasoningEffortLevels, defaultReasoningEffort])
-  const setReasoningEffort = React.useCallback((level: ReasoningEffortLevel) => {
-    useSettingsStore.getState().updateSettings({ reasoningEffort: level, thinkingEnabled: true })
-  }, [])
   const webSearchEnabled = useSettingsStore((s) => s.webSearchEnabled)
   const toggleWebSearch = React.useCallback(() => {
     const store = useSettingsStore.getState()
@@ -647,6 +670,7 @@ export function InputArea({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing) return
+    if (isOptimizing) return // Disable input during optimization
     if (
       !e.altKey &&
       !e.ctrlKey &&
@@ -678,6 +702,7 @@ export function InputArea({
 
   // Auto-resize textarea
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
+    if (isOptimizing) return // Disable input during optimization
     clearHistoryNavigation()
     setText(e.target.value)
     const el = e.target
@@ -741,6 +766,105 @@ export function InputArea({
     handleDrop(e as unknown as React.DragEvent<HTMLTextAreaElement>)
   }
 
+  // Optimize prompt handler
+  const handleOptimizePrompt = React.useCallback(async () => {
+    const trimmed = text.trim()
+    if (!trimmed || isOptimizing) return
+
+    console.log('[Optimizer] Starting optimization...')
+    setIsOptimizing(true)
+    setOptimizingText('')
+    setOptimizationOptions([])
+
+    try {
+      const { optimizePrompt } = await import('@renderer/lib/prompt-optimizer/optimizer')
+
+      console.log('[Optimizer] Current language:', currentLanguage)
+
+      // Find a fast model (haiku) from available providers
+      const providerStore = useProviderStore.getState()
+      const { providers } = providerStore
+
+      let fastProvider = providers.find(p => p.enabled && p.models.some(m =>
+        m.enabled && (m.id.includes('haiku') || m.id.includes('4o-mini') || m.id.includes('gpt-4o-mini'))
+      ))
+
+      if (!fastProvider) {
+        fastProvider = providers.find(p => p.enabled && p.models.some(m => m.enabled))
+      }
+
+      if (!fastProvider) {
+        console.error('[Optimizer] No enabled provider found')
+        toast.error('No AI provider available', { description: 'Please configure an AI provider in Settings' })
+        setIsOptimizing(false)
+        return
+      }
+
+      const fastModel = fastProvider.models.find(m =>
+        m.enabled && (m.id.includes('haiku') || m.id.includes('4o-mini') || m.id.includes('gpt-4o-mini'))
+      ) || fastProvider.models.find(m => m.enabled)
+
+      if (!fastModel) {
+        console.error('[Optimizer] No enabled model found')
+        toast.error('No AI model available', { description: 'Please enable a model in Settings' })
+        setIsOptimizing(false)
+        return
+      }
+
+      console.log('[Optimizer] Using provider:', fastProvider.type, 'model:', fastModel.id)
+
+      const providerConfig = {
+        type: fastProvider.type,
+        apiKey: fastProvider.apiKey,
+        baseUrl: fastProvider.baseUrl,
+        model: fastModel.id,
+        providerId: fastProvider.id,
+        maxTokens: 4096,
+        temperature: 0.7,
+        systemPrompt: ''
+      }
+
+      console.log('[Optimizer] Starting optimization stream...')
+      for await (const event of optimizePrompt(trimmed, providerConfig, currentLanguage)) {
+        console.log('[Optimizer] Event:', event.type)
+        if (event.type === 'text') {
+          setOptimizingText(prev => prev + event.content)
+        } else if (event.type === 'result' && event.options && event.options.length > 0) {
+          console.log('[Optimizer] Got results:', event.options.length, 'options')
+          setOptimizationOptions(event.options)
+          setSelectedOptionIndex(0)
+          setShowOptimizationDialog(true)
+        }
+      }
+      console.log('[Optimizer] Stream completed')
+    } catch (error) {
+      console.error('[Optimizer] Error:', error)
+      toast.error('Optimization failed', { description: error instanceof Error ? error.message : String(error) })
+    } finally {
+      console.log('[Optimizer] Cleanup')
+      setIsOptimizing(false)
+    }
+  }, [text, isOptimizing])
+
+  const handleSelectOption = React.useCallback((content: string) => {
+    setText(content)
+    setOptimizationOptions([])
+    setOptimizingText('')
+    setSelectedOptionIndex(0)
+    setShowOptimizationDialog(false)
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`
+    }
+  }, [])
+
+  const handleCancelOptimization = React.useCallback(() => {
+    setOptimizationOptions([])
+    setOptimizingText('')
+    setSelectedOptionIndex(0)
+    setShowOptimizationDialog(false)
+  }, [])
+
   return (
     <div className="px-4 py-3 pb-4">
       {/* API key warning */}
@@ -799,8 +923,17 @@ export function InputArea({
 
       <div className="mx-auto max-w-3xl">
         <div
-          className={`relative rounded-2xl border bg-background shadow-lg transition-shadow focus-within:shadow-xl focus-within:ring-1 focus-within:ring-ring/20 ${dragging ? 'ring-2 ring-primary/50' : ''}`}
+          ref={containerRef}
+          className={`relative rounded-lg border bg-background shadow-lg transition-shadow focus-within:shadow-xl focus-within:ring-1 focus-within:ring-ring/20 flex flex-col ${dragging ? 'ring-2 ring-primary/50' : ''}`}
+          style={inputHeight ? { height: inputHeight } : undefined}
         >
+          {/* Top drag handle */}
+          <div
+            className="flex items-center justify-center h-2.5 cursor-row-resize group hover:bg-muted/40 rounded-t-lg transition-colors"
+            onMouseDown={handleDragStart}
+          >
+            <div className="w-8 h-0.5 rounded-full bg-border group-hover:bg-muted-foreground/40 transition-colors" />
+          </div>
           {/* Queued message list (while current run is processing) */}
           {queuedMessages.length > 0 && (
             <div className="px-3 pt-3 pb-1">
@@ -921,25 +1054,115 @@ export function InputArea({
                   />
                   <button
                     type="button"
-                    className="absolute -top-1.5 -right-1.5 size-4 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity shadow"
+                    className="absolute -top-1.5 -right-1.5 size-5 rounded-full bg-destructive text-destructive-foreground shadow-md opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center"
                     onClick={() => removeImage(img.id)}
                   >
-                    <X className="size-2.5" />
+                    <X className="size-3" />
                   </button>
                 </div>
               ))}
             </div>
           )}
 
+          {/* Optimizing indicator - only show spinner, hide text */}
+          {isOptimizing && (
+            <div className="px-3 pt-3 pb-1">
+              <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Spinner className="size-3.5 text-blue-600 dark:text-blue-400" />
+                  <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                    {t('input.optimizing', { defaultValue: 'Optimizing your prompt...' })}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Optimization Dialog */}
+          <Dialog open={showOptimizationDialog} onOpenChange={setShowOptimizationDialog}>
+            <DialogContent className="max-w-7xl max-h-[90vh] overflow-hidden flex flex-col gap-4">
+              <DialogHeader className="space-y-2">
+                <DialogTitle className="text-xl flex items-center gap-2">
+                  <Wand2 className="size-5 text-primary" />
+                  {t('input.optimizationResults', { defaultValue: 'Optimized Prompt Options' })}
+                </DialogTitle>
+                <DialogDescription className="text-sm">
+                  {t('input.optimizationResultsDesc', { defaultValue: 'Select one of the optimized versions below to use in your prompt.' })}
+                </DialogDescription>
+              </DialogHeader>
+
+              {/* Tab-style Layout */}
+              <div className="flex-1 flex flex-col overflow-hidden gap-4">
+                {/* Tabs - Options as tabs at top */}
+                <div className="flex gap-2 border-b border-border pb-2">
+                  {optimizationOptions.map((option, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      className={`flex-1 px-4 py-3 rounded-t-lg border-2 border-b-0 transition-all ${
+                        selectedOptionIndex === idx
+                          ? 'border-primary bg-primary/5 -mb-[2px] border-b-2 border-b-background'
+                          : 'border-transparent hover:bg-muted/30'
+                      }`}
+                      onClick={() => {
+                        setSelectedOptionIndex(idx)
+                        // Scroll content to top when switching tabs
+                        if (contentScrollRef.current) {
+                          contentScrollRef.current.scrollTop = 0
+                        }
+                      }}
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        <span className={`inline-flex items-center justify-center size-6 rounded-full text-xs font-bold ${
+                          selectedOptionIndex === idx
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground'
+                        }`}>
+                          {idx + 1}
+                        </span>
+                        <div className="text-left">
+                          <p className="text-sm font-semibold text-foreground">{option.title}</p>
+                          <p className="text-xs text-muted-foreground truncate max-w-[200px]">{option.focus}</p>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Content Area - Show selected option's detailed content */}
+                <div className="flex-1 overflow-hidden rounded-lg border border-border bg-background">
+                  <div ref={contentScrollRef} className="h-full overflow-y-auto px-6 py-4">
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                      <div className="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed font-sans">
+                        {optimizationOptions[selectedOptionIndex]?.content}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <DialogFooter className="flex items-center justify-between">
+                <Button variant="outline" onClick={handleCancelOptimization}>
+                  {t('action.cancel', { ns: 'common' })}
+                </Button>
+                <Button
+                  onClick={() => handleSelectOption(optimizationOptions[selectedOptionIndex]?.content)}
+                >
+                  {t('input.useThisOption', { defaultValue: 'Use This' })}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           {/* Text input area */}
           <div
-            className={`relative px-3 ${selectedSkill || attachedImages.length > 0 ? 'pt-1.5' : 'pt-3'}`}
+            className={`relative px-3 flex-1 min-h-0 ${selectedSkill || attachedImages.length > 0 ? 'pt-1.5' : 'pt-3'}`}
             onDrop={handleDropWrapped}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
           >
             {dragging && (
-              <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-primary/5 pointer-events-none">
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-primary/5 pointer-events-none">
                 <span className="flex items-center gap-1.5 text-xs text-primary/70 font-medium">
                   <FileUp className="size-3.5" />
                   {supportsVision ? t('input.dropImages') : t('input.dropFiles')}
@@ -953,9 +1176,9 @@ export function InputArea({
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={t(placeholderKeys[mode] ?? 'input.placeholder')}
-              className="min-h-[60px] max-h-[300px] w-full resize-none border-0 bg-background dark:bg-background p-1 shadow-none focus-visible:ring-0 text-base md:text-sm"
+              className="min-h-[60px] w-full resize-none border-0 bg-background dark:bg-background p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1"
               rows={1}
-              disabled={disabled}
+              disabled={disabled || isOptimizing}
             />
           </div>
 
@@ -993,9 +1216,6 @@ export function InputArea({
                       disabled={disabled || isStreaming}
                     >
                       <Globe className="size-4" />
-                      <span className="text-[10px] font-medium">
-                        {t('input.webSearch', { defaultValue: '联网' })}
-                      </span>
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
@@ -1064,96 +1284,6 @@ export function InputArea({
                   <TooltipContent>{t('input.attachImages')}</TooltipContent>
                 </Tooltip>
               )}
-
-              {/* Think toggle button — with reasoning effort level selector */}
-              {supportsThinking &&
-                (reasoningEffortLevels && reasoningEffortLevels.length > 0 ? (
-                  <Popover>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <PopoverTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            className={`h-8 rounded-lg px-2 gap-1 transition-colors ${
-                              thinkingEnabled
-                                ? 'text-violet-600 dark:text-violet-400 bg-violet-500/10 hover:bg-violet-500/20'
-                                : 'text-muted-foreground hover:text-foreground'
-                            }`}
-                            disabled={disabled || isStreaming}
-                          >
-                            <Brain className="size-4" />
-                            {thinkingEnabled && (
-                              <span className="text-[10px] font-medium uppercase">
-                                {reasoningEffort}
-                              </span>
-                            )}
-                            <ChevronDown className="size-3 opacity-50" />
-                          </Button>
-                        </PopoverTrigger>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        {thinkingEnabled
-                          ? t('input.thinkingLevel', { level: reasoningEffort })
-                          : t('input.enableThinking')}
-                      </TooltipContent>
-                    </Tooltip>
-                    <PopoverContent className="w-auto p-1.5" align="start" side="top">
-                      <div className="flex flex-col gap-0.5">
-                        <button
-                          type="button"
-                          className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs transition-colors text-left ${
-                            !thinkingEnabled
-                              ? 'bg-accent text-accent-foreground'
-                              : 'hover:bg-muted/60 text-foreground/80'
-                          }`}
-                          onClick={() =>
-                            useSettingsStore.getState().updateSettings({ thinkingEnabled: false })
-                          }
-                        >
-                          <span className="font-medium">{t('input.thinkingOff')}</span>
-                        </button>
-                        {reasoningEffortLevels.map((level) => (
-                          <button
-                            key={level}
-                            type="button"
-                            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs transition-colors text-left ${
-                              thinkingEnabled && reasoningEffort === level
-                                ? 'bg-violet-500/15 text-violet-600 dark:text-violet-400'
-                                : 'hover:bg-muted/60 text-foreground/80'
-                            }`}
-                            onClick={() => setReasoningEffort(level)}
-                          >
-                            <span className="font-medium uppercase">{level}</span>
-                            <span className="text-[10px] text-muted-foreground">
-                              {t(`input.effortDesc.${level}`)}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className={`size-8 rounded-lg transition-colors ${
-                          thinkingEnabled
-                            ? 'text-violet-600 dark:text-violet-400 bg-violet-500/10 hover:bg-violet-500/20'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
-                        onClick={toggleThinking}
-                        disabled={disabled || isStreaming}
-                      >
-                        <Brain className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {thinkingEnabled ? t('input.disableThinking') : t('input.enableThinking')}
-                    </TooltipContent>
-                  </Tooltip>
-                ))}
 
               {/* Attachment / Folder button */}
               {onSelectFolder && (
@@ -1239,6 +1369,31 @@ export function InputArea({
                   <TooltipContent>{t('input.stopTooltip')}</TooltipContent>
                 </Tooltip>
               )}
+
+              {/* Optimize prompt button */}
+              {!isStreaming && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-8 rounded-lg text-muted-foreground hover:text-foreground disabled:opacity-50"
+                      onClick={handleOptimizePrompt}
+                      disabled={!text.trim() || disabled || isOptimizing}
+                    >
+                      {isOptimizing ? (
+                        <Spinner className="size-4" />
+                      ) : (
+                        <Wand2 className="size-4" />
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {isOptimizing ? t('input.optimizing') : t('input.optimizePrompt')}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -1248,7 +1403,8 @@ export function InputArea({
                     disabled={
                       (!text.trim() && attachedImages.length === 0) ||
                       disabled ||
-                      needsWorkingFolder
+                      needsWorkingFolder ||
+                      isOptimizing
                     }
                   >
                     <span>{t('action.start', { ns: 'common' })}</span>

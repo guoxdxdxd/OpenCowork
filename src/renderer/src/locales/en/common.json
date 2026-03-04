@@ -83,5 +83,35 @@
     "cowork": "Cowork",
     "code": "Code"
   },
-  "contextWindow": "Context window"
+  "contextWindow": "Context window",
+  "app": {
+    "cron": {
+      "status": {
+        "success": "✅ Success",
+        "error": "❌ Failed",
+        "stopped": "⚠️ Stopped"
+      },
+      "toolCallCount": "{{count}} tool calls",
+      "runFinished": "Cron task \"{{jobName}}\" completed ({{statusLabel}}, {{toolCallLabel}})",
+      "errorDetail": "**Error:** {{message}}",
+      "noOutput": "(no output)"
+    },
+    "update": {
+      "availableTitle": "🎉 Version {{version}} is available",
+      "availableDescription": "Click \"Update now\" to start downloading",
+      "actions": {
+        "updateNow": "Update now",
+        "remindLater": "Remind me later"
+      },
+      "downloading": "Downloading update...",
+      "downloadFailed": "Download failed",
+      "delayed": "Update postponed",
+      "downloadedTitle": "Update downloaded",
+      "downloadedDescription": "Version {{version}} will install after restart",
+      "failed": "Update failed"
+    },
+    "errors": {
+      "unhandledTitle": "Unhandled Error"
+    }
+  }
 }

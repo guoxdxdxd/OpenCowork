@@ -531,6 +531,43 @@ export const openaiPreset: BuiltinProviderPreset = {
       icon: 'openai',
       enabled: true,
       category: 'speech'
+    },
+    // Image generation models
+    {
+      id: 'dall-e-3',
+      name: 'DALL-E 3',
+      icon: 'openai',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images',
+      supportsVision: true,
+      supportsFunctionCall: false,
+      inputPrice: 0.04,
+      outputPrice: 0.08,
+    },
+    {
+      id: 'dall-e-2',
+      name: 'DALL-E 2',
+      icon: 'openai',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images',
+      supportsVision: true,
+      supportsFunctionCall: false,
+      inputPrice: 0.02,
+      outputPrice: 0.02,
+    },
+    {
+      id: 'gpt-image-1',
+      name: 'GPT-Image 1',
+      icon: 'openai',
+      enabled: true,
+      category: 'image',
+      type: 'openai-images',
+      supportsVision: true,
+      supportsFunctionCall: false,
+      inputPrice: 0.04,
+      outputPrice: 0.08,
     }
   ],
 }

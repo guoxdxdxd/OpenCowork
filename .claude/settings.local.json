@@ -31,7 +31,8 @@
       "WebFetch(domain:api.skillsmp.com)",
       "Bash(test:*)",
       "Bash(git commit:*)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

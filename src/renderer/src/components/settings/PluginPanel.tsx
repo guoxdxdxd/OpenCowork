@@ -187,8 +187,17 @@ function PluginConfigPanel({ plugin }: { plugin: PluginInstance }): React.JSX.El
 
   // Local state for debounced fields
   const providers = useProviderStore((s) => s.providers)
+  const activeProviderId = useProviderStore((s) => s.activeProviderId)
+  const activeModelId = useProviderStore((s) => s.activeModelId)
   const enabledProviders = useMemo(() => providers.filter((p) => p.enabled), [providers])
   const [modelPopoverOpen, setModelPopoverOpen] = useState(false)
+
+  // Get global default model info
+  const globalDefaultModel = useMemo(() => {
+    const provider = providers.find((p) => p.id === activeProviderId)
+    const model = provider?.models.find((m) => m.id === activeModelId)
+    return model ? { provider, model } : null
+  }, [providers, activeProviderId, activeModelId])
 
   const [localName, setLocalName] = useState(plugin.name)
   const [localConfig, setLocalConfig] = useState(plugin.config)
@@ -412,11 +421,18 @@ function PluginConfigPanel({ plugin }: { plugin: PluginInstance }): React.JSX.El
               onClick={() => { handleModelChange('__default__'); setModelPopoverOpen(false) }}
             >
               {!localModel ? <Check className="size-3 text-primary" /> : <span className="size-3" />}
-              <span className="text-muted-foreground">{t('plugin.modelDefault', 'Use global default')}</span>
+              <div className="flex flex-col items-start flex-1 min-w-0">
+                <span className="text-muted-foreground">{t('plugin.modelDefault', 'Use global default')}</span>
+                {globalDefaultModel && (
+                  <span className="text-[10px] text-muted-foreground/50 truncate w-full">
+                    {globalDefaultModel.model.name}
+                  </span>
+                )}
+              </div>
             </button>
             <Separator className="my-1" />
             {enabledProviders.map((provider) => {
-              const models = provider.models.filter((m) => m.enabled)
+              const models = provider.models.filter((m) => m.enabled && (!m.category || m.category === 'chat'))
               if (models.length === 0) return null
               return (
                 <div key={provider.id}>

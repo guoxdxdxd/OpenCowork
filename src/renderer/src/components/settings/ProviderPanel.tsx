@@ -12,6 +12,11 @@ import {
   Brain,
   ExternalLink,
   Pencil,
+  Code2,
+  Image as ImageIcon,
+  Mic,
+  Shapes,
+  Sparkles,
 } from 'lucide-react'
 import { nanoid } from 'nanoid'
 import { toast } from 'sonner'
@@ -1469,7 +1474,26 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto divide-y">
-                {filteredModels.map((model) => (
+                {filteredModels.map((model) => {
+                  const capabilityIndicators: Array<{ key: string; icon: React.ComponentType<{ className?: string }>; label: string }> = []
+                  if (model.category === 'image') {
+                    capabilityIndicators.push({ key: 'category-image', icon: ImageIcon, label: t('provider.modelCategoryImage') })
+                  } else if (model.category === 'speech') {
+                    capabilityIndicators.push({ key: 'category-speech', icon: Mic, label: t('provider.modelCategorySpeech') })
+                  } else if (model.category === 'embedding') {
+                    capabilityIndicators.push({ key: 'category-embedding', icon: Shapes, label: t('provider.modelCategoryEmbedding') })
+                  }
+                  if (model.supportsVision) {
+                    capabilityIndicators.push({ key: 'vision', icon: Eye, label: t('provider.supportsVision') })
+                  }
+                  if (model.supportsFunctionCall !== false) {
+                    capabilityIndicators.push({ key: 'function', icon: Code2, label: t('provider.supportsFunctionCall') })
+                  }
+                  if (model.supportsThinking) {
+                    capabilityIndicators.push({ key: 'thinking', icon: Sparkles, label: t('provider.supportsThinking') })
+                  }
+
+                  return (
                   <div
                     key={model.id}
                     className="flex items-center gap-3 px-3 py-2 hover:bg-muted/30 transition-colors group"
@@ -1492,6 +1516,22 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
                         {(model.cacheCreationPrice != null || model.cacheHitPrice != null) && (
                           <span className="text-emerald-500/60">
                             cache: {model.cacheCreationPrice != null ? `写 $${model.cacheCreationPrice}` : ''}{model.cacheCreationPrice != null && model.cacheHitPrice != null ? ' / ' : ''}{model.cacheHitPrice != null ? `读 $${model.cacheHitPrice}` : ''}
+                          </span>
+                        )}
+                        {capabilityIndicators.length > 0 && (
+                          <span className="flex items-center gap-1 text-muted-foreground/60">
+                            {capabilityIndicators.map(({ key, icon: Icon, label }) => (
+                              <Tooltip key={`${model.id}-${key}`}>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex items-center justify-center rounded-full bg-muted/60 px-1.5 py-0.5 text-[9px] text-muted-foreground hover:bg-muted/80">
+                                    <Icon className="size-3" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" className="text-[11px]">
+                                  {label}
+                                </TooltipContent>
+                              </Tooltip>
+                            ))}
                           </span>
                         )}
                       </div>
@@ -1541,7 +1581,8 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
                       onCheckedChange={() => toggleModelEnabled(provider.id, model.id)}
                     />
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>

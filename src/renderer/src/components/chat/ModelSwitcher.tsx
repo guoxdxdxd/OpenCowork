@@ -1,17 +1,213 @@
-import { useState } from 'react'
-import { ChevronDown, Check } from 'lucide-react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import { ChevronDown, Check, Search, Eye, Wrench, Brain, Settings2 } from 'lucide-react'
 import { useProviderStore } from '@renderer/stores/provider-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { usePluginStore } from '@renderer/stores/plugin-store'
 import { useTranslation } from 'react-i18next'
 import { Popover, PopoverContent, PopoverTrigger } from '@renderer/components/ui/popover'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { ProviderIcon, ModelIcon } from '@renderer/components/settings/provider-icons'
 import { cn } from '@renderer/lib/utils'
+import type { AIModelConfig, AIProvider, ReasoningEffortLevel } from '@renderer/lib/api/types'
+
+function formatContextLength(length?: number): string | null {
+  if (!length) return null
+  if (length >= 1_000_000) return `${(length / 1_000_000).toFixed(length % 1_000_000 === 0 ? 0 : 1)}M`
+  if (length >= 1_000) return `${Math.round(length / 1_000)}K`
+  return String(length)
+}
+
+function ModelCapabilityTags({
+  model,
+  t,
+}: {
+  model: AIModelConfig
+  t: (key: string) => string
+}): React.JSX.Element {
+  const ctx = formatContextLength(model.contextLength)
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      {model.supportsVision && (
+        <span className="inline-flex items-center gap-0.5 rounded-sm bg-emerald-500/10 px-1 py-px text-[9px] font-medium text-emerald-600 dark:text-emerald-400">
+          <Eye className="size-2.5" />
+          {t('topbar.vision')}
+        </span>
+      )}
+      {model.supportsFunctionCall && (
+        <span className="inline-flex items-center gap-0.5 rounded-sm bg-blue-500/10 px-1 py-px text-[9px] font-medium text-blue-600 dark:text-blue-400">
+          <Wrench className="size-2.5" />
+          {t('topbar.tools')}
+        </span>
+      )}
+      {model.supportsThinking && (
+        <span className="inline-flex items-center gap-0.5 rounded-sm bg-violet-500/10 px-1 py-px text-[9px] font-medium text-violet-600 dark:text-violet-400">
+          <Brain className="size-2.5" />
+          {t('topbar.thinking')}
+        </span>
+      )}
+      {ctx && (
+        <span className="inline-flex items-center rounded-sm bg-muted/60 px-1 py-px text-[9px] font-medium text-muted-foreground">
+          {ctx}
+        </span>
+      )}
+    </div>
+  )
+}
+
+interface ProviderGroup {
+  provider: AIProvider
+  models: AIModelConfig[]
+}
+
+function selectModel(
+  provider: AIProvider,
+  modelId: string,
+  activeProviderId: string | null,
+  setActiveProvider: (id: string) => void,
+  setActiveModel: (id: string) => void,
+  setOpen: (v: boolean) => void
+): void {
+  const pid = provider.id
+  if (pid !== activeProviderId) setActiveProvider(pid)
+  setActiveModel(modelId)
+  const sessionId = useChatStore.getState().activeSessionId
+  if (sessionId) {
+    useChatStore.getState().updateSessionModel(sessionId, pid, modelId)
+    const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+    if (session?.pluginId) {
+      void usePluginStore.getState().updatePlugin(session.pluginId, {
+        providerId: pid,
+        model: modelId,
+      })
+    }
+  }
+  setOpen(false)
+}
+
+/** Settings popover shown next to model icon */
+function ModelSettingsPopover({
+  model,
+  t,
+  tChat,
+}: {
+  model: AIModelConfig | undefined
+  t: (key: string) => string
+  tChat: (key: string, opts?: Record<string, unknown>) => string
+}): React.JSX.Element | null {
+  const supportsThinking = model?.supportsThinking ?? false
+  const levels = model?.thinkingConfig?.reasoningEffortLevels
+  const defaultLevel = model?.thinkingConfig?.defaultReasoningEffort ?? 'medium'
+  const thinkingEnabled = useSettingsStore((s) => s.thinkingEnabled)
+  const reasoningEffort = useSettingsStore((s) => s.reasoningEffort)
+
+  const toggleThinking = useCallback(() => {
+    const store = useSettingsStore.getState()
+    if (!store.thinkingEnabled && levels) {
+      store.updateSettings({ thinkingEnabled: true, reasoningEffort: defaultLevel })
+    } else {
+      store.updateSettings({ thinkingEnabled: !store.thinkingEnabled })
+    }
+  }, [levels, defaultLevel])
+
+  const setEffort = useCallback((level: ReasoningEffortLevel) => {
+    useSettingsStore.getState().updateSettings({ reasoningEffort: level, thinkingEnabled: true })
+  }, [])
+
+  if (!supportsThinking) return null
+
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button className="inline-flex items-center justify-center h-8 w-7 rounded-r-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/30">
+              <Settings2 className="size-3" />
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{t('topbar.modelSettings')}</TooltipContent>
+      </Tooltip>
+      <PopoverContent className="w-56 p-2" align="start" side="top" sideOffset={8}>
+        <div className="flex flex-col gap-1">
+          {/* Section title */}
+          <div className="flex items-center gap-1.5 px-1 pb-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
+            <Brain className="size-3" />
+            {t('topbar.deepThinking')}
+          </div>
+
+          {levels && levels.length > 0 ? (
+            <>
+              {/* Off option */}
+              <button
+                type="button"
+                className={cn(
+                  'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors text-left',
+                  !thinkingEnabled
+                    ? 'bg-accent text-accent-foreground'
+                    : 'hover:bg-muted/60 text-foreground/80'
+                )}
+                onClick={() => useSettingsStore.getState().updateSettings({ thinkingEnabled: false })}
+              >
+                <span className="font-medium">{tChat('input.thinkingOff')}</span>
+              </button>
+              {/* Effort levels */}
+              {levels.map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  className={cn(
+                    'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors text-left',
+                    thinkingEnabled && reasoningEffort === level
+                      ? 'bg-violet-500/15 text-violet-600 dark:text-violet-400'
+                      : 'hover:bg-muted/60 text-foreground/80'
+                  )}
+                  onClick={() => setEffort(level)}
+                >
+                  <span className="font-medium uppercase">{level}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {tChat(`input.effortDesc.${level}`)}
+                  </span>
+                </button>
+              ))}
+            </>
+          ) : (
+            /* Simple toggle */
+            <button
+              type="button"
+              className={cn(
+                'flex items-center justify-between rounded-md px-2.5 py-2 text-xs transition-colors',
+                thinkingEnabled
+                  ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                  : 'hover:bg-muted/60 text-foreground/80'
+              )}
+              onClick={toggleThinking}
+            >
+              <span className="font-medium">
+                {thinkingEnabled ? tChat('input.disableThinking') : tChat('input.enableThinking')}
+              </span>
+              <span
+                className={cn(
+                  'size-4 rounded-full border-2 transition-colors',
+                  thinkingEnabled
+                    ? 'bg-violet-500 border-violet-500'
+                    : 'border-muted-foreground/30'
+                )}
+              />
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export function ModelSwitcher(): React.JSX.Element {
   const { t } = useTranslation('layout')
+  const { t: tChat } = useTranslation('chat')
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
   const activeProviderId = useProviderStore((s) => s.activeProviderId)
   const activeModelId = useProviderStore((s) => s.activeModelId)
   const providers = useProviderStore((s) => s.providers)
@@ -21,77 +217,119 @@ export function ModelSwitcher(): React.JSX.Element {
 
   const enabledProviders = providers.filter((p) => p.enabled)
   const activeProvider = providers.find((p) => p.id === activeProviderId)
-  const shortName = (activeModelId.split('/').pop()?.replace(/-\d{8}$/, '') ?? activeModelId) || t('topbar.noModel')
+  const activeModel = activeProvider?.models.find((m) => m.id === activeModelId)
+
+  useEffect(() => {
+    if (open) {
+      setSearch('')
+      setTimeout(() => searchRef.current?.focus(), 50)
+    }
+  }, [open])
+
+  const groups = useMemo<ProviderGroup[]>(() => {
+    const q = search.toLowerCase().trim()
+    return enabledProviders
+      .map((provider) => {
+        const models = provider.models.filter((m) => {
+          if (!m.enabled) return false
+          if (!q) return true
+          const name = (m.name || m.id).toLowerCase()
+          return name.includes(q) || provider.name.toLowerCase().includes(q)
+        })
+        return { provider, models }
+      })
+      .filter((g) => g.models.length > 0)
+  }, [enabledProviders, search])
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          className="inline-flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors truncate max-w-[200px] rounded px-1.5 py-0.5 hover:bg-muted/40"
-          title={`${activeModelId || t('topbar.noModel')} (${t('topbar.clickToSwitch')})`}
-        >
-          <ModelIcon icon={activeProvider?.models.find((m) => m.id === activeModelId)?.icon} modelId={activeModelId} providerBuiltinId={activeProvider?.builtinId} size={14} />
-          {shortName}
-          {hasCustomPrompt && <span className="size-1.5 rounded-full bg-violet-400/60 shrink-0" title={t('topbar.customPromptActive')} />}
-          <ChevronDown className="size-2.5 shrink-0 opacity-50" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-56 p-1 max-h-80 overflow-y-auto" align="start">
-        {enabledProviders.length === 0 ? (
-          <div className="px-2 py-1.5 text-xs text-muted-foreground">{t('topbar.noProviders')}</div>
-        ) : (
-          enabledProviders.map((provider) => {
-            const models = provider.models.filter((m) => m.enabled)
-            return (
-              <div key={provider.id}>
-                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/50 px-2 py-1 uppercase tracking-wider">
-                  <ProviderIcon builtinId={provider.builtinId} size={12} />
-                  {provider.name}
-                </div>
-                {models.length === 0 ? (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground/40">{t('topbar.noModels')}</div>
-                ) : (
-                  models.map((m) => {
+    <div className="inline-flex items-center h-8 rounded-lg border border-transparent hover:border-border/50 hover:bg-muted/30 transition-colors">
+      {/* Model icon trigger — opens model list */}
+      <Popover open={open} onOpenChange={setOpen}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <PopoverTrigger asChild>
+              <button
+                className="inline-flex items-center gap-1 h-8 rounded-l-lg px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                <ModelIcon
+                  icon={activeModel?.icon}
+                  modelId={activeModelId}
+                  providerBuiltinId={activeProvider?.builtinId}
+                  size={20}
+                />
+                {hasCustomPrompt && (
+                  <span className="size-1.5 rounded-full bg-violet-400 shrink-0" />
+                )}
+                <ChevronDown className="size-2.5 opacity-40" />
+              </button>
+            </PopoverTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            {activeModel?.name || activeModelId || t('topbar.noModel')}
+          </TooltipContent>
+        </Tooltip>
+        <PopoverContent className="w-80 p-0 overflow-hidden" align="start" sideOffset={8}>
+          <div className="flex items-center gap-2 border-b px-3 py-2">
+            <Search className="size-3.5 text-muted-foreground/60 shrink-0" />
+            <input
+              ref={searchRef}
+              type="text"
+              className="flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/40"
+              placeholder={t('topbar.searchModel')}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <div className="max-h-[360px] overflow-y-auto p-1">
+            {groups.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground/50">
+                {enabledProviders.length === 0 ? t('topbar.noProviders') : t('topbar.noModels')}
+              </div>
+            ) : (
+              groups.map(({ provider, models }) => (
+                <div key={provider.id} className="mb-1 last:mb-0">
+                  <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">
+                    <ProviderIcon builtinId={provider.builtinId} size={14} />
+                    {provider.name}
+                  </div>
+                  {models.map((m) => {
                     const isActive = provider.id === activeProviderId && m.id === activeModelId
                     return (
                       <button
                         key={`${provider.id}-${m.id}`}
                         className={cn(
-                          'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60 transition-colors',
-                          isActive && 'bg-muted/40 font-medium'
+                          'flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left hover:bg-muted/60 transition-colors group',
+                          isActive && 'bg-primary/5'
                         )}
-                        onClick={() => {
-                          const newProviderId = provider.id
-                          if (newProviderId !== activeProviderId) {
-                            setActiveProvider(newProviderId)
-                          }
-                          setActiveModel(m.id)
-                          // Bind model selection to the current session
-                          const sessionId = useChatStore.getState().activeSessionId
-                          if (sessionId) {
-                            useChatStore.getState().updateSessionModel(sessionId, newProviderId, m.id)
-                            const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
-                            if (session?.pluginId) {
-                              void usePluginStore.getState().updatePlugin(session.pluginId, {
-                                providerId: newProviderId,
-                                model: m.id,
-                              })
-                            }
-                          }
-                          setOpen(false)
-                        }}
+                        onClick={() => selectModel(provider, m.id, activeProviderId, setActiveProvider, setActiveModel, setOpen)}
                       >
-                        {isActive ? <Check className="size-3 text-primary" /> : <ModelIcon icon={m.icon} modelId={m.id} providerBuiltinId={provider.builtinId} size={12} className="opacity-60" />}
-                        <span className="truncate">{m.name || m.id.replace(/-\d{8}$/, '')}</span>
+                        <span className="mt-0.5 shrink-0">
+                          {isActive ? (
+                            <span className="flex size-5 items-center justify-center rounded-full bg-primary/10">
+                              <Check className="size-3 text-primary" />
+                            </span>
+                          ) : (
+                            <ModelIcon icon={m.icon} modelId={m.id} providerBuiltinId={provider.builtinId} size={20} />
+                          )}
+                        </span>
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className={cn('truncate text-xs', isActive ? 'font-semibold text-primary' : 'text-foreground/80 group-hover:text-foreground')}>
+                            {m.name || m.id.replace(/-\d{8}$/, '')}
+                          </span>
+                          <ModelCapabilityTags model={m} t={t} />
+                        </div>
                       </button>
                     )
-                  })
-                )}
-              </div>
-            )
-          })
-        )}
-      </PopoverContent>
-    </Popover>
+                  })}
+                </div>
+              ))
+            )}
+          </div>
+        </PopoverContent>
+      </Popover>
+
+      {/* Settings icon — model config popover */}
+      <ModelSettingsPopover model={activeModel} t={t} tChat={tChat} />
+    </div>
   )
 }

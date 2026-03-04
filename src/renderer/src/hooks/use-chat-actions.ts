@@ -828,6 +828,12 @@ export function useChatActions(): {
         finalEffectiveToolDefs = finalEffectiveToolDefs.filter((t) => PLAN_MODE_ALLOWED_TOOLS.has(t.name))
       }
 
+      // Image models: disable all tools (image generation doesn't use tools)
+      const activeModelConfig = useProviderStore.getState().getActiveModelConfig()
+      if (activeModelConfig?.category === 'image') {
+        finalEffectiveToolDefs = []
+      }
+
       // Build plugin info for system prompt — inject plugin metadata + per-plugin system prompts
       let userPrompt = settings.systemPrompt || ''
       if (activePlugins.length > 0) {
@@ -1213,6 +1219,12 @@ export function useChatActions(): {
           }
         }
 
+        // Check if this is an image model - if so, set generating image state
+        const activeModelConfig = useProviderStore.getState().getActiveModelConfig()
+        if (activeModelConfig?.category === 'image') {
+          useChatStore.getState().setGeneratingImage(assistantMsgId, true)
+        }
+
         for await (const event of loop) {
           if (abortController.signal.aborted) break
 
@@ -1263,6 +1275,21 @@ export function useChatActions(): {
                 }
               }
               streamDeltaBuffer.pushText(event.text)
+              break
+
+            case 'image_generated':
+              // Flush any pending text before adding image
+              streamDeltaBuffer.flushNow()
+              if (!thinkingDone) {
+                thinkingDone = true
+                useChatStore.getState().completeThinking(sessionId!, assistantMsgId)
+              }
+              // Add image block to assistant message
+              if (event.imageBlock) {
+                useChatStore.getState().appendContentBlock(sessionId!, assistantMsgId, event.imageBlock)
+              }
+              // Clear generating state after first image
+              useChatStore.getState().setGeneratingImage(assistantMsgId, false)
               break
 
             case 'tool_use_streaming_start':
@@ -1436,6 +1463,8 @@ export function useChatActions(): {
         streamDeltaBuffer?.flushNow()
         streamDeltaBuffer?.dispose()
         disposeToolInputQueues()
+        // Clear image generating state
+        useChatStore.getState().setGeneratingImage(assistantMsgId, false)
         // Defensive cleanup: if provider stream ended without completing a tool call,
         // avoid leaving tool cards stuck at "receiving args".
         const { executedToolCalls, pendingToolCalls, updateToolCall } = useAgentStore.getState()
@@ -1724,7 +1753,8 @@ export function sendImplementPlan(planId: string): void {
   const plan = usePlanStore.getState().plans[planId]
   if (!plan) return
 
-  // 1. Mark plan as implementing
+  // 1. Approve + mark plan as implementing
+  usePlanStore.getState().approvePlan(planId)
   usePlanStore.getState().startImplementing(planId)
 
   // 2. Exit plan mode
@@ -1733,14 +1763,14 @@ export function sendImplementPlan(planId: string): void {
   // 3. Switch to Steps tab
   useUIStore.getState().setRightPanelTab('steps')
 
-  // 4. Build implementation prompt and send directly
+  // 4. Send implementation trigger prompt
   const summary = formatPlanSummaryForPrompt(plan)
   const prompt = [
-    `Please implement the plan: **${plan.title}**`,
+    `Execute the plan: **${plan.title}**`,
     '',
     summary ? `Plan summary:\n${summary}` : '',
     '',
-    'Use the plan details provided earlier in the chat. Begin implementation step by step.',
+    'The plan has been approved. Implement it step by step following the plan details provided earlier in the chat.',
   ].filter(Boolean).join('\n')
 
   _sendMessageFn(prompt)

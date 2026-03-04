@@ -32,7 +32,7 @@ import { PluginPanel } from './PluginPanel'
 import { McpPanel } from './McpPanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { SkillsMarketPanel } from './SkillsMarketPanel'
-import { ModelIcon } from './provider-icons'
+import { ModelIcon, ProviderIcon } from './provider-icons'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { readTextFile, resolveGlobalMemoryPath } from '@renderer/lib/agent/memory-files'
@@ -835,6 +835,7 @@ function ModelPanel(): React.JSX.Element {
   const activeProviderId = useProviderStore((s) => s.activeProviderId)
   const activeModelId = useProviderStore((s) => s.activeModelId)
   const activeFastModelId = useProviderStore((s) => s.activeFastModelId)
+  const activeFastProviderId = useProviderStore((s) => s.activeFastProviderId)
   const activeTranslationProviderId = useProviderStore((s) => s.activeTranslationProviderId)
   const activeTranslationModelId = useProviderStore((s) => s.activeTranslationModelId)
   const activeSpeechProviderId = useProviderStore((s) => s.activeSpeechProviderId)
@@ -842,6 +843,7 @@ function ModelPanel(): React.JSX.Element {
   const setActiveProvider = useProviderStore((s) => s.setActiveProvider)
   const setActiveModel = useProviderStore((s) => s.setActiveModel)
   const setActiveFastModel = useProviderStore((s) => s.setActiveFastModel)
+  const setActiveFastProvider = useProviderStore((s) => s.setActiveFastProvider)
   const setActiveTranslationProvider = useProviderStore((s) => s.setActiveTranslationProvider)
   const setActiveTranslationModel = useProviderStore((s) => s.setActiveTranslationModel)
   const setActiveSpeechProvider = useProviderStore((s) => s.setActiveSpeechProvider)
@@ -849,7 +851,8 @@ function ModelPanel(): React.JSX.Element {
 
   const enabledProviders = providers.filter((p) => p.enabled)
   const activeProvider = providers.find((p) => p.id === activeProviderId) ?? null
-  const activeProviderEnabledModels = activeProvider?.models.filter((m) => m.enabled) ?? []
+  const fastProvider = providers.find((p) => p.id === (activeFastProviderId ?? activeProviderId)) ?? activeProvider
+  const fastProviderEnabledModels = fastProvider?.models.filter((m) => m.enabled && (!m.category || m.category === 'chat')) ?? []
 
   const providerModelGroups = enabledProviders
     .map((provider) => ({
@@ -869,10 +872,9 @@ function ModelPanel(): React.JSX.Element {
   const activeModelValue = activeProvider && activeModelId
     ? buildModelValue(activeProvider.id, activeModelId)
     : ''
-  const translationProvider = providers.find((p) => p.id === activeTranslationProviderId)
-  const activeTranslationModelValue = translationProvider && activeTranslationModelId
-    ? buildModelValue(translationProvider.id, activeTranslationModelId)
-    : activeModelValue
+  const translationProvider =
+    providers.find((p) => p.id === (activeTranslationProviderId ?? activeProviderId)) ?? activeProvider
+  const translationProviderEnabledModels = translationProvider?.models.filter((m) => m.enabled && (!m.category || m.category === 'chat')) ?? []
   const speechProvider = providers.find((p) => p.id === activeSpeechProviderId)
   const activeSpeechModelValue = speechProvider && activeSpeechModelId
     ? buildModelValue(speechProvider.id, activeSpeechModelId)
@@ -974,34 +976,65 @@ function ModelPanel(): React.JSX.Element {
                 {t('model.fastModelDesc')}
               </p>
             </div>
-            {activeProviderEnabledModels.length > 0 ? (
-              <Select
-                value={activeFastModelId || activeProviderEnabledModels[0]?.id || ''}
-                onValueChange={(v) => setActiveFastModel(v)}
-              >
-                <SelectTrigger className="w-80 text-xs">
-                  <SelectValue placeholder={t('model.selectFastModel')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {activeProviderEnabledModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id} className="text-xs">
-                      <div className="flex items-center gap-2">
-                        <ModelIcon
-                          icon={m.icon}
-                          modelId={m.id}
-                          providerBuiltinId={activeProvider?.builtinId}
-                          size={16}
-                          className="text-muted-foreground/70"
-                        />
-                        <span>{m.name}</span>
-                        <span className="ml-auto text-[10px] text-muted-foreground/60">{m.id}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            {providerModelGroups.length > 0 ? (
+              <div className="space-y-2">
+                <Select
+                  value={fastProvider?.id ?? ''}
+                  onValueChange={(value) => setActiveFastProvider(value)}
+                >
+                  <SelectTrigger className="w-80 text-xs">
+                    <SelectValue placeholder={t('model.selectProvider')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providerModelGroups.map(({ provider }) => (
+                      <SelectItem key={provider.id} value={provider.id} className="text-xs">
+                        <span className="flex items-center gap-2">
+                          <ProviderIcon builtinId={provider.builtinId} size={14} />
+                          {provider.name}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {fastProviderEnabledModels.length > 0 ? (
+                  <Select
+                    value={activeFastModelId || fastProviderEnabledModels[0]?.id || ''}
+                    onValueChange={(v) => setActiveFastModel(v)}
+                  >
+                    <SelectTrigger className="w-80 text-xs">
+                      <SelectValue placeholder={t('model.selectFastModel')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {fastProviderEnabledModels.map((m) => (
+                        <SelectItem key={m.id} value={m.id} className="text-xs">
+                          <div className="flex items-center gap-2">
+                            <ModelIcon
+                              icon={m.icon}
+                              modelId={m.id}
+                              providerBuiltinId={fastProvider?.builtinId}
+                              size={16}
+                              className="text-muted-foreground/70"
+                            />
+                            <div className="flex flex-col">
+                              <span>{m.name}</span>
+                              <span className="text-[10px] text-muted-foreground/60">{m.id}</span>
+                            </div>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p className="text-xs text-muted-foreground/60">
+                    {t('model.noModelsHint')}
+                  </p>
+                )}
+              </div>
             ) : (
-              <p className="text-xs text-muted-foreground/60">{t('model.noModelsAvailable')}</p>
+              <p className="text-xs text-muted-foreground/60">
+                {t('model.noModelsHint')}
+              </p>
             )}
           </section>
 
@@ -1011,36 +1044,43 @@ function ModelPanel(): React.JSX.Element {
               <label className="text-sm font-medium">{t('model.translationModel')}</label>
               <p className="text-xs text-muted-foreground">{t('model.translationModelDesc')}</p>
             </div>
-            {hasAnyEnabledModel ? (
-              <Select
-                value={activeTranslationModelValue}
-                onValueChange={(value) => {
-                  const parsed = parseModelValue(value)
-                  if (!parsed) return
-                  setActiveTranslationProvider(parsed.providerId)
-                  setActiveTranslationModel(parsed.modelId)
-                }}
-              >
-                <SelectTrigger className="w-80 text-xs">
-                  <SelectValue placeholder={t('model.selectTranslationModel')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {providerModelGroups.map(({ provider, models }) => (
-                    <SelectGroup key={`${provider.id}-translation`}>
-                      <SelectLabel className="text-[10px] uppercase tracking-wide">
-                        {provider.name}
-                      </SelectLabel>
-                      {models.map((m) => (
-                        <SelectItem
-                          key={`${provider.id}-translation-${m.id}`}
-                          value={buildModelValue(provider.id, m.id)}
-                          className="text-xs"
-                        >
+            {providerModelGroups.length > 0 ? (
+              <div className="space-y-2">
+                <Select
+                  value={translationProvider?.id ?? ''}
+                  onValueChange={(value) => setActiveTranslationProvider(value)}
+                >
+                  <SelectTrigger className="w-80 text-xs">
+                    <SelectValue placeholder={t('model.selectProvider')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providerModelGroups.map(({ provider }) => (
+                      <SelectItem key={`${provider.id}-translation-provider`} value={provider.id} className="text-xs">
+                        <span className="flex items-center gap-2">
+                          <ProviderIcon builtinId={provider.builtinId} size={14} />
+                          {provider.name}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {translationProviderEnabledModels.length > 0 ? (
+                  <Select
+                    value={activeTranslationModelId || translationProviderEnabledModels[0]?.id || ''}
+                    onValueChange={(value) => setActiveTranslationModel(value)}
+                  >
+                    <SelectTrigger className="w-80 text-xs">
+                      <SelectValue placeholder={t('model.selectTranslationModel')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {translationProviderEnabledModels.map((m) => (
+                        <SelectItem key={`translation-model-${m.id}`} value={m.id} className="text-xs">
                           <div className="flex items-center gap-2">
                             <ModelIcon
                               icon={m.icon}
                               modelId={m.id}
-                              providerBuiltinId={provider.builtinId}
+                              providerBuiltinId={translationProvider?.builtinId}
                               size={16}
                               className="text-muted-foreground/70"
                             />
@@ -1051,10 +1091,12 @@ function ModelPanel(): React.JSX.Element {
                           </div>
                         </SelectItem>
                       ))}
-                    </SelectGroup>
-                  ))}
-                </SelectContent>
-              </Select>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
+                )}
+              </div>
             ) : (
               <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
             )}

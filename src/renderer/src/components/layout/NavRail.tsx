@@ -52,7 +52,7 @@ export function NavRail(): React.JSX.Element {
   }
 
   return (
-    <div className="flex h-full w-16 shrink-0 flex-col items-center border-r bg-muted/30 py-2">
+    <div className="flex h-full w-12 shrink-0 flex-col items-center border-r bg-muted/30 py-2">
       {/* Top nav items */}
       <div className="flex flex-col items-center gap-1">
         {navItems.map((item) => (

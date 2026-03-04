@@ -113,6 +113,7 @@
     "noSummary": "No summary saved yet.",
     "noContent": "No plan content saved yet.",
     "implement": "Implement",
+    "confirmExecute": "Confirm Execute",
     "approve": "Approve",
     "reject": "Reject",
     "rejectTitle": "Reject Plan",

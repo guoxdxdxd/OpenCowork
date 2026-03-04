@@ -83,6 +83,12 @@
     "closeTab": "Close",
     "search": "Search",
     "clear": "Clear",
+    "copy": "Copy",
+    "paste": "Paste",
+    "selectAll": "Select All",
+    "copied": "Copied to clipboard",
+    "copyFailed": "Failed to copy",
+    "pasteFailed": "Failed to paste",
     "disconnectedMessage": "SSH session disconnected",
     "errorMessage": "Connection error"
   },

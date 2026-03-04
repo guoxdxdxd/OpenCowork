@@ -36,6 +36,11 @@ export async function* runAgentLoop(
 ): AsyncGenerator<AgentEvent> {
   yield { type: 'loop_start' }
 
+  console.log('[Agent Loop] Creating provider with config:', {
+    type: config.provider.type,
+    model: config.provider.model,
+    baseUrl: config.provider.baseUrl
+  })
   const provider = createProvider(config.provider)
   let conversationMessages = [...messages]
   let iteration = 0
@@ -142,6 +147,14 @@ export async function* runAgentLoop(
               yield { type: 'text_delta', text: event.text! }
               // Accumulate text into content blocks
               appendTextToBlocks(assistantContentBlocks, event.text!)
+              break
+
+            case 'image_generated':
+              streamedContent = true
+              if (event.imageBlock) {
+                assistantContentBlocks.push(event.imageBlock)
+                yield { type: 'image_generated', imageBlock: event.imageBlock }
+              }
               break
 
             case 'tool_call_start':
