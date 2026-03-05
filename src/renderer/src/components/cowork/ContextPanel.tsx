@@ -22,9 +22,17 @@ export function ContextPanel(): React.JSX.Element {
   const [focusPrompt, setFocusPrompt] = useState('')
   const { manualCompressContext } = useChatActions()
   const sessions = useChatStore((s) => s.sessions)
+  const projects = useChatStore((s) => s.projects)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const ensureDefaultProject = useChatStore((s) => s.ensureDefaultProject)
+  const updateProjectDirectory = useChatStore((s) => s.updateProjectDirectory)
   const activeSession = sessions.find((s) => s.id === activeSessionId)
-  const workingFolder = activeSession?.workingFolder
+  const resolvedProjectId = activeSession?.projectId ?? activeProjectId ?? null
+  const activeProject = resolvedProjectId
+    ? projects.find((project) => project.id === resolvedProjectId)
+    : undefined
+  const workingFolder = activeProject?.workingFolder
   const backgroundProcesses = useAgentStore((s) => s.backgroundProcesses)
   const stopBackgroundProcess = useAgentStore((s) => s.stopBackgroundProcess)
   const openDetailPanel = useUIStore((s) => s.openDetailPanel)
@@ -46,9 +54,19 @@ export function ContextPanel(): React.JSX.Element {
       canceled?: boolean
       path?: string
     }
-    if (!result.canceled && result.path && activeSessionId) {
-      useChatStore.getState().setWorkingFolder(activeSessionId, result.path)
+    if (result.canceled || !result.path) return
+
+    let projectId = resolvedProjectId
+    if (!projectId) {
+      const ensured = await ensureDefaultProject()
+      projectId = ensured?.id ?? null
     }
+    if (!projectId) return
+
+    updateProjectDirectory(projectId, {
+      workingFolder: result.path,
+      sshConnectionId: null,
+    })
   }
 
   return (

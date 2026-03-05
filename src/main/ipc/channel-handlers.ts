@@ -7,6 +7,7 @@ import { nanoid } from 'nanoid'
 import { ChannelManager } from '../channels/channel-manager'
 import { CHANNEL_PROVIDERS } from '../channels/channel-descriptors'
 import { getDb } from '../db/database'
+import * as projectsDao from '../db/projects-dao'
 import { handleChannelAutoReply } from '../channels/auto-reply'
 import type { ChannelInstance, ChannelEvent, ChannelProviderDescriptor } from '../channels/channel-types'
 
@@ -227,6 +228,7 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
         }
         db.prepare('DELETE FROM sessions WHERE plugin_id = ?').run(id)
       }
+      db.prepare('DELETE FROM projects WHERE plugin_id = ?').run(id)
     } catch (err) {
       console.error('[Channels] Failed to cascade-delete sessions:', err)
     }
@@ -320,10 +322,22 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
       }
     ) => {
       const db = getDb()
+      const project = projectsDao.ensurePluginProject(args.pluginId, `Plugin ${args.pluginId}`)
       db.prepare(
-        `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, working_folder, pinned, plugin_id, external_chat_id)
-         VALUES (?, ?, NULL, ?, ?, ?, NULL, 0, ?, ?)`
-      ).run(args.id, args.title, args.mode, args.createdAt, args.updatedAt, args.pluginId, args.externalChatId ?? null)
+        `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, project_id, working_folder, ssh_connection_id, pinned, plugin_id, external_chat_id)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+      ).run(
+        args.id,
+        args.title,
+        args.mode,
+        args.createdAt,
+        args.updatedAt,
+        project.id,
+        project.working_folder,
+        project.ssh_connection_id,
+        args.pluginId,
+        args.externalChatId ?? null
+      )
       return { success: true }
     }
   )

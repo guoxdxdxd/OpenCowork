@@ -50,6 +50,9 @@ interface PluginAutoReplyTask {
   content: string
   messageId: string
   supportsStreaming: boolean
+  projectId?: string
+  workingFolder?: string
+  sshConnectionId?: string | null
   images?: Array<{ base64: string; mediaType: string }>
   audio?: { fileKey: string; fileName?: string; mediaType?: string; durationMs?: number }
 }
@@ -201,30 +204,81 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   // Instead of calling loadFromDb() (which reloads ALL sessions and can hang),
   // check if it exists and create it in the store if missing.
   // workingFolder is passed directly from main process in the task payload
-  const channelWorkDir: string = (task as { workingFolder?: string }).workingFolder ?? ''
+  const channelWorkDir = task.workingFolder ?? ''
+  const channelProjectId = task.projectId
+  const channelSshConnectionId = task.sshConnectionId ?? undefined
 
   const resolvedTitle = task.sessionTitle || task.chatName || task.senderName || task.chatId
+
+  if (channelProjectId) {
+    try {
+      const existingProject = useChatStore.getState().projects.find((project) => project.id === channelProjectId)
+      if (!existingProject) {
+        const row = await ipcClient.invoke('db:projects:get', channelProjectId) as {
+          id: string
+          name: string
+          created_at: number
+          updated_at: number
+          working_folder?: string | null
+          ssh_connection_id?: string | null
+          plugin_id?: string | null
+        } | null
+        if (row) {
+          useChatStore.setState((state) => {
+            const projectExists = state.projects.some((project) => project.id === row.id)
+            if (!projectExists) {
+              state.projects.unshift({
+                id: row.id,
+                name: row.name,
+                createdAt: row.created_at,
+                updatedAt: row.updated_at,
+                workingFolder: row.working_folder ?? undefined,
+                sshConnectionId: row.ssh_connection_id ?? undefined,
+                pluginId: row.plugin_id ?? undefined,
+              })
+            }
+          })
+        }
+      }
+    } catch (err) {
+      console.warn('[PluginAutoReply] Failed to upsert project from DB:', err)
+    }
+  }
 
   let session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
   if (!session) {
     try {
-      const row = await ipcClient.invoke('db:sessions:get', sessionId)
-      if (row) {
-        const r = row as { title?: string; working_folder?: string; provider_id?: string; model_id?: string }
+      const row = (await ipcClient.invoke('db:sessions:get', sessionId)) as {
+        session?: {
+          title?: string
+          mode?: string
+          created_at?: number
+          updated_at?: number
+          project_id?: string | null
+          working_folder?: string | null
+          ssh_connection_id?: string | null
+          provider_id?: string | null
+          model_id?: string | null
+        }
+      } | null
+      const dbSession = row?.session
+      if (dbSession) {
         const newSession = {
           id: sessionId,
-          title: r.title || resolvedTitle,
-          mode: 'cowork' as const,
+          title: dbSession.title || resolvedTitle,
+          mode: (dbSession.mode as 'chat' | 'cowork' | 'code') || 'cowork',
           messages: [],
           messageCount: 0,
           messagesLoaded: true,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          workingFolder: r.working_folder || channelWorkDir,
+          createdAt: dbSession.created_at ?? Date.now(),
+          updatedAt: dbSession.updated_at ?? Date.now(),
+          projectId: dbSession.project_id ?? channelProjectId,
+          workingFolder: dbSession.working_folder || channelWorkDir,
+          sshConnectionId: dbSession.ssh_connection_id ?? channelSshConnectionId,
           pluginId,
           externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
-          providerId: r.provider_id || channelMeta?.providerId || undefined,
-          modelId: r.model_id || channelMeta?.model || undefined,
+          providerId: dbSession.provider_id || channelMeta?.providerId || undefined,
+          modelId: dbSession.model_id || channelMeta?.model || undefined,
         }
         useChatStore.setState((state) => {
           state.sessions.push(newSession)
@@ -246,7 +300,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       messagesLoaded: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      projectId: channelProjectId,
       workingFolder: channelWorkDir,
+      sshConnectionId: channelSshConnectionId,
       pluginId,
       externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
       providerId: channelMeta?.providerId || undefined,
@@ -265,9 +321,26 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         s.pluginChatType = task.chatType
         s.pluginSenderId = task.senderId
         s.pluginSenderName = task.senderName
+        if (channelProjectId) {
+          s.projectId = channelProjectId
+        }
+        if (channelWorkDir) {
+          s.workingFolder = channelWorkDir
+        }
+        if (channelSshConnectionId !== undefined) {
+          s.sshConnectionId = channelSshConnectionId
+        }
       }
     })
-    session = { ...session, pluginChatType: task.chatType, pluginSenderId: task.senderId, pluginSenderName: task.senderName }
+    session = {
+      ...session,
+      pluginChatType: task.chatType,
+      pluginSenderId: task.senderId,
+      pluginSenderName: task.senderName,
+      projectId: channelProjectId ?? session.projectId,
+      workingFolder: channelWorkDir || session.workingFolder,
+      sshConnectionId: channelSshConnectionId ?? session.sshConnectionId,
+    }
   }
 
   // Update session title in store if we have a better name now

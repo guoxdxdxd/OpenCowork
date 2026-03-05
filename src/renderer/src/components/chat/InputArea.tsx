@@ -218,6 +218,10 @@ const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/web
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20 MB
 const INPUT_HISTORY_LIMIT = 30
 const PENDING_HISTORY_KEY = '__pending_session__'
+const MIN_INPUT_HEIGHT = 120
+const MAX_INPUT_HEIGHT = 500
+const MIN_MESSAGE_LIST_HEIGHT = 120
+const FALLBACK_MAX_VIEWPORT_RATIO = 0.6
 
 function areQueuedMessagesEqual(
   left: PendingSessionMessageItem[],
@@ -295,15 +299,43 @@ export function InputArea({
   const contentScrollRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
+  const rootRef = React.useRef<HTMLDivElement>(null)
   const [inputHeight, setInputHeight] = React.useState<number | null>(null)
-  const dragRef = React.useRef<{ startY: number; startH: number } | null>(null)
+  const dragRef = React.useRef<{ startY: number; startH: number; maxH: number } | null>(null)
   const containerRef = React.useRef<HTMLDivElement>(null)
+
+  const getMaxInputHeight = React.useCallback(() => {
+    const container = containerRef.current
+    if (!container) {
+      return Math.max(
+        MIN_INPUT_HEIGHT,
+        Math.min(MAX_INPUT_HEIGHT, Math.floor(window.innerHeight * FALLBACK_MAX_VIEWPORT_RATIO))
+      )
+    }
+    const root = rootRef.current
+    const messageListEl = root?.parentElement?.querySelector('[data-message-list]') as
+      | HTMLElement
+      | null
+    if (messageListEl) {
+      const messageListHeight = messageListEl.getBoundingClientRect().height
+      const available = Math.max(0, messageListHeight - MIN_MESSAGE_LIST_HEIGHT)
+      const dynamicMax = container.offsetHeight + available
+      return Math.max(MIN_INPUT_HEIGHT, Math.min(MAX_INPUT_HEIGHT, Math.floor(dynamicMax)))
+    }
+    return Math.max(
+      MIN_INPUT_HEIGHT,
+      Math.min(MAX_INPUT_HEIGHT, Math.floor(window.innerHeight * FALLBACK_MAX_VIEWPORT_RATIO))
+    )
+  }, [])
 
   React.useEffect(() => {
     const onMouseMove = (e: MouseEvent): void => {
       if (!dragRef.current) return
       const delta = dragRef.current.startY - e.clientY
-      const newH = Math.min(500, Math.max(120, dragRef.current.startH + delta))
+      const newH = Math.min(
+        dragRef.current.maxH,
+        Math.max(MIN_INPUT_HEIGHT, dragRef.current.startH + delta)
+      )
       setInputHeight(newH)
     }
     const onMouseUp = (): void => {
@@ -321,13 +353,26 @@ export function InputArea({
     }
   }, [])
 
+  React.useEffect(() => {
+    if (inputHeight === null) return
+    const handleResize = (): void => {
+      const maxH = getMaxInputHeight()
+      setInputHeight((prev) => {
+        if (prev === null) return prev
+        return Math.min(prev, maxH)
+      })
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [inputHeight, getMaxInputHeight])
+
   const handleDragStart = React.useCallback((e: React.MouseEvent) => {
     const el = containerRef.current
     if (!el) return
-    dragRef.current = { startY: e.clientY, startH: el.offsetHeight }
+    dragRef.current = { startY: e.clientY, startH: el.offsetHeight, maxH: getMaxInputHeight() }
     document.body.style.cursor = 'row-resize'
     document.body.style.userSelect = 'none'
-  }, [])
+  }, [getMaxInputHeight])
   const [sentHistory, setSentHistory] = React.useState<InputHistoryEntry[]>([])
   const [historyCursor, setHistoryCursor] = React.useState<number | null>(null)
   const historyDraftRef = React.useRef<InputHistoryDraft | null>(null)
@@ -882,7 +927,7 @@ export function InputArea({
   }, [])
 
   return (
-    <div className="px-4 py-3 pb-4">
+    <div ref={rootRef} className="px-4 py-3 pb-4">
       {/* API key warning */}
       {!hasApiKey && (
         <button

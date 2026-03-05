@@ -111,6 +111,10 @@
     "addTypes": "添加类型",
     "sessionsGroup": "会话"
   },
+  "sectionExecution": "执行",
+  "sectionResources": "资源",
+  "sectionCollaboration": "协作",
+  "sectionMonitoring": "监控",
   "rightPanel": {
     "steps": "步骤",
     "plan": "计划",

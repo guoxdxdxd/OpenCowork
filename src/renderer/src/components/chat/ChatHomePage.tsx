@@ -44,8 +44,16 @@ export function ChatHomePage(): React.JSX.Element {
   const { t: tCommon } = useTranslation('common')
   const mode = useUIStore((s) => s.mode)
   const setMode = useUIStore((s) => s.setMode)
-  const [workingFolder, setWorkingFolder] = useState<string | undefined>()
-  const [sshConnectionId, setSshConnectionId] = useState<string | undefined>()
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const projects = useChatStore((s) => s.projects)
+  const ensureDefaultProject = useChatStore((s) => s.ensureDefaultProject)
+  const updateProjectDirectory = useChatStore((s) => s.updateProjectDirectory)
+  const activeProject =
+    projects.find((project) => project.id === activeProjectId)
+    ?? projects.find((project) => !project.pluginId)
+    ?? projects[0]
+  const workingFolder = activeProject?.workingFolder
+  const sshConnectionId = activeProject?.sshConnectionId
   const [folderDialogOpen, setFolderDialogOpen] = useState(false)
   const [desktopDirectories, setDesktopDirectories] = useState<DesktopDirectoryOption[]>([])
   const [desktopDirectoriesLoading, setDesktopDirectoriesLoading] = useState(false)
@@ -98,6 +106,12 @@ export function ChatHomePage(): React.JSX.Element {
     }
   }, [folderDialogOpen])
 
+  const resolveActiveProjectId = async (): Promise<string | null> => {
+    if (activeProject?.id) return activeProject.id
+    const project = await ensureDefaultProject()
+    return project?.id ?? null
+  }
+
   const handleOpenFolderDialog = (): void => {
     setFolderDialogOpen(true)
     void loadDesktopDirectories()
@@ -105,8 +119,14 @@ export function ChatHomePage(): React.JSX.Element {
   }
 
   const handleSelectDesktopFolder = (folderPath: string): void => {
-    setWorkingFolder(folderPath)
-    setSshConnectionId(undefined)
+    void (async () => {
+      const projectId = await resolveActiveProjectId()
+      if (!projectId) return
+      updateProjectDirectory(projectId, {
+        workingFolder: folderPath,
+        sshConnectionId: null,
+      })
+    })()
     setFolderDialogOpen(false)
   }
 
@@ -116,8 +136,12 @@ export function ChatHomePage(): React.JSX.Element {
       path?: string
     }
     if (!result.canceled && result.path) {
-      setWorkingFolder(result.path)
-      setSshConnectionId(undefined)
+      const projectId = await resolveActiveProjectId()
+      if (!projectId) return
+      updateProjectDirectory(projectId, {
+        workingFolder: result.path,
+        sshConnectionId: null,
+      })
       setFolderDialogOpen(false)
     }
   }
@@ -126,21 +150,22 @@ export function ChatHomePage(): React.JSX.Element {
     const conn = sshConnections.find((c) => c.id === connId)
     if (!conn) return
     const dir = sshDirInputs[connId]?.trim() || conn.defaultDirectory || DEFAULT_SSH_WORKDIR
-    setWorkingFolder(dir)
-    setSshConnectionId(connId)
+    void (async () => {
+      const projectId = await resolveActiveProjectId()
+      if (!projectId) return
+      updateProjectDirectory(projectId, {
+        workingFolder: dir,
+        sshConnectionId: connId,
+      })
+    })()
     setSshDirEditingId(null)
     setFolderDialogOpen(false)
   }
 
   const handleSend = (text: string, images?: ImageAttachment[]): void => {
     const chatStore = useChatStore.getState()
-    const sessionId = chatStore.createSession(mode)
-    if (workingFolder) {
-      chatStore.setWorkingFolder(sessionId, workingFolder)
-    }
-    if (sshConnectionId) {
-      chatStore.setSshConnectionId(sessionId, sshConnectionId)
-    }
+    const sessionId = chatStore.createSession(mode, activeProject?.id ?? undefined)
+    chatStore.setActiveSession(sessionId)
     useUIStore.getState().navigateToSession()
     void sendMessage(text, images)
   }
@@ -200,7 +225,6 @@ export function ChatHomePage(): React.JSX.Element {
                   onClick={() => {
                     setMode(m.value)
                     if (m.value === 'chat') {
-                      setWorkingFolder(undefined)
                       setFolderDialogOpen(false)
                     }
                   }}

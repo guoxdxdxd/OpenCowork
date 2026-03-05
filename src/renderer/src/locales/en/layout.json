@@ -111,6 +111,10 @@
     "addTypes": "Add types",
     "sessionsGroup": "Sessions"
   },
+  "sectionExecution": "Execution",
+  "sectionResources": "Resources",
+  "sectionCollaboration": "Collaboration",
+  "sectionMonitoring": "Monitoring",
   "rightPanel": {
     "steps": "Steps",
     "plan": "Plan",

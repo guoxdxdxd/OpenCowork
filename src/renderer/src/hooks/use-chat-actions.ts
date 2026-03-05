@@ -21,7 +21,7 @@ import { IPC } from '@renderer/lib/ipc/channels'
 import { clearPendingQuestions } from '@renderer/lib/tools/ask-user-tool'
 
 import { PLAN_MODE_ALLOWED_TOOLS } from '@renderer/lib/tools/plan-tool'
-import { usePlanStore, type Plan } from '@renderer/stores/plan-store'
+import { usePlanStore } from '@renderer/stores/plan-store'
 import { createProvider } from '@renderer/lib/api/provider'
 import { generateSessionTitle } from '@renderer/lib/api/generate-title'
 import type {
@@ -293,7 +293,7 @@ function drainLeadMessages(): void {
   if (_autoTriggerCount >= MAX_AUTO_TRIGGERS) {
     console.warn(
       `[Team] Auto-trigger limit reached (${MAX_AUTO_TRIGGERS}). ` +
-        `${pendingLeadMessages.length} messages pending. Waiting for user input.`
+      `${pendingLeadMessages.length} messages pending. Waiting for user input.`
     )
     return
   }
@@ -317,11 +317,11 @@ function drainLeadMessages(): void {
     const pending = team.tasks.filter((t) => t.status === 'pending').length
     parts.push(
       `\n---\n**Team Progress**: ${completed}/${total} tasks completed` +
-        (inProgress > 0 ? `, ${inProgress} in progress` : '') +
-        (pending > 0 ? `, ${pending} pending` : '') +
-        (completed < total
-          ? '. Other teammates are still working — review the report(s) above, then end your turn and wait for remaining reports unless immediate action is needed.'
-          : '. All tasks completed — compile the final summary from all reports and then call TeamDelete to clean up the team.')
+      (inProgress > 0 ? `, ${inProgress} in progress` : '') +
+      (pending > 0 ? `, ${pending} pending` : '') +
+      (completed < total
+        ? '. Other teammates are still working — review the report(s) above, then end your turn and wait for remaining reports unless immediate action is needed.'
+        : '. All tasks completed — compile the final summary from all reports and then call TeamDelete to clean up the team.')
     )
   }
 
@@ -528,7 +528,23 @@ export function useChatActions(): {
     const activeModelConfig = useProviderStore.getState().getActiveModelConfig()
     const baseProviderConfig: ProviderConfig | null = providerConfig
       ? {
-          ...providerConfig,
+        ...providerConfig,
+        maxTokens: effectiveMaxTokens,
+        temperature: settings.temperature,
+        systemPrompt: settings.systemPrompt || undefined,
+        thinkingEnabled,
+        thinkingConfig: activeModelThinkingConfig,
+        reasoningEffort: settings.reasoningEffort,
+        responseSummary: activeModelConfig?.responseSummary,
+        enablePromptCache: activeModelConfig?.enablePromptCache,
+        enableSystemPromptCache: activeModelConfig?.enableSystemPromptCache
+      }
+      : settings.apiKey
+        ? {
+          type: settings.provider,
+          apiKey: settings.apiKey,
+          baseUrl: settings.baseUrl || undefined,
+          model: settings.model,
           maxTokens: effectiveMaxTokens,
           temperature: settings.temperature,
           systemPrompt: settings.systemPrompt || undefined,
@@ -539,22 +555,6 @@ export function useChatActions(): {
           enablePromptCache: activeModelConfig?.enablePromptCache,
           enableSystemPromptCache: activeModelConfig?.enableSystemPromptCache
         }
-      : settings.apiKey
-        ? {
-            type: settings.provider,
-            apiKey: settings.apiKey,
-            baseUrl: settings.baseUrl || undefined,
-            model: settings.model,
-            maxTokens: effectiveMaxTokens,
-            temperature: settings.temperature,
-            systemPrompt: settings.systemPrompt || undefined,
-            thinkingEnabled,
-            thinkingConfig: activeModelThinkingConfig,
-            reasoningEffort: settings.reasoningEffort,
-            responseSummary: activeModelConfig?.responseSummary,
-            enablePromptCache: activeModelConfig?.enablePromptCache,
-            enableSystemPromptCache: activeModelConfig?.enableSystemPromptCache
-          }
         : null
 
     if (!baseProviderConfig || (!baseProviderConfig.apiKey && baseProviderConfig.requiresApiKey !== false)) {
@@ -984,13 +984,7 @@ export function useChatActions(): {
               if (sessionId) {
                 const plan = usePlanStore.getState().getPlanBySession(sessionId)
                 if (plan) {
-                  const summary = formatPlanSummaryForPrompt(plan)
-                  const parts = [`Active plan: ${plan.title}`]
-                  if (summary) {
-                    parts.push('Summary:')
-                    parts.push(summary)
-                  }
-                  planPinnedContext = parts.join('\n')
+                  planPinnedContext = plan.content
                 }
               }
               const { messages: compressed } = await compressMessages(
@@ -1037,7 +1031,7 @@ export function useChatActions(): {
 
       // Request notification permission on first agent run
       if (Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {})
+        Notification.requestPermission().catch(() => { })
       }
 
       let streamDeltaBuffer: StreamDeltaBuffer | null = null
@@ -1659,14 +1653,14 @@ export function useChatActions(): {
 
     const config: ProviderConfig | null = providerConfig
       ? {
-          ...providerConfig,
-          maxTokens: effectiveMaxTokens,
-          temperature: settings.temperature,
-          systemPrompt: settings.systemPrompt || undefined,
-          thinkingEnabled,
-          thinkingConfig: activeModelThinkingConfig,
-          reasoningEffort: settings.reasoningEffort
-        }
+        ...providerConfig,
+        maxTokens: effectiveMaxTokens,
+        temperature: settings.temperature,
+        systemPrompt: settings.systemPrompt || undefined,
+        thinkingEnabled,
+        thinkingConfig: activeModelThinkingConfig,
+        reasoningEffort: settings.reasoningEffort
+      }
       : null
 
     if (!config) {
@@ -1721,42 +1715,6 @@ export function useChatActions(): {
   return { sendMessage, stopStreaming, retryLastMessage, editAndResend, manualCompressContext }
 }
 
-// ── Plan Implement: programmatic message trigger ──
-
-function formatPlanSummaryForPrompt(plan: Plan): string | null {
-  const items = extractPlanSummaryItems(plan)
-  if (items.length === 0) return null
-  return items.map((item) => `- ${item}`).join('\n')
-}
-
-function extractPlanSummaryItems(plan: Plan): string[] {
-  if (plan.specJson) {
-    try {
-      const parsed = JSON.parse(plan.specJson) as { summary?: unknown }
-      if (Array.isArray(parsed.summary)) {
-        const items = parsed.summary.map((item) => String(item).trim()).filter(Boolean)
-        if (items.length > 0) return items.slice(0, 6)
-      }
-    } catch {
-      // Ignore malformed specJson
-    }
-  }
-
-  if (plan.content) {
-    const lines = plan.content.split('\n').map((line) => line.trim()).filter(Boolean)
-    const bullets = lines
-      .filter((line) => /^[-*]\s+/.test(line))
-      .map((line) => line.replace(/^[-*]\s+/, '').trim())
-    const numbered = lines
-      .filter((line) => /^\d+\.\s+/.test(line))
-      .map((line) => line.replace(/^\d+\.\s+/, '').trim())
-    const source = bullets.length > 0 ? bullets : numbered.length > 0 ? numbered : lines
-    return source.slice(0, 6)
-  }
-
-  return []
-}
-
 /**
  * Trigger plan implementation by sending a message to the agent.
  * Called from PlanPanel "Implement" button — bypasses the input box.
@@ -1777,17 +1735,7 @@ export function sendImplementPlan(planId: string): void {
   // 3. Switch to Steps tab
   useUIStore.getState().setRightPanelTab('steps')
 
-  // 4. Send implementation trigger prompt
-  const summary = formatPlanSummaryForPrompt(plan)
-  const prompt = [
-    `Execute the plan: **${plan.title}**`,
-    '',
-    summary ? `Plan summary:\n${summary}` : '',
-    '',
-    'The plan has been approved. Implement it step by step following the plan details provided earlier in the chat.',
-  ].filter(Boolean).join('\n')
-
-  _sendMessageFn(prompt)
+  _sendMessageFn(`Execute the plan`)
 }
 
 /**

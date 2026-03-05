@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import * as path from 'path'
 import * as os from 'os'
 import * as fs from 'fs'
+import { nanoid } from 'nanoid'
 
 const DATA_DIR = path.join(os.homedir(), '.open-cowork')
 const DB_PATH = path.join(DATA_DIR, 'data.db')
@@ -22,6 +23,205 @@ function hasColumn(
   } catch {
     return false
   }
+}
+
+function sanitizeProjectName(rawName: string): string {
+  const cleaned = rawName
+    .replace(/[<>:"/\\|?*]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned || 'New Project'
+}
+
+function deriveProjectNameFromFolder(folderPath: string): string {
+  const normalized = folderPath.trim().replace(/[\\/]+$/, '')
+  const parts = normalized.split(/[\\/]/).filter(Boolean)
+  const name = parts[parts.length - 1] || 'Project'
+  return sanitizeProjectName(name)
+}
+
+function ensureUniqueLocalProjectDirectory(baseName: string): { name: string; folderPath: string } {
+  const documentsDir = path.join(os.homedir(), 'Documents')
+  if (!fs.existsSync(documentsDir)) {
+    fs.mkdirSync(documentsDir, { recursive: true })
+  }
+
+  const safeBaseName = sanitizeProjectName(baseName)
+  let candidateName = safeBaseName
+  let suffix = 1
+  let candidatePath = path.join(documentsDir, candidateName)
+
+  while (fs.existsSync(candidatePath)) {
+    candidateName = `${safeBaseName} (${suffix})`
+    candidatePath = path.join(documentsDir, candidateName)
+    suffix += 1
+  }
+
+  fs.mkdirSync(candidatePath, { recursive: true })
+  return { name: candidateName, folderPath: candidatePath }
+}
+
+function projectDirectoryKey(workingFolder: string, sshConnectionId: string | null): string {
+  const normalizedFolder = sshConnectionId
+    ? workingFolder.trim()
+    : path.normalize(workingFolder).trim().toLowerCase()
+  return `${sshConnectionId ?? 'local'}::${normalizedFolder}`
+}
+
+interface ProjectRecord {
+  id: string
+  name: string
+  working_folder: string | null
+  ssh_connection_id: string | null
+  plugin_id: string | null
+  created_at: number
+  updated_at: number
+}
+
+function ensureDefaultLocalProject(database: Database.Database): ProjectRecord {
+  const existing = database
+    .prepare(
+      `SELECT id, name, working_folder, ssh_connection_id, plugin_id, created_at, updated_at
+         FROM projects
+        WHERE plugin_id IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1`
+    )
+    .get() as ProjectRecord | undefined
+
+  if (existing) {
+    return existing
+  }
+
+  const now = Date.now()
+  const { name, folderPath } = ensureUniqueLocalProjectDirectory('New Project')
+  const project: ProjectRecord = {
+    id: nanoid(),
+    name,
+    working_folder: folderPath,
+    ssh_connection_id: null,
+    plugin_id: null,
+    created_at: now,
+    updated_at: now,
+  }
+
+  database
+    .prepare(
+      `INSERT INTO projects (id, name, working_folder, ssh_connection_id, plugin_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      project.id,
+      project.name,
+      project.working_folder,
+      project.ssh_connection_id,
+      project.plugin_id,
+      project.created_at,
+      project.updated_at
+    )
+
+  return project
+}
+
+function migrateSessionsToProjects(database: Database.Database): void {
+  if (!hasColumn(database, 'sessions', 'project_id')) return
+
+  const sessionsWithoutProject = database
+    .prepare(
+      `SELECT id, working_folder, ssh_connection_id, plugin_id, created_at, updated_at
+         FROM sessions
+        WHERE project_id IS NULL`
+    )
+    .all() as Array<{
+      id: string
+      working_folder: string | null
+      ssh_connection_id: string | null
+      plugin_id: string | null
+      created_at: number
+      updated_at: number
+    }>
+
+  const defaultProject = ensureDefaultLocalProject(database)
+  if (sessionsWithoutProject.length === 0) {
+    return
+  }
+
+  const projects = database
+    .prepare(
+      `SELECT id, name, working_folder, ssh_connection_id, plugin_id, created_at, updated_at
+         FROM projects`
+    )
+    .all() as ProjectRecord[]
+
+  const projectByDirectory = new Map<string, string>()
+  for (const project of projects) {
+    if (!project.working_folder) continue
+    const key = projectDirectoryKey(project.working_folder, project.ssh_connection_id ?? null)
+    projectByDirectory.set(key, project.id)
+  }
+
+  const insertProjectStmt = database.prepare(
+    `INSERT INTO projects (id, name, working_folder, ssh_connection_id, plugin_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  )
+  const setSessionProjectStmt = database.prepare(
+    `UPDATE sessions SET project_id = ? WHERE id = ?`
+  )
+  const setSessionDefaultProjectStmt = database.prepare(
+    `UPDATE sessions
+        SET project_id = ?,
+            working_folder = COALESCE(working_folder, ?),
+            ssh_connection_id = COALESCE(ssh_connection_id, ?)
+      WHERE id = ?`
+  )
+
+  const tx = database.transaction(() => {
+    for (const session of sessionsWithoutProject) {
+      const workingFolder = session.working_folder?.trim() ?? ''
+      if (!workingFolder) {
+        setSessionDefaultProjectStmt.run(
+          defaultProject.id,
+          defaultProject.working_folder,
+          defaultProject.ssh_connection_id,
+          session.id
+        )
+        continue
+      }
+
+      const key = projectDirectoryKey(workingFolder, session.ssh_connection_id ?? null)
+      let projectId = projectByDirectory.get(key)
+
+      if (!projectId) {
+        const createdAt = Number.isFinite(session.created_at) ? session.created_at : Date.now()
+        const updatedAt = Number.isFinite(session.updated_at) ? session.updated_at : createdAt
+        const newProject: ProjectRecord = {
+          id: nanoid(),
+          name: deriveProjectNameFromFolder(workingFolder),
+          working_folder: workingFolder,
+          ssh_connection_id: session.ssh_connection_id ?? null,
+          plugin_id: session.plugin_id ?? null,
+          created_at: createdAt,
+          updated_at: updatedAt,
+        }
+
+        insertProjectStmt.run(
+          newProject.id,
+          newProject.name,
+          newProject.working_folder,
+          newProject.ssh_connection_id,
+          newProject.plugin_id,
+          newProject.created_at,
+          newProject.updated_at
+        )
+        projectId = newProject.id
+        projectByDirectory.set(key, projectId)
+      }
+
+      setSessionProjectStmt.run(projectId, session.id)
+    }
+  })
+
+  tx()
 }
 
 export function getDb(): Database.Database {
@@ -243,10 +443,39 @@ export function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_ssh_connections_group ON ssh_connections(group_id);
   `)
 
+  // --- Projects table ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      working_folder TEXT,
+      ssh_connection_id TEXT,
+      plugin_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_projects_plugin_id ON projects(plugin_id);
+  `)
+
   // Migration: add ssh_connection_id to sessions for remote working directory
   if (!hasColumn(db, 'sessions', 'ssh_connection_id')) {
     try { db.exec(`ALTER TABLE sessions ADD COLUMN ssh_connection_id TEXT`) } catch { /* exists */ }
   }
+
+  // Migration: add project_id to sessions
+  if (!hasColumn(db, 'sessions', 'project_id')) {
+    try { db.exec(`ALTER TABLE sessions ADD COLUMN project_id TEXT`) } catch { /* exists */ }
+  }
+  if (hasColumn(db, 'sessions', 'project_id')) {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id)`)
+  } else {
+    console.warn('[DB] Skip idx_sessions_project_id: sessions.project_id is missing')
+  }
+
+  // Backfill projects and project_id for legacy sessions
+  migrateSessionsToProjects(db)
 
   // Migration: add plugin columns to cron_jobs if missing
   try { db.exec(`ALTER TABLE cron_jobs ADD COLUMN plugin_id TEXT`) } catch { /* exists */ }

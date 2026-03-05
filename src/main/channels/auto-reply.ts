@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as fs from 'fs'
 import { nanoid } from 'nanoid'
 import { getDb } from '../db/database'
+import * as projectsDao from '../db/projects-dao'
 import type { ChannelEvent, ChannelInstance, ChannelIncomingMessageData } from './channel-types'
 import type { ChannelManager } from './channel-manager'
 import { tryHandleCommand } from './plugin-commands'
@@ -34,16 +35,6 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
   try {
     const db = getDb()
 
-    // Find existing session by external_chat_id
-    let session = db
-      .prepare('SELECT id, title FROM sessions WHERE external_chat_id = ? LIMIT 1')
-      .get(compositeKey) as { id: string; title: string } | undefined
-
-    const now = Date.now()
-
-    // Create new session if not found
-    const pluginWorkDir = path.join(PLUGINS_WORK_DIR, pluginId)
-    // Look up plugin instance to get bound provider/model
     let pluginInstance: ChannelInstance | undefined
     try {
       if (fs.existsSync(PLUGINS_FILE)) {
@@ -51,32 +42,57 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
         pluginInstance = plugins.find((p) => p.id === pluginId)
       }
     } catch { /* ignore read errors */ }
+
+    const pluginProject = projectsDao.ensurePluginProject(
+      pluginId,
+      pluginInstance?.name || `Plugin ${pluginId}`
+    )
+    const pluginWorkDir = pluginProject.working_folder ?? path.join(PLUGINS_WORK_DIR, pluginId)
+    const pluginSshConnectionId = pluginProject.ssh_connection_id ?? null
+
+    let session = db
+      .prepare('SELECT id, title, project_id FROM sessions WHERE external_chat_id = ? LIMIT 1')
+      .get(compositeKey) as { id: string; title: string; project_id?: string | null } | undefined
+
+    const now = Date.now()
     const sessionProviderId = pluginInstance?.providerId ?? null
     const sessionModelId = pluginInstance?.model ?? null
 
     if (!session) {
       const sessionId = nanoid()
       const title = data.chatName || data.senderName || data.chatId
-      // Ensure plugin working directory exists
-      if (!fs.existsSync(pluginWorkDir)) {
-        fs.mkdirSync(pluginWorkDir, { recursive: true })
-      }
       db.prepare(
-        `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, working_folder, pinned, plugin_id, external_chat_id, provider_id, model_id)
-         VALUES (?, ?, NULL, 'cowork', ?, ?, ?, 0, ?, ?, ?, ?)`
-      ).run(sessionId, title, now, now, pluginWorkDir, pluginId, compositeKey, sessionProviderId, sessionModelId)
-      session = { id: sessionId, title }
+        `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, project_id, working_folder, ssh_connection_id, pinned, plugin_id, external_chat_id, provider_id, model_id)
+         VALUES (?, ?, NULL, 'cowork', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`
+      ).run(
+        sessionId,
+        title,
+        now,
+        now,
+        pluginProject.id,
+        pluginWorkDir,
+        pluginSshConnectionId,
+        pluginId,
+        compositeKey,
+        sessionProviderId,
+        sessionModelId
+      )
+      session = { id: sessionId, title, project_id: pluginProject.id }
     } else {
-      // Update session timestamp
-      db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, session.id)
+      db.prepare(
+        `UPDATE sessions
+            SET updated_at = ?,
+                project_id = ?,
+                working_folder = ?,
+                ssh_connection_id = ?
+          WHERE id = ?`
+      ).run(now, pluginProject.id, pluginWorkDir, pluginSshConnectionId, session.id)
 
-      // Sync provider/model binding from plugin config (user may have changed it)
       if (sessionProviderId || sessionModelId) {
         db.prepare('UPDATE sessions SET provider_id = ?, model_id = ? WHERE id = ?')
           .run(sessionProviderId, sessionModelId, session.id)
       }
 
-      // Update title if we now have a better name (e.g. chatName resolved after initial creation)
       const betterTitle = data.chatName || data.senderName
       if (betterTitle && session.title !== betterTitle && /^oc_/.test(session.title)) {
         db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(betterTitle, session.id)
@@ -133,7 +149,9 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
         images: data.images,
         audio: data.audio,
         chatType: data.chatType,
+        projectId: pluginProject.id,
         workingFolder: pluginWorkDir,
+        sshConnectionId: pluginSshConnectionId,
       })
     }
 

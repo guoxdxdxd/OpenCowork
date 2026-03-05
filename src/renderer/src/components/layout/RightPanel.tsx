@@ -1,20 +1,10 @@
-import {
-  ListChecks,
-  FileOutput,
-  Database,
-  Sparkles,
-  FolderTree,
-  Users,
-  ClipboardList,
-  Clock,
-  Loader2,
-} from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@renderer/components/ui/button'
-import { Separator } from '@renderer/components/ui/separator'
-import { useUIStore, type RightPanelTab } from '@renderer/stores/ui-store'
-import { useAgentStore } from '@renderer/stores/agent-store'
-import { useTaskStore } from '@renderer/stores/task-store'
+import {
+  useUIStore,
+  type RightPanelTab,
+} from '@renderer/stores/ui-store'
 import { StepsPanel } from '@renderer/components/cowork/StepsPanel'
 import { ArtifactsPanel } from '@renderer/components/cowork/ArtifactsPanel'
 import { ContextPanel } from '@renderer/components/cowork/ContextPanel'
@@ -26,27 +16,19 @@ import { PlanPanel } from '@renderer/components/cowork/PlanPanel'
 import { CronPanel } from '@renderer/components/cowork/CronPanel'
 import { usePlanStore } from '@renderer/stores/plan-store'
 import { useChatStore } from '@renderer/stores/chat-store'
-import { useTeamStore } from '@renderer/stores/team-store'
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
-import { useCronStore } from '@renderer/stores/cron-store'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@renderer/lib/utils'
 import { AnimatePresence } from 'motion/react'
 import { FadeIn } from '@renderer/components/animate-ui'
-
-const ALL_FILE_TOOLS = new Set(['Write', 'Edit', 'Delete'])
-
-const tabDefs: { value: RightPanelTab; labelKey: string; icon: React.ReactNode }[] = [
-  { value: 'steps', labelKey: 'steps', icon: <ListChecks className="size-4" /> },
-  { value: 'plan', labelKey: 'plan', icon: <ClipboardList className="size-4" /> },
-  { value: 'team', labelKey: 'team', icon: <Users className="size-4" /> },
-  { value: 'files', labelKey: 'files', icon: <FolderTree className="size-4" /> },
-  { value: 'artifacts', labelKey: 'artifacts', icon: <FileOutput className="size-4" /> },
-  { value: 'context', labelKey: 'context', icon: <Database className="size-4" /> },
-  { value: 'skills', labelKey: 'skills', icon: <Sparkles className="size-4" /> },
-  { value: 'cron', labelKey: 'cron', icon: <Clock className="size-4" /> },
-]
+import { RightPanelHeader } from './RightPanelHeader'
+import {
+  RIGHT_PANEL_DEFAULT_WIDTH,
+  RIGHT_PANEL_SECTION_DEFS,
+  RIGHT_PANEL_TAB_DEFS,
+  clampRightPanelWidth,
+} from './right-panel-defs'
 
 function SshFilesPanel({
   connectionId,
@@ -123,8 +105,6 @@ function SshFilesPanel({
     t,
   ])
 
-
-
   if (connectedSession) {
     return (
       <div className="h-full overflow-hidden rounded-lg border border-border/50 bg-background/40">
@@ -172,24 +152,19 @@ function SshFilesPanel({
 export function RightPanel({ compact = false }: { compact?: boolean }): React.JSX.Element {
   const { t } = useTranslation('layout')
   const tab = useUIStore((s) => s.rightPanelTab)
+  const section = useUIStore((s) => s.rightPanelSection)
+  const rightPanelWidth = useUIStore((s) => s.rightPanelWidth)
+  const rightPanelOpen = useUIStore((s) => s.rightPanelOpen)
   const setTab = useUIStore((s) => s.setRightPanelTab)
-  const executedToolCalls = useAgentStore((s) => s.executedToolCalls)
-  const todos = useTaskStore((s) => s.tasks)
-  const activeTeam = useTeamStore((s) => s.activeTeam)
+  const setSection = useUIStore((s) => s.setRightPanelSection)
+  const setRightPanelWidth = useUIStore((s) => s.setRightPanelWidth)
+  const setRightPanelOpen = useUIStore((s) => s.setRightPanelOpen)
+
   const teamToolsEnabled = useSettingsStore((s) => s.teamToolsEnabled)
-  const cronEnabledCount = useCronStore((s) => s.jobs.filter((j) => j.enabled).length)
 
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const activeSession = useChatStore((s) =>
     s.sessions.find((session) => session.id === s.activeSessionId)
-  )
-  const runningCommandCount = useAgentStore((s) =>
-    Object.values(s.backgroundProcesses).filter(
-      (p) =>
-        p.source === 'bash-tool' &&
-        p.status === 'running' &&
-        (!activeSessionId || p.sessionId === activeSessionId)
-    ).length
   )
   const hasPlan = usePlanStore((s) => {
     if (!activeSessionId) return false
@@ -197,112 +172,248 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
   })
   const planMode = useUIStore((s) => s.planMode)
 
-  const visibleTabs = tabDefs
-    .filter((t) => teamToolsEnabled || t.value !== 'team')
-    .filter((t) => (hasPlan || planMode) || t.value !== 'plan')
-    // Cron tab is always visible
+  const visibleTabs = useMemo(
+    () =>
+      RIGHT_PANEL_TAB_DEFS
+        .filter((item) => teamToolsEnabled || item.value !== 'team')
+        .filter((item) => (hasPlan || planMode) || item.value !== 'plan'),
+    [teamToolsEnabled, hasPlan, planMode]
+  )
 
-  const badgeCounts: Partial<Record<RightPanelTab, number>> = {
-    steps: todos.length,
-    plan: hasPlan ? 1 : 0,
-    team: activeTeam ? activeTeam.members.length : 0,
-    artifacts: executedToolCalls.filter((tc) => ALL_FILE_TOOLS.has(tc.name)).length,
-    context: runningCommandCount,
-    cron: cronEnabledCount,
+  const availableSections = useMemo(
+    () =>
+      RIGHT_PANEL_SECTION_DEFS.filter((sectionDef) =>
+        visibleTabs.some((tabDef) => tabDef.section === sectionDef.value)
+      ),
+    [visibleTabs]
+  )
+
+  useEffect(() => {
+    if (visibleTabs.length === 0) return
+    if (visibleTabs.some((tabDef) => tabDef.value === tab)) return
+    setTab(visibleTabs[0].value)
+  }, [visibleTabs, tab, setTab])
+
+  useEffect(() => {
+    if (availableSections.length === 0) return
+    if (availableSections.some((sectionDef) => sectionDef.value === section)) return
+    setSection(availableSections[0].value)
+  }, [availableSections, section, setSection])
+
+  const activeTabDef = visibleTabs.find((t) => t.value === tab) ?? visibleTabs[0]
+
+  const draggingRef = useRef(false)
+  const startXRef = useRef(0)
+  const startWidthRef = useRef(rightPanelWidth)
+  const [isDragging, setIsDragging] = useState(false)
+
+  const targetPanelWidth = compact ? Math.min(rightPanelWidth, RIGHT_PANEL_DEFAULT_WIDTH) : rightPanelWidth
+  const computedPanelWidth = rightPanelOpen ? targetPanelWidth : 0
+
+  // Ensure rightPanelWidth has a valid initial value if it's somehow 0
+  useEffect(() => {
+    if (rightPanelWidth === 0) {
+      setRightPanelWidth(RIGHT_PANEL_DEFAULT_WIDTH)
+    }
+  }, [rightPanelWidth, setRightPanelWidth])
+
+  useEffect(() => {
+    if (!isDragging) return
+
+    const handleMouseMove = (event: MouseEvent): void => {
+      if (!draggingRef.current) return
+      const delta = startXRef.current - event.clientX
+      const nextWidth = clampRightPanelWidth(startWidthRef.current + delta)
+      setRightPanelWidth(nextWidth)
+    }
+
+    const handleMouseUp = (): void => {
+      draggingRef.current = false
+      setIsDragging(false)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isDragging, setRightPanelWidth])
+
+  const startResize = (event: React.MouseEvent): void => {
+    if (!rightPanelOpen) return
+    event.preventDefault()
+    draggingRef.current = true
+    startXRef.current = event.clientX
+    startWidthRef.current = rightPanelWidth
+    setIsDragging(true)
+  }
+
+  const handleSelectTab = (nextTab: RightPanelTab): void => {
+    setTab(nextTab)
+  }
+
+  const [isHoveringButton, setIsHoveringButton] = useState(false)
+  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  const handleButtonMouseEnter = () => {
+    if (rightPanelOpen) return
+    if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current)
+    hoverTimeoutRef.current = setTimeout(() => {
+      setIsHoveringButton(true)
+    }, 150)
+  }
+
+  const handleButtonMouseLeave = () => {
+    if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current)
+    hoverTimeoutRef.current = setTimeout(() => {
+      setIsHoveringButton(false)
+    }, 250)
   }
 
   return (
-    <aside className={cn('flex shrink-0 flex-col border-l bg-background/50 backdrop-blur-sm transition-all duration-200', compact ? 'w-64' : 'w-96')}>
-      {/* Tab Bar */}
-      <div className="flex h-10 min-w-0 items-center gap-0.5 overflow-x-auto px-2">
-        {visibleTabs.map((tDef) => {
-          const count = badgeCounts[tDef.value] ?? 0
-          return (
-            <Button
-              key={tDef.value}
-              variant={tab === tDef.value ? 'secondary' : 'ghost'}
-              size="sm"
-              className={cn(
-                'h-6 shrink-0 gap-1.5 rounded-md px-2 text-xs transition-all duration-200',
-                tab === tDef.value
-                  ? 'bg-muted shadow-sm ring-1 ring-border/50'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-              onClick={() => setTab(tDef.value)}
-            >
-              {tDef.icon}
-              <span className="hidden lg:inline">{t(`rightPanel.${tDef.labelKey}`)}</span>
-              {count > 0 && tab !== tDef.value && (
-                <span className="flex size-4 items-center justify-center rounded-full bg-muted-foreground/10 text-[9px] font-medium text-muted-foreground">
-                  {count}
-                </span>
-              )}
-            </Button>
-          )
-        })}
-      </div>
-      <Separator />
-
-      {/* Panel Content */}
-      <div className="flex-1 overflow-auto px-3 py-2">
-        <AnimatePresence mode="wait">
-          {tab === 'steps' && (
-            <FadeIn key="steps" className="h-full">
-              <StepsPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'team' && (
-            <FadeIn key="team" className="h-full">
-              <TeamPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'files' && (
-            <FadeIn key="files" className="h-full">
-              {activeSession?.sshConnectionId ? (
-                <SshFilesPanel
-                  connectionId={activeSession.sshConnectionId}
-                  rootPath={activeSession.workingFolder}
-                />
-              ) : (
-                <FileTreePanel />
-              )}
-            </FadeIn>
-          )}
-
-          {tab === 'artifacts' && (
-            <FadeIn key="artifacts" className="h-full">
-              <ArtifactsPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'context' && (
-            <FadeIn key="context" className="h-full">
-              <ContextPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'skills' && (
-            <FadeIn key="skills" className="h-full">
-              <SkillsPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'plan' && (
-            <FadeIn key="plan" className="h-full">
-              <PlanPanel />
-            </FadeIn>
-          )}
-
-          {tab === 'cron' && (
-            <FadeIn key="cron" className="h-full">
-              <CronPanel />
+    <aside
+      className="relative flex h-full shrink-0 transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] z-10"
+      style={{ width: computedPanelWidth }}
+    >
+      {/* Floating Toggle Button & Hover Menu Wrapper */}
+      <div 
+        className="absolute left-0 top-1/2 -translate-x-full -translate-y-1/2 z-50 flex items-center"
+        onMouseEnter={handleButtonMouseEnter}
+        onMouseLeave={handleButtonMouseLeave}
+      >
+        {/* Hover Menu */}
+        <AnimatePresence>
+          {!rightPanelOpen && isHoveringButton && (
+            <FadeIn className="absolute right-full mr-2 py-1.5 w-36 bg-background/95 backdrop-blur-sm border border-border/50 rounded-lg shadow-xl overflow-hidden">
+              {visibleTabs.map((tabDef) => {
+                const TabIcon = tabDef.icon
+                return (
+                  <button
+                    key={tabDef.value}
+                    className="w-full flex items-center gap-2.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                    onClick={() => {
+                      setTab(tabDef.value)
+                      setRightPanelOpen(true)
+                      setIsHoveringButton(false)
+                    }}
+                  >
+                    <TabIcon className="size-4 shrink-0" />
+                    <span>{t(`rightPanel.${tabDef.labelKey}`)}</span>
+                  </button>
+                )
+              })}
             </FadeIn>
           )}
         </AnimatePresence>
+
+        {/* Toggle Button */}
+        <button
+          onClick={() => setRightPanelOpen(!rightPanelOpen)}
+          className={cn(
+            "w-5 h-14 bg-background border border-border/50 border-r-0",
+            "rounded-l-xl flex items-center justify-center",
+            "text-muted-foreground hover:text-foreground hover:bg-muted/50 cursor-pointer shadow-sm transition-all duration-300"
+          )}
+          title={rightPanelOpen ? t('rightPanelAction.closePanel', { defaultValue: '收起面板' }) : t('rightPanelAction.expandPanel', { defaultValue: '展开面板' })}
+        >
+          {rightPanelOpen ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
+        </button>
       </div>
 
+      {/* Resize Handle */}
+      {rightPanelOpen && (
+        <div
+          className="absolute left-0 top-0 z-20 h-full w-1.5 cursor-col-resize hover:bg-primary/20 transition-colors"
+          onMouseDown={startResize}
+        />
+      )}
+
+      {isDragging && <div className="absolute inset-0 z-30" />}
+
+      {/* Clipping Wrapper for smooth slide animation */}
+      <div className={cn(
+        "absolute inset-0 overflow-hidden bg-background shadow-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]",
+        rightPanelOpen ? "border-l border-border/50 rounded-l-2xl opacity-100" : "border-l-0 rounded-none opacity-0"
+      )}>
+        {/* Fixed Width Content */}
+        <div
+          className="absolute right-0 top-0 h-full bg-background"
+          style={{ width: targetPanelWidth }}
+        >
+          {activeTabDef && (
+            <div className="flex min-w-0 flex-1 flex-col h-full w-full">
+              <RightPanelHeader
+                activeTabDef={activeTabDef}
+                visibleTabs={visibleTabs}
+                onSelectTab={handleSelectTab}
+                onClose={() => setRightPanelOpen(false)}
+                t={t}
+              />
+
+              <div className="flex-1 overflow-auto bg-background">
+                <AnimatePresence mode="wait">
+                  {tab === 'steps' && (
+                    <FadeIn key="steps" className="h-full">
+                      <StepsPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'team' && (
+                    <FadeIn key="team" className="h-full">
+                      <TeamPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'files' && (
+                    <FadeIn key="files" className="h-full">
+                      {activeSession?.sshConnectionId ? (
+                        <SshFilesPanel
+                          connectionId={activeSession.sshConnectionId}
+                          rootPath={activeSession.workingFolder}
+                        />
+                      ) : (
+                        <FileTreePanel />
+                      )}
+                    </FadeIn>
+                  )}
+
+                  {tab === 'artifacts' && (
+                    <FadeIn key="artifacts" className="h-full">
+                      <ArtifactsPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'context' && (
+                    <FadeIn key="context" className="h-full">
+                      <ContextPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'skills' && (
+                    <FadeIn key="skills" className="h-full">
+                      <SkillsPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'plan' && (
+                    <FadeIn key="plan" className="h-full">
+                      <PlanPanel />
+                    </FadeIn>
+                  )}
+
+                  {tab === 'cron' && (
+                    <FadeIn key="cron" className="h-full">
+                      <CronPanel />
+                    </FadeIn>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </aside>
   )
 }

@@ -9,6 +9,7 @@ export type NavItem = 'chat' | 'channels' | 'skills' | 'translate' | 'ssh'
 export type ChatView = 'home' | 'session'
 
 export type RightPanelTab = 'steps' | 'team' | 'artifacts' | 'context' | 'skills' | 'files' | 'plan' | 'cron'
+export type RightPanelSection = 'execution' | 'resources' | 'collaboration' | 'monitoring'
 
 export type PreviewSource = 'file' | 'dev-server' | 'markdown'
 
@@ -75,6 +76,13 @@ interface UIStore {
 
   setRightPanelTab: (tab: RightPanelTab) => void
 
+  rightPanelSection: RightPanelSection
+
+  setRightPanelSection: (section: RightPanelSection) => void
+
+  rightPanelWidth: number
+
+  setRightPanelWidth: (width: number) => void
 
 
   settingsOpen: boolean
@@ -188,6 +196,13 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setRightPanelTab: (tab) => set({ rightPanelTab: tab }),
 
+  rightPanelSection: 'execution',
+
+  setRightPanelSection: (section) => set({ rightPanelSection: section }),
+
+  rightPanelWidth: 384,
+
+  setRightPanelWidth: (width) => set({ rightPanelWidth: width }),
 
 
   settingsOpen: false,

@@ -19,6 +19,16 @@ import { useProviderStore } from './provider-store'
 
 export type SessionMode = 'chat' | 'cowork' | 'code'
 
+export interface Project {
+  id: string
+  name: string
+  createdAt: number
+  updatedAt: number
+  workingFolder?: string
+  sshConnectionId?: string
+  pluginId?: string
+}
+
 export interface Session {
   id: string
   title: string
@@ -29,6 +39,7 @@ export interface Session {
   messagesLoaded: boolean
   createdAt: number
   updatedAt: number
+  projectId?: string
   workingFolder?: string
   sshConnectionId?: string
   pinned?: boolean
@@ -57,6 +68,7 @@ function dbCreateSession(s: Session): void {
     mode: s.mode,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
+    projectId: s.projectId,
     workingFolder: s.workingFolder,
     sshConnectionId: s.sshConnectionId,
     pinned: s.pinned,
@@ -75,6 +87,26 @@ function dbDeleteSession(id: string): void {
 
 function dbClearAllSessions(): void {
   ipcClient.invoke('db:sessions:clear-all').catch(() => {})
+}
+
+function dbCreateProject(project: Project): void {
+  ipcClient.invoke('db:projects:create', {
+    id: project.id,
+    name: project.name,
+    workingFolder: project.workingFolder,
+    sshConnectionId: project.sshConnectionId,
+    pluginId: project.pluginId,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  }).catch(() => {})
+}
+
+function dbUpdateProject(id: string, patch: Record<string, unknown>): void {
+  ipcClient.invoke('db:projects:update', { id, patch }).catch(() => {})
+}
+
+function dbDeleteProject(id: string): void {
+  ipcClient.invoke('db:projects:delete', id).catch(() => {})
 }
 
 function dbAddMessage(sessionId: string, msg: UnifiedMessage, sortOrder: number): void {
@@ -136,16 +168,32 @@ function dbFlushMessageImmediate(_sessionId: string, msg: UnifiedMessage, _sortO
 // --- Store ---
 
 interface ChatStore {
+  projects: Project[]
   sessions: Session[]
+  activeProjectId: string | null
   activeSessionId: string | null
   _loaded: boolean
 
   // Initialization
   loadFromDb: () => Promise<void>
   loadSessionMessages: (sessionId: string, force?: boolean) => Promise<void>
+  ensureDefaultProject: () => Promise<Project | null>
+
+  // Project CRUD
+  setActiveProject: (id: string | null) => void
+  createProject: (input?: Partial<Pick<Project, 'name' | 'workingFolder' | 'sshConnectionId' | 'pluginId'>>) => Promise<string>
+  renameProject: (projectId: string, name: string) => void
+  deleteProject: (projectId: string) => Promise<void>
+  updateProjectDirectory: (
+    projectId: string,
+    patch: Partial<{
+      workingFolder: string | null
+      sshConnectionId: string | null
+    }>
+  ) => void
 
   // Session CRUD
-  createSession: (mode: SessionMode) => string
+  createSession: (mode: SessionMode, projectId?: string | null) => string
   deleteSession: (id: string) => void
   setActiveSession: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
@@ -196,6 +244,16 @@ interface ChatStore {
   getSessionMessages: (sessionId: string) => UnifiedMessage[]
 }
 
+interface ProjectRow {
+  id: string
+  name: string
+  created_at: number
+  updated_at: number
+  working_folder: string | null
+  ssh_connection_id: string | null
+  plugin_id?: string | null
+}
+
 interface SessionRow {
   id: string
   title: string
@@ -203,6 +261,7 @@ interface SessionRow {
   mode: string
   created_at: number
   updated_at: number
+  project_id?: string | null
   working_folder: string | null
   ssh_connection_id?: string | null
   pinned: number
@@ -223,6 +282,18 @@ interface MessageRow {
   sort_order: number
 }
 
+function rowToProject(row: ProjectRow): Project {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    workingFolder: row.working_folder ?? undefined,
+    sshConnectionId: row.ssh_connection_id ?? undefined,
+    pluginId: row.plugin_id ?? undefined,
+  }
+}
+
 function rowToSession(row: SessionRow, messages: UnifiedMessage[] = []): Session {
   const messageCount = row.message_count ?? messages.length
   return {
@@ -235,6 +306,7 @@ function rowToSession(row: SessionRow, messages: UnifiedMessage[] = []): Session
     messagesLoaded: messages.length > 0 || messageCount === 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    projectId: row.project_id ?? undefined,
     workingFolder: row.working_folder ?? undefined,
     sshConnectionId: row.ssh_connection_id ?? undefined,
     pinned: row.pinned === 1,
@@ -334,12 +406,266 @@ function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
 
 export const useChatStore = create<ChatStore>()(
   immer((set, get) => ({
+    projects: [],
     sessions: [],
+    activeProjectId: null,
     activeSessionId: null,
     streamingMessageId: null,
     streamingMessages: {},
     generatingImageMessages: {},
     _loaded: false,
+
+    ensureDefaultProject: async () => {
+      try {
+        const row = (await ipcClient.invoke('db:projects:ensure-default')) as ProjectRow | null
+        if (!row) return null
+        const project = rowToProject(row)
+        set((state) => {
+          const existing = state.projects.find((item) => item.id === project.id)
+          if (existing) {
+            Object.assign(existing, project)
+          } else {
+            state.projects.unshift(project)
+          }
+          if (!state.activeProjectId) {
+            state.activeProjectId = project.id
+          }
+        })
+        return project
+      } catch (err) {
+        console.error('[ChatStore] Failed to ensure default project:', err)
+        return null
+      }
+    },
+
+    setActiveProject: (id) => {
+      let nextSessionId: string | null = null
+      set((state) => {
+        state.activeProjectId = id
+        if (!id) return
+        const currentSession = state.sessions.find((s) => s.id === state.activeSessionId)
+        if (currentSession?.projectId === id) return
+        const sessionsInProject = state.sessions
+          .filter((s) => s.projectId === id)
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+        nextSessionId = sessionsInProject[0]?.id ?? null
+        if (nextSessionId) {
+          state.activeSessionId = nextSessionId
+        }
+      })
+      if (nextSessionId) {
+        void get().loadSessionMessages(nextSessionId)
+      }
+    },
+
+    createProject: async (input) => {
+      const now = Date.now()
+      const payload = {
+        id: nanoid(),
+        name: input?.name ?? 'New Project',
+        workingFolder: input?.workingFolder ?? null,
+        sshConnectionId: input?.sshConnectionId ?? null,
+        pluginId: input?.pluginId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      try {
+        const row = (await ipcClient.invoke('db:projects:create', payload)) as ProjectRow
+        const project = rowToProject(row)
+        set((state) => {
+          state.projects.unshift(project)
+          state.activeProjectId = project.id
+        })
+        return project.id
+      } catch (err) {
+        console.error('[ChatStore] Failed to create project:', err)
+        const fallbackProject: Project = {
+          id: payload.id,
+          name: payload.name,
+          createdAt: now,
+          updatedAt: now,
+          workingFolder: payload.workingFolder ?? undefined,
+          sshConnectionId: payload.sshConnectionId ?? undefined,
+          pluginId: payload.pluginId ?? undefined,
+        }
+        set((state) => {
+          state.projects.unshift(fallbackProject)
+          state.activeProjectId = fallbackProject.id
+        })
+        dbCreateProject(fallbackProject)
+        return fallbackProject.id
+      }
+    },
+
+    renameProject: (projectId, name) => {
+      const nextName = name.trim()
+      if (!nextName) return
+      const now = Date.now()
+
+      set((state) => {
+        const project = state.projects.find((item) => item.id === projectId)
+        if (!project) return
+        project.name = nextName
+        project.updatedAt = now
+      })
+
+      dbUpdateProject(projectId, {
+        name: nextName,
+        updatedAt: now,
+      })
+    },
+
+    deleteProject: async (projectId) => {
+      const localSessionIds = get()
+        .sessions
+        .filter((session) => session.projectId === projectId)
+        .map((session) => session.id)
+
+      let deletedSessionIds = localSessionIds
+      try {
+        const result = (await ipcClient.invoke('db:projects:delete', projectId)) as
+          | { projectId: string; sessionIds: string[] }
+          | null
+        if (result?.sessionIds) {
+          deletedSessionIds = Array.from(new Set([...localSessionIds, ...result.sessionIds]))
+        }
+      } catch (err) {
+        console.error('[ChatStore] Failed to delete project from DB:', err)
+        for (const sessionId of localSessionIds) {
+          dbDeleteSession(sessionId)
+        }
+        dbDeleteProject(projectId)
+      }
+
+      let nextActiveSessionId: string | null = null
+      let shouldEnsureDefaultProject = false
+      const deletedSet = new Set(deletedSessionIds)
+
+      set((state) => {
+        state.projects = state.projects.filter((project) => project.id !== projectId)
+
+        state.sessions = state.sessions.filter((session) => {
+          const shouldDelete = deletedSet.has(session.id) || session.projectId === projectId
+          if (shouldDelete) {
+            delete state.streamingMessages[session.id]
+          }
+          return !shouldDelete
+        })
+
+        if (
+          state.activeSessionId &&
+          !state.sessions.some((session) => session.id === state.activeSessionId)
+        ) {
+          state.activeSessionId = state.sessions[0]?.id ?? null
+        }
+
+        nextActiveSessionId = state.activeSessionId
+        const activeSession = state.sessions.find((session) => session.id === nextActiveSessionId)
+
+        if (activeSession?.projectId) {
+          state.activeProjectId = activeSession.projectId
+        } else if (
+          state.activeProjectId === projectId ||
+          !state.projects.some((project) => project.id === state.activeProjectId)
+        ) {
+          state.activeProjectId =
+            state.projects.find((project) => !project.pluginId)?.id
+            ?? state.projects[0]?.id
+            ?? null
+        }
+
+        shouldEnsureDefaultProject = state.projects.length === 0
+      })
+
+      const agentState = useAgentStore.getState()
+      const teamState = useTeamStore.getState()
+      const planState = usePlanStore.getState()
+      const taskState = useTaskStore.getState()
+
+      for (const sessionId of deletedSessionIds) {
+        agentState.setSessionStatus(sessionId, null)
+        agentState.clearSessionData(sessionId)
+        teamState.clearSessionTeam(sessionId)
+        const plan = planState.getPlanBySession(sessionId)
+        if (plan) {
+          planState.deletePlan(plan.id)
+        }
+        taskState.deleteSessionTasks(sessionId)
+      }
+      agentState.clearToolCalls()
+
+      if (nextActiveSessionId) {
+        await get().loadSessionMessages(nextActiveSessionId)
+        await useTaskStore.getState().loadTasksForSession(nextActiveSessionId)
+        const activePlan = usePlanStore.getState().getPlanBySession(nextActiveSessionId)
+        usePlanStore.getState().setActivePlan(activePlan?.id ?? null)
+      } else {
+        useTaskStore.getState().clearTasks()
+        usePlanStore.getState().setActivePlan(null)
+      }
+
+      if (shouldEnsureDefaultProject) {
+        await get().ensureDefaultProject()
+      }
+    },
+
+    updateProjectDirectory: (projectId, patch) => {
+      const now = Date.now()
+      const current = get().projects.find((project) => project.id === projectId)
+      if (!current) return
+
+      const nextWorkingFolder =
+        patch.workingFolder !== undefined
+          ? patch.workingFolder ?? undefined
+          : current.workingFolder
+      const nextSshConnectionId =
+        patch.sshConnectionId !== undefined
+          ? patch.sshConnectionId ?? undefined
+          : current.sshConnectionId
+
+      if (
+        nextWorkingFolder === current.workingFolder &&
+        nextSshConnectionId === current.sshConnectionId
+      ) {
+        return
+      }
+
+      const affectedSessionIds = get()
+        .sessions
+        .filter((session) => session.projectId === projectId)
+        .map((session) => session.id)
+
+      set((state) => {
+        const project = state.projects.find((item) => item.id === projectId)
+        if (project) {
+          project.workingFolder = nextWorkingFolder
+          project.sshConnectionId = nextSshConnectionId
+          project.updatedAt = now
+        }
+
+        for (const session of state.sessions) {
+          if (session.projectId !== projectId) continue
+          session.workingFolder = nextWorkingFolder
+          session.sshConnectionId = nextSshConnectionId
+          session.updatedAt = now
+        }
+      })
+
+      dbUpdateProject(projectId, {
+        workingFolder: nextWorkingFolder ?? null,
+        sshConnectionId: nextSshConnectionId ?? null,
+        updatedAt: now,
+      })
+
+      for (const sessionId of affectedSessionIds) {
+        dbUpdateSession(sessionId, {
+          workingFolder: nextWorkingFolder ?? null,
+          sshConnectionId: nextSshConnectionId ?? null,
+          updatedAt: now,
+        })
+      }
+    },
 
     loadSessionMessages: async (sessionId, force = false) => {
       const session = get().sessions.find((s) => s.id === sessionId)
@@ -364,23 +690,59 @@ export const useChatStore = create<ChatStore>()(
 
     loadFromDb: async () => {
       try {
+        const projectRows = (await ipcClient.invoke('db:projects:list')) as ProjectRow[]
+        let projects = projectRows.map(rowToProject)
+
+        if (projects.length === 0) {
+          const ensured = await get().ensureDefaultProject()
+          projects = ensured ? [ensured] : []
+        }
+
+        const projectMap = new Map(projects.map((project) => [project.id, project]))
+        const fallbackProject = projects.find((project) => !project.pluginId) ?? projects[0]
+
         const sessionRows = (await ipcClient.invoke('db:sessions:list')) as SessionRow[]
         const sessions: Session[] = sessionRows.map((row) => {
           const session = rowToSession(row, [])
+          if (!session.projectId && fallbackProject) {
+            session.projectId = fallbackProject.id
+          }
+          if (session.projectId) {
+            const project = projectMap.get(session.projectId)
+            if (project) {
+              session.workingFolder = project.workingFolder
+              session.sshConnectionId = project.sshConnectionId
+            }
+          }
           if (session.messageCount === 0) {
             session.messagesLoaded = true
           }
           return session
         })
+
         let nextActiveSessionId: string | null = null
+        let nextActiveProjectId: string | null = null
+
         set((state) => {
+          state.projects = projects
           state.sessions = sessions
           state._loaded = true
+
           nextActiveSessionId = state.activeSessionId ?? sessions[0]?.id ?? null
           state.activeSessionId = nextActiveSessionId
+
+          const activeSession = sessions.find((session) => session.id === nextActiveSessionId)
+          const preferredProjectId = activeSession?.projectId
+          nextActiveProjectId =
+            preferredProjectId
+            ?? state.activeProjectId
+            ?? projects.find((project) => !project.pluginId)?.id
+            ?? projects[0]?.id
+            ?? null
+          state.activeProjectId = nextActiveProjectId
         })
+
         if (nextActiveSessionId) {
-          // Restore per-session model selection to global provider store
           const activeSession = sessions.find((s) => s.id === nextActiveSessionId)
           if (activeSession?.providerId && activeSession?.modelId) {
             const providerStore = useProviderStore.getState()
@@ -405,10 +767,25 @@ export const useChatStore = create<ChatStore>()(
       }
     },
 
-    createSession: (mode) => {
+    createSession: (mode, projectId) => {
       const id = nanoid()
       const now = Date.now()
       const { activeProviderId, activeModelId } = useProviderStore.getState()
+
+      let targetProjectId =
+        projectId
+        ?? get().activeProjectId
+        ?? get().projects.find((project) => !project.pluginId)?.id
+        ?? get().projects[0]?.id
+        ?? null
+
+      let targetProject =
+        get().projects.find((project) => project.id === targetProjectId)
+
+      if (targetProject) {
+        targetProjectId = targetProject.id
+      }
+
       const newSession: Session = {
         id,
         title: 'New Conversation',
@@ -418,14 +795,38 @@ export const useChatStore = create<ChatStore>()(
         messagesLoaded: true,
         createdAt: now,
         updatedAt: now,
+        projectId: targetProjectId ?? undefined,
+        workingFolder: targetProject?.workingFolder,
+        sshConnectionId: targetProject?.sshConnectionId,
         providerId: activeProviderId ?? undefined,
         modelId: activeModelId || undefined,
       }
       set((state) => {
         state.sessions.push(newSession)
         state.activeSessionId = id
+        if (targetProjectId) {
+          state.activeProjectId = targetProjectId
+        }
       })
       dbCreateSession(newSession)
+      if (!targetProjectId) {
+        void get().ensureDefaultProject().then((project) => {
+          if (!project) return
+          set((state) => {
+            const session = state.sessions.find((item) => item.id === id)
+            if (!session || session.projectId) return
+            session.projectId = project.id
+            session.workingFolder = project.workingFolder
+            session.sshConnectionId = project.sshConnectionId
+            state.activeProjectId = project.id
+          })
+          dbUpdateSession(id, {
+            projectId: project.id,
+            workingFolder: project.workingFolder ?? null,
+            sshConnectionId: project.sshConnectionId ?? null,
+          })
+        })
+      }
       useTaskStore.getState().clearTasks()
       usePlanStore.getState().setActivePlan(null)
       if (useUIStore.getState().planMode) {
@@ -438,12 +839,21 @@ export const useChatStore = create<ChatStore>()(
       let nextActiveId: string | null = null
       set((state) => {
         const idx = state.sessions.findIndex((s) => s.id === id)
+        const deletedProjectId = idx >= 0 ? state.sessions[idx].projectId : undefined
         if (idx !== -1) state.sessions.splice(idx, 1)
+
         if (state.activeSessionId === id) {
           state.activeSessionId = state.sessions[0]?.id ?? null
         }
+
         nextActiveId = state.activeSessionId
-        // Clean up per-session streaming state
+        const activeSession = state.sessions.find((session) => session.id === nextActiveId)
+        if (activeSession?.projectId) {
+          state.activeProjectId = activeSession.projectId
+        } else if (deletedProjectId) {
+          state.activeProjectId = deletedProjectId
+        }
+
         delete state.streamingMessages[id]
       })
       if (nextActiveId) {
@@ -455,17 +865,13 @@ export const useChatStore = create<ChatStore>()(
         useTaskStore.getState().clearTasks()
         usePlanStore.getState().setActivePlan(null)
       }
-      // Clean up agent-store per-session state
       const agentState = useAgentStore.getState()
       agentState.setSessionStatus(id, null)
       agentState.clearSessionData(id)
       agentState.clearToolCalls()
-      // Clean up team-store per-session state
       useTeamStore.getState().clearSessionTeam(id)
-      // Clean up plan-store per-session state
       const plan = usePlanStore.getState().getPlanBySession(id)
       if (plan) usePlanStore.getState().deletePlan(plan.id)
-      // Clean up task-store per-session state
       useTaskStore.getState().deleteSessionTasks(id)
       dbDeleteSession(id)
     },
@@ -474,7 +880,10 @@ export const useChatStore = create<ChatStore>()(
       const prevId = get().activeSessionId
       set((state) => {
         state.activeSessionId = id
-        // Sync convenience field to the new active session's streaming state
+        const activeSession = state.sessions.find((session) => session.id === id)
+        if (activeSession?.projectId) {
+          state.activeProjectId = activeSession.projectId
+        }
         state.streamingMessageId = id ? (state.streamingMessages[id] ?? null) : null
       })
       if (prevId !== id && useUIStore.getState().planMode) {
@@ -544,17 +953,33 @@ export const useChatStore = create<ChatStore>()(
     },
 
     setWorkingFolder: (sessionId, folder) => {
+      const session = get().sessions.find((item) => item.id === sessionId)
+      if (!session) return
+      if (session.projectId) {
+        get().updateProjectDirectory(session.projectId, { workingFolder: folder })
+        return
+      }
+
       set((state) => {
-        const session = state.sessions.find((s) => s.id === sessionId)
-        if (session) session.workingFolder = folder
+        const target = state.sessions.find((item) => item.id === sessionId)
+        if (target) target.workingFolder = folder
       })
       dbUpdateSession(sessionId, { workingFolder: folder })
     },
 
     setSshConnectionId: (sessionId, connectionId) => {
+      const session = get().sessions.find((item) => item.id === sessionId)
+      if (!session) return
+      if (session.projectId) {
+        get().updateProjectDirectory(session.projectId, {
+          sshConnectionId: connectionId,
+        })
+        return
+      }
+
       set((state) => {
-        const session = state.sessions.find((s) => s.id === sessionId)
-        if (session) session.sshConnectionId = connectionId ?? undefined
+        const target = state.sessions.find((item) => item.id === sessionId)
+        if (target) target.sshConnectionId = connectionId ?? undefined
       })
       dbUpdateSession(sessionId, { sshConnectionId: connectionId })
     },
@@ -585,16 +1010,52 @@ export const useChatStore = create<ChatStore>()(
     },
 
     restoreSession: (session) => {
+      let targetProjectId =
+        session.projectId
+        ?? get().activeProjectId
+        ?? get().projects.find((project) => !project.pluginId)?.id
+        ?? get().projects[0]?.id
+        ?? null
+
+      const project = get().projects.find((item) => item.id === targetProjectId)
+      if (project) {
+        targetProjectId = project.id
+      }
+
       const normalizedSession: Session = {
         ...session,
+        projectId: targetProjectId ?? undefined,
+        workingFolder: session.workingFolder ?? project?.workingFolder,
+        sshConnectionId: session.sshConnectionId ?? project?.sshConnectionId,
         messageCount: session.messageCount ?? session.messages.length,
         messagesLoaded: session.messagesLoaded ?? true,
       }
       set((state) => {
         state.sessions.push(normalizedSession)
         state.activeSessionId = normalizedSession.id
+        if (targetProjectId) {
+          state.activeProjectId = targetProjectId
+        }
       })
       dbCreateSession(normalizedSession)
+      if (!targetProjectId) {
+        void get().ensureDefaultProject().then((defaultProject) => {
+          if (!defaultProject) return
+          set((state) => {
+            const target = state.sessions.find((item) => item.id === normalizedSession.id)
+            if (!target || target.projectId) return
+            target.projectId = defaultProject.id
+            target.workingFolder = defaultProject.workingFolder
+            target.sshConnectionId = defaultProject.sshConnectionId
+            state.activeProjectId = defaultProject.id
+          })
+          dbUpdateSession(normalizedSession.id, {
+            projectId: defaultProject.id,
+            workingFolder: defaultProject.workingFolder ?? null,
+            sshConnectionId: defaultProject.sshConnectionId ?? null,
+          })
+        })
+      }
       normalizedSession.messages.forEach((msg, i) => dbAddMessage(normalizedSession.id, msg, i))
       useTaskStore.getState().clearTasks()
       const activePlan = usePlanStore.getState().getPlanBySession(normalizedSession.id)
@@ -664,13 +1125,18 @@ export const useChatStore = create<ChatStore>()(
         messagesLoaded: true,
         createdAt: now,
         updatedAt: now,
+        projectId: source.projectId,
         workingFolder: source.workingFolder,
+        sshConnectionId: source.sshConnectionId,
         providerId: source.providerId,
         modelId: source.modelId,
       }
       set((state) => {
         state.sessions.push(newSession)
         state.activeSessionId = newId
+        if (source.projectId) {
+          state.activeProjectId = source.projectId
+        }
       })
       dbCreateSession(newSession)
       clonedMessages.forEach((msg, i) => dbAddMessage(newId, msg, i))

@@ -347,7 +347,7 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
   }
 
   return (
-    <div className="relative flex-1">
+    <div className="relative flex-1" data-message-list>
       <div ref={scrollContainerRef} className="absolute inset-0 overflow-y-auto">
         <div ref={contentRef} data-message-content className="mx-auto max-w-3xl space-y-6 p-4 overflow-hidden">
           {hiddenMessageCount > 0 && (

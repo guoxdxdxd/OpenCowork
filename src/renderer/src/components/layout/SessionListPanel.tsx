@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { formatTokens } from '@renderer/lib/format-tokens'
 import {
@@ -18,6 +18,9 @@ import {
   Loader2,
   CheckCircle2,
   PanelLeftClose,
+  FolderOpen,
+  FolderPlus,
+  ChevronRight,
 } from 'lucide-react'
 import { DynamicIcon } from 'lucide-react/dynamic'
 import {
@@ -42,6 +45,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@renderer/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@renderer/components/ui/dialog'
 import { toast } from 'sonner'
 import { useChatStore, type SessionMode } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
@@ -67,10 +77,29 @@ interface SessionListItem {
   pinned?: boolean
   messageCount: number
   pluginId?: string
+  projectId?: string
+}
+
+interface ProjectListItem {
+  id: string
+  name: string
+  updatedAt: number
+  pluginId?: string
 }
 
 export function SessionListPanel(): React.JSX.Element {
   const { t } = useTranslation('layout')
+  const projectsRaw = useChatStore((s) => s.projects)
+  const projects = useMemo<ProjectListItem[]>(
+    () =>
+      projectsRaw.map((project) => ({
+        id: project.id,
+        name: project.name,
+        updatedAt: project.updatedAt,
+        pluginId: project.pluginId,
+      })),
+    [projectsRaw]
+  )
   // Subscribe to sessions array directly - Zustand will detect changes via reference equality
   const sessionsRaw = useChatStore((s) => s.sessions)
   const sessions = useMemo<SessionListItem[]>(
@@ -85,12 +114,19 @@ export function SessionListPanel(): React.JSX.Element {
         pinned: session.pinned,
         messageCount: session.messageCount,
         pluginId: session.pluginId,
+        projectId: session.projectId,
       })),
     [sessionsRaw]
   )
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const deleteSession = useChatStore((s) => s.deleteSession)
   const setActiveSession = useChatStore((s) => s.setActiveSession)
+  const setActiveProject = useChatStore((s) => s.setActiveProject)
+  const createProject = useChatStore((s) => s.createProject)
+  const renameProject = useChatStore((s) => s.renameProject)
+  const deleteProject = useChatStore((s) => s.deleteProject)
+  const updateSessionTitle = useChatStore((s) => s.updateSessionTitle)
   const clearSessionMessages = useChatStore((s) => s.clearSessionMessages)
   const duplicateSession = useChatStore((s) => s.duplicateSession)
   const updateSessionMode = useChatStore((s) => s.updateSessionMode)
@@ -109,11 +145,35 @@ export function SessionListPanel(): React.JSX.Element {
     title: string
     msgCount: number
   } | null>(null)
+  const [projectDeleteTarget, setProjectDeleteTarget] = useState<{
+    id: string
+    name: string
+    sessionCount: number
+  } | null>(null)
+  const [renameDialog, setRenameDialog] = useState<{
+    type: 'project' | 'session'
+    id: string
+    currentName: string
+  } | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
+    () => new Set()
+  )
+  const projectIdSet = useMemo(
+    () => new Set(projects.map((project) => project.id)),
+    [projects]
+  )
   const getSessionSnapshot = useCallback(
     (sessionId: string) =>
       useChatStore.getState().sessions.find((session) => session.id === sessionId),
     []
   )
+
+  useEffect(() => {
+    if (!renameDialog) return
+    requestAnimationFrame(() => renameInputRef.current?.select())
+  }, [renameDialog])
 
   const deleteTargetRunningInfo = useMemo(() => {
     if (!deleteTarget) return null
@@ -153,6 +213,83 @@ export function SessionListPanel(): React.JSX.Element {
     useUIStore.getState().navigateToHome()
   }
 
+  const handleCreateProject = async (): Promise<void> => {
+    const id = await createProject({ name: 'New Project' })
+    setActiveProject(id)
+    useUIStore.getState().navigateToHome()
+    toast.success(t('sidebar_toast.projectCreated', { defaultValue: 'Project created' }))
+  }
+
+  const toggleProjectCollapsed = useCallback((projectId: string): void => {
+    setCollapsedProjectIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(projectId)) {
+        next.delete(projectId)
+      } else {
+        next.add(projectId)
+      }
+      return next
+    })
+  }, [])
+
+  const openRenameDialog = useCallback(
+    (type: 'project' | 'session', id: string, currentName: string): void => {
+      setRenameDialog({ type, id, currentName })
+      setRenameValue(currentName)
+    },
+    []
+  )
+
+  const handleRenameProject = useCallback(
+    (projectId: string, currentName: string): void => {
+      openRenameDialog('project', projectId, currentName)
+    },
+    [openRenameDialog]
+  )
+
+  const confirmRename = useCallback((): void => {
+    if (!renameDialog) return
+    const nextName = renameValue.trim()
+    if (!nextName) return
+
+    const current = renameDialog.currentName.trim()
+    if (nextName !== current) {
+      if (renameDialog.type === 'project') {
+        renameProject(renameDialog.id, nextName)
+      } else {
+        updateSessionTitle(renameDialog.id, nextName)
+      }
+      toast.success(t('action.rename', { ns: 'common' }))
+    }
+
+    setRenameDialog(null)
+  }, [renameDialog, renameProject, renameValue, t, updateSessionTitle])
+
+  const handleDeleteProject = useCallback(
+    (projectId: string, projectName: string, sessionCount: number): void => {
+      setProjectDeleteTarget({
+        id: projectId,
+        name: projectName,
+        sessionCount,
+      })
+    },
+    []
+  )
+
+  const confirmDeleteProject = useCallback(async (): Promise<void> => {
+    if (!projectDeleteTarget) return
+
+    await deleteProject(projectDeleteTarget.id)
+    setCollapsedProjectIds((prev) => {
+      if (!prev.has(projectDeleteTarget.id)) return prev
+      const next = new Set(prev)
+      next.delete(projectDeleteTarget.id)
+      return next
+    })
+    setProjectDeleteTarget(null)
+    toast.success(t('sidebar_toast.projectDeleted', { defaultValue: 'Project deleted' }))
+  }, [deleteProject, projectDeleteTarget, t])
+
   const handleExport = async (sessionId: string): Promise<void> => {
     await useChatStore.getState().loadSessionMessages(sessionId)
     const session = getSessionSnapshot(sessionId)
@@ -172,10 +309,10 @@ export function SessionListPanel(): React.JSX.Element {
     URL.revokeObjectURL(url)
   }
 
-  const sorted = sessions.slice().sort((a, b) => {
+  const sortedSessions = sessions.slice().sort((a, b) => {
     if (a.pinned && !b.pinned) return -1
     if (!a.pinned && b.pinned) return 1
-    return b.createdAt - a.createdAt
+    return b.updatedAt - a.updatedAt
   })
 
   const searchQuery = search.trim().toLowerCase()
@@ -222,49 +359,64 @@ export function SessionListPanel(): React.JSX.Element {
     return { matchedIds, snippetBySessionId }
   }, [searchQuery, sessions])
 
-  const filtered = searchQuery
-    ? sorted.filter((session) => {
+  const filteredSessions = searchQuery
+    ? sortedSessions.filter((session) => {
         if (session.title.toLowerCase().includes(searchQuery)) return true
         if (session.mode.toLowerCase().includes(searchQuery)) return true
         return contentSearchMeta.matchedIds.has(session.id)
       })
-    : sorted
+    : sortedSessions
 
-  const regularFiltered = filtered.filter((s) => !s.pluginId)
-  const pluginFiltered = filtered.filter((s) => !!s.pluginId)
+  const sessionsByProject = useMemo(() => {
+    const map = new Map<string, SessionListItem[]>()
+    for (const session of filteredSessions) {
+      if (!session.projectId) continue
+      const list = map.get(session.projectId)
+      if (list) {
+        list.push(session)
+      } else {
+        map.set(session.projectId, [session])
+      }
+    }
+    return map
+  }, [filteredSessions])
 
-  const now = new Date()
-  const todayStart = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate()
-  ).getTime()
-  const yesterdayStart = todayStart - 86400000
-  const weekStart = todayStart - 7 * 86400000
-  const monthStart = todayStart - 30 * 86400000
+  const filteredProjectGroups = useMemo(() => {
+    const sortedProjects = projects
+      .slice()
+      .sort((a, b) => {
+        if (!!a.pluginId !== !!b.pluginId) return a.pluginId ? 1 : -1
+        return b.updatedAt - a.updatedAt
+      })
 
-  const groups: { label: string; items: typeof filtered }[] = []
-  const today = regularFiltered.filter((s) => s.createdAt >= todayStart)
-  const yesterday = regularFiltered.filter(
-    (s) => s.createdAt >= yesterdayStart && s.createdAt < todayStart
-  )
-  const thisWeek = regularFiltered.filter(
-    (s) => s.createdAt >= weekStart && s.createdAt < yesterdayStart
-  )
-  const thisMonth = regularFiltered.filter(
-    (s) => s.createdAt >= monthStart && s.createdAt < weekStart
-  )
-  const older = regularFiltered.filter((s) => s.createdAt < monthStart)
-  if (today.length) groups.push({ label: t('sidebar.today'), items: today })
-  if (yesterday.length)
-    groups.push({ label: t('sidebar.yesterday'), items: yesterday })
-  if (thisWeek.length)
-    groups.push({ label: t('sidebar.thisWeek'), items: thisWeek })
-  if (thisMonth.length)
-    groups.push({ label: t('sidebar.thisMonth'), items: thisMonth })
-  if (older.length) groups.push({ label: t('sidebar.older'), items: older })
-  if (pluginFiltered.length)
-    groups.push({ label: t('sidebar.pluginSessions'), items: pluginFiltered })
+    const visibleGroups = sortedProjects
+      .filter((project) => {
+        const hasSessions = (sessionsByProject.get(project.id)?.length ?? 0) > 0
+        if (!searchQuery) return true
+        return project.name.toLowerCase().includes(searchQuery) || hasSessions
+      })
+      .map((project) => ({
+        project,
+        items: sessionsByProject.get(project.id) ?? [],
+        isMissing: false,
+      }))
+
+    const knownIds = new Set(sortedProjects.map((project) => project.id))
+    for (const [projectId, items] of sessionsByProject.entries()) {
+      if (knownIds.has(projectId)) continue
+      visibleGroups.push({
+        project: {
+          id: projectId,
+          name: t('sidebar.unknownProject', { defaultValue: 'Unknown Project' }),
+          updatedAt: Date.now(),
+        },
+        items,
+        isMissing: true,
+      })
+    }
+
+    return visibleGroups
+  }, [projects, sessionsByProject, searchQuery, t])
 
   return (
     <>
@@ -300,6 +452,15 @@ export function SessionListPanel(): React.JSX.Element {
                 <Download className="size-3" />
               </Button>
             )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6"
+              onClick={() => void handleCreateProject()}
+              title={t('sidebar.newProject', { defaultValue: 'New Project' })}
+            >
+              <FolderPlus className="size-3.5" />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -342,7 +503,7 @@ export function SessionListPanel(): React.JSX.Element {
               {search && (
                 <>
                   <span className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] text-muted-foreground/40 pointer-events-none">
-                    {filtered.length}/{sorted.length}
+                    {filteredSessions.length}/{sortedSessions.length}
                   </span>
                   <button
                     onClick={() => {
@@ -361,21 +522,86 @@ export function SessionListPanel(): React.JSX.Element {
 
         {/* Session list */}
         <div className="flex-1 overflow-y-auto px-1.5">
-          {filtered.length === 0 ? (
+          {filteredProjectGroups.length === 0 ? (
             <div className="px-2 py-4 text-center text-xs text-muted-foreground">
               {sessions.length === 0
                 ? t('sidebar.noConversations')
                 : t('sidebar.noMatches')}
             </div>
           ) : (
-            groups.map((group) => (
-              <div key={group.label}>
-                {groups.length > 1 && (
-                  <div className="px-2 pt-2 pb-0.5 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
-                    {group.label}
-                  </div>
-                )}
-                {group.items.map((session) => (
+            <>
+              {filteredProjectGroups.map((group) => {
+                const isCollapsed = collapsedProjectIds.has(group.project.id)
+                const canManageProject = !group.isMissing && projectIdSet.has(group.project.id)
+
+                return (
+                <div key={group.project.id} className="mb-1.5">
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <button
+                        className={cn(
+                          'mb-0.5 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] font-medium transition-colors',
+                          activeProjectId === group.project.id
+                            ? 'bg-muted text-foreground'
+                            : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+                        )}
+                        onClick={() => setActiveProject(group.project.id)}
+                        title={group.project.name}
+                      >
+                        <span
+                          className="inline-flex size-4 shrink-0 items-center justify-center"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            toggleProjectCollapsed(group.project.id)
+                          }}
+                        >
+                          <ChevronRight
+                            className={cn(
+                              'size-3.5 transition-transform duration-200 ease-in-out',
+                              !isCollapsed && 'rotate-90'
+                            )}
+                          />
+                        </span>
+                        <FolderOpen className="size-3.5 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{group.project.name}</span>
+                        <span className="text-[10px] text-muted-foreground/60">{group.items.length}</span>
+                      </button>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-48">
+                      <ContextMenuItem
+                        disabled={!canManageProject}
+                        onClick={() => handleRenameProject(group.project.id, group.project.name)}
+                      >
+                        <Pencil className="size-4" />
+                        {t('action.rename', { ns: 'common' })}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        disabled={!canManageProject}
+                        onClick={() =>
+                          handleDeleteProject(
+                            group.project.id,
+                            group.project.name,
+                            group.items.length
+                          )
+                        }
+                      >
+                        <Trash2 className="size-4" />
+                        {t('action.delete', { ns: 'common' })}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                  <div
+                    className={cn(
+                      'grid transition-[grid-template-rows,opacity] duration-200 ease-in-out',
+                      isCollapsed
+                        ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
+                        : 'grid-rows-[1fr] opacity-100'
+                    )}
+                  >
+                    <div className="overflow-hidden">
+                      {group.items.map((session) => (
                   <ContextMenu key={session.id}>
                     <ContextMenuTrigger asChild>
                       <button
@@ -484,26 +710,7 @@ export function SessionListPanel(): React.JSX.Element {
                     </ContextMenuTrigger>
                     <ContextMenuContent className="w-48">
                       <ContextMenuItem
-                        onClick={() => {
-                          const newTitle = window.prompt(
-                            t('sidebar.renameSession'),
-                            session.title
-                          )
-                          if (
-                            newTitle?.trim() &&
-                            newTitle.trim() !== session.title
-                          ) {
-                            useChatStore
-                              .getState()
-                              .updateSessionTitle(
-                                session.id,
-                                newTitle.trim()
-                              )
-                            toast.success(
-                              t('action.rename', { ns: 'common' })
-                            )
-                          }
-                        }}
+                        onClick={() => openRenameDialog('session', session.id, session.title)}
                       >
                         <Pencil className="size-4" />
                         {t('action.rename', { ns: 'common' })}
@@ -647,9 +854,13 @@ export function SessionListPanel(): React.JSX.Element {
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
-                ))}
+                      ))}
+                    </div>
+                  </div>
               </div>
-            ))
+                )
+              })}
+            </>
           )}
         </div>
 
@@ -737,6 +948,91 @@ export function SessionListPanel(): React.JSX.Element {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog
+        open={!!projectDeleteTarget}
+        onOpenChange={(open) => {
+          if (!open) setProjectDeleteTarget(null)
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('sidebar.deleteProject', { defaultValue: 'Delete project' })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('sidebar.deleteProjectConfirm', {
+                defaultValue:
+                  (projectDeleteTarget?.sessionCount ?? 0) > 0
+                    ? `Delete project "${projectDeleteTarget?.name ?? ''}" and ${(projectDeleteTarget?.sessionCount ?? 0)} sessions?`
+                    : `Delete project "${projectDeleteTarget?.name ?? ''}"?`,
+                projectName: projectDeleteTarget?.name ?? '',
+                count: projectDeleteTarget?.sessionCount ?? 0,
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {t('action.cancel', { ns: 'common' })}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                void confirmDeleteProject()
+              }}
+            >
+              {t('action.delete', { ns: 'common' })}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog
+        open={!!renameDialog}
+        onOpenChange={(open) => {
+          if (!open) setRenameDialog(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-sm p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              {renameDialog?.type === 'project'
+                ? t('sidebar.renameProject', { defaultValue: 'Rename project' })
+                : t('sidebar.renameSession')}
+            </DialogTitle>
+          </DialogHeader>
+          <Input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(event) => setRenameValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                confirmRename()
+              }
+              if (event.key === 'Escape') {
+                setRenameDialog(null)
+              }
+            }}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setRenameDialog(null)}
+            >
+              {t('action.cancel', { ns: 'common' })}
+            </Button>
+            <Button
+              size="sm"
+              onClick={confirmRename}
+              disabled={!renameValue.trim()}
+            >
+              {t('action.rename', { ns: 'common' })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

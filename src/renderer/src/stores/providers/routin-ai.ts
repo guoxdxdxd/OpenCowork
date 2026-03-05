@@ -4,7 +4,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
   builtinId: 'routin-ai',
   name: 'Routin AI',
   type: 'openai-chat',
-  defaultBaseUrl: 'https://api.routin.ai/v1',
+  defaultBaseUrl: 'https://cn.routin.ai/v1',
   homepage: 'https://routin.ai',
   apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
   defaultEnabled: true,

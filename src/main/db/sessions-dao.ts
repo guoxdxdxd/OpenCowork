@@ -7,6 +7,7 @@ export interface SessionRow {
   mode: string
   created_at: number
   updated_at: number
+  project_id: string | null
   working_folder: string | null
   ssh_connection_id: string | null
   pinned: number
@@ -40,6 +41,7 @@ export function createSession(session: {
   mode: string
   createdAt: number
   updatedAt: number
+  projectId?: string | null
   workingFolder?: string
   sshConnectionId?: string
   pinned?: boolean
@@ -49,8 +51,8 @@ export function createSession(session: {
 }): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, working_folder, ssh_connection_id, pinned, plugin_id, provider_id, model_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, project_id, working_folder, ssh_connection_id, pinned, plugin_id, provider_id, model_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     session.id,
     session.title,
@@ -58,6 +60,7 @@ export function createSession(session: {
     session.mode,
     session.createdAt,
     session.updatedAt,
+    session.projectId ?? null,
     session.workingFolder ?? null,
     session.sshConnectionId ?? null,
     session.pinned ? 1 : 0,
@@ -74,6 +77,7 @@ export function updateSession(
     icon: string | null
     mode: string
     updatedAt: number
+    projectId: string | null
     workingFolder: string | null
     sshConnectionId: string | null
     pinned: boolean
@@ -101,6 +105,10 @@ export function updateSession(
   if (patch.updatedAt !== undefined) {
     sets.push('updated_at = ?')
     values.push(patch.updatedAt)
+  }
+  if (patch.projectId !== undefined) {
+    sets.push('project_id = ?')
+    values.push(patch.projectId)
   }
   if (patch.workingFolder !== undefined) {
     sets.push('working_folder = ?')

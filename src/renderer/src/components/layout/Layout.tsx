@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageSquare, Briefcase, Code2, ClipboardCopy, Check, ImageDown, Loader2, PanelLeftOpen, PanelRightOpen, PanelRightClose, FolderOpen, Monitor, Server, Pencil } from 'lucide-react'
+import { MessageSquare, Briefcase, Code2, ClipboardCopy, Check, ImageDown, Loader2, PanelLeftOpen, FolderOpen, Monitor, Server, Pencil } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useTheme } from 'next-themes'
 import { confirm } from '@renderer/components/ui/confirm-dialog'
@@ -71,18 +71,22 @@ export function Layout(): React.JSX.Element {
   const mode = useUIStore((s) => s.mode)
   const setMode = useUIStore((s) => s.setMode)
   const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen)
-  const rightPanelOpen = useUIStore((s) => s.rightPanelOpen)
   const detailPanelOpen = useUIStore((s) => s.detailPanelOpen)
   const previewPanelOpen = useUIStore((s) => s.previewPanelOpen)
   const chatView = useUIStore((s) => s.chatView)
   const activeSessionView = useChatStore(
     useShallow((s) => {
       const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
+      const activeProjectId = activeSession?.projectId ?? s.activeProjectId
+      const activeProject = activeProjectId
+        ? s.projects.find((project) => project.id === activeProjectId)
+        : undefined
       return {
+        activeProjectId: activeProjectId ?? null,
         activeSessionTitle: activeSession?.title,
         activeSessionMode: activeSession?.mode as SessionMode | undefined,
-        activeWorkingFolder: activeSession?.workingFolder,
-        activeSessionSshConnectionId: activeSession?.sshConnectionId,
+        activeWorkingFolder: activeProject?.workingFolder,
+        activeSessionSshConnectionId: activeProject?.sshConnectionId,
       }
     })
   )
@@ -448,12 +452,20 @@ export function Layout(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [mode, setSettingsOpen, toggleLeftSidebar, activeSessionId])
 
-  const setSessionWorkingFolder = (folderPath: string): void => {
+  const resolveActiveProjectId = async (): Promise<string | null> => {
     const chatStore = useChatStore.getState()
-    const sessionId = chatStore.activeSessionId ?? chatStore.createSession(mode)
-    if (sessionId) {
-      chatStore.setWorkingFolder(sessionId, folderPath)
-    }
+    if (chatStore.activeProjectId) return chatStore.activeProjectId
+    const ensured = await chatStore.ensureDefaultProject()
+    return ensured?.id ?? null
+  }
+
+  const updateActiveProjectDirectory = async (
+    patch: Partial<{ workingFolder: string | null; sshConnectionId: string | null }>
+  ): Promise<void> => {
+    const chatStore = useChatStore.getState()
+    const projectId = await resolveActiveProjectId()
+    if (!projectId) return
+    chatStore.updateProjectDirectory(projectId, patch)
   }
 
   const handleOpenFolderDialog = (): void => {
@@ -463,11 +475,10 @@ export function Layout(): React.JSX.Element {
   }
 
   const handleSelectDesktopFolder = (folderPath: string): void => {
-    setSessionWorkingFolder(folderPath)
-    // Clear SSH connection if switching to local folder
-    const chatStore = useChatStore.getState()
-    const sid = chatStore.activeSessionId
-    if (sid) chatStore.setSshConnectionId(sid, null)
+    void updateActiveProjectDirectory({
+      workingFolder: folderPath,
+      sshConnectionId: null,
+    })
     setFolderDialogOpen(false)
   }
 
@@ -476,11 +487,10 @@ export function Layout(): React.JSX.Element {
     if (result.canceled || !result.path) {
       return
     }
-    setSessionWorkingFolder(result.path)
-    // Clear SSH connection if switching to local folder
-    const chatStore = useChatStore.getState()
-    const sid = chatStore.activeSessionId
-    if (sid) chatStore.setSshConnectionId(sid, null)
+    await updateActiveProjectDirectory({
+      workingFolder: result.path,
+      sshConnectionId: null,
+    })
     setFolderDialogOpen(false)
   }
 
@@ -488,12 +498,10 @@ export function Layout(): React.JSX.Element {
     const conn = sshConnections.find((c) => c.id === connId)
     if (!conn) return
     const dir = sshDirInputs[connId]?.trim() || conn.defaultDirectory || DEFAULT_SSH_WORKDIR
-    const chatStore = useChatStore.getState()
-    const sessionId = chatStore.activeSessionId ?? chatStore.createSession(mode)
-    if (sessionId) {
-      chatStore.setWorkingFolder(sessionId, dir)
-      chatStore.setSshConnectionId(sessionId, connId)
-    }
+    void updateActiveProjectDirectory({
+      workingFolder: dir,
+      sshConnectionId: connId,
+    })
     setSshDirEditingId(null)
     setFolderDialogOpen(false)
   }
@@ -755,20 +763,6 @@ export function Layout(): React.JSX.Element {
                             </TooltipTrigger>
                             <TooltipContent>{t('layout.copyAll', { defaultValue: 'Copy conversation' })}</TooltipContent>
                           </Tooltip>
-                          {mode !== 'chat' && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  className="group/btn flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200"
-                                  onClick={() => useUIStore.getState().toggleRightPanel()}
-                                  aria-label={t('topbar.togglePanel') ?? undefined}
-                                >
-                                  {useUIStore.getState().rightPanelOpen ? <PanelRightClose className="size-3.5 shrink-0" /> : <PanelRightOpen className="size-3.5 shrink-0" />}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent>{t('topbar.togglePanel')}</TooltipContent>
-                            </Tooltip>
-                          )}
                         </div>
                       </div>
                       <MessageList onRetry={retryLastMessage} onEditUserMessage={editAndResend} />
@@ -998,13 +992,9 @@ export function Layout(): React.JSX.Element {
                     </AnimatePresence>
 
                     {/* Right: Cowork/Code Panel */}
-                    <AnimatePresence>
-                      {mode !== 'chat' && rightPanelOpen && (
-                        <PanelTransition side="right" disabled={false} className="h-full z-0">
-                          <RightPanel compact={previewPanelOpen} />
-                        </PanelTransition>
-                      )}
-                    </AnimatePresence>
+                    {mode !== 'chat' && (
+                      <RightPanel compact={previewPanelOpen} />
+                    )}
                   </div>
                   </ErrorBoundary>
                 </PageTransition>

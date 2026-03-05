@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { getDb } from '../db/database'
 import * as sessionsDao from '../db/sessions-dao'
+import * as projectsDao from '../db/projects-dao'
 import * as messagesDao from '../db/messages-dao'
 import * as plansDao from '../db/plans-dao'
 import * as tasksDao from '../db/tasks-dao'
@@ -8,6 +9,62 @@ import * as tasksDao from '../db/tasks-dao'
 export function registerDbHandlers(): void {
   // Initialize DB on registration
   getDb()
+
+  // --- Projects ---
+
+  ipcMain.handle('db:projects:list', () => {
+    return projectsDao.listProjects()
+  })
+
+  ipcMain.handle('db:projects:get', (_event, id: string) => {
+    return projectsDao.getProject(id) ?? null
+  })
+
+  ipcMain.handle('db:projects:ensure-default', () => {
+    return projectsDao.ensureDefaultProject()
+  })
+
+  ipcMain.handle(
+    'db:projects:create',
+    (
+      _event,
+      project: {
+        id?: string
+        name: string
+        workingFolder?: string | null
+        sshConnectionId?: string | null
+        pluginId?: string | null
+        createdAt?: number
+        updatedAt?: number
+      }
+    ) => {
+      return projectsDao.createProject(project)
+    }
+  )
+
+  ipcMain.handle(
+    'db:projects:update',
+    (
+      _event,
+      args: {
+        id: string
+        patch: Partial<{
+          name: string
+          workingFolder: string | null
+          sshConnectionId: string | null
+          pluginId: string | null
+          updatedAt: number
+        }>
+      }
+    ) => {
+      projectsDao.updateProject(args.id, args.patch)
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle('db:projects:delete', (_event, id: string) => {
+    return projectsDao.deleteProject(id)
+  })
 
   // --- Sessions ---
 
@@ -32,14 +89,38 @@ export function registerDbHandlers(): void {
         mode: string
         createdAt: number
         updatedAt: number
+        projectId?: string
         workingFolder?: string
+        sshConnectionId?: string
         pinned?: boolean
         pluginId?: string
         providerId?: string
         modelId?: string
       }
     ) => {
-      sessionsDao.createSession(session)
+      let projectId = session.projectId
+      let workingFolder = session.workingFolder
+      let sshConnectionId = session.sshConnectionId
+
+      if (!projectId) {
+        const project = projectsDao.ensureDefaultProject()
+        projectId = project.id
+        if (workingFolder === undefined) workingFolder = project.working_folder ?? undefined
+        if (sshConnectionId === undefined) sshConnectionId = project.ssh_connection_id ?? undefined
+      } else {
+        const project = projectsDao.getProject(projectId)
+        if (project) {
+          if (workingFolder === undefined) workingFolder = project.working_folder ?? undefined
+          if (sshConnectionId === undefined) sshConnectionId = project.ssh_connection_id ?? undefined
+        }
+      }
+
+      sessionsDao.createSession({
+        ...session,
+        projectId,
+        workingFolder,
+        sshConnectionId,
+      })
       return { success: true }
     }
   )
@@ -54,7 +135,9 @@ export function registerDbHandlers(): void {
           title: string
           mode: string
           updatedAt: number
+          projectId: string | null
           workingFolder: string | null
+          sshConnectionId: string | null
           pinned: boolean
         }>
       }
@@ -97,12 +180,16 @@ export function registerDbHandlers(): void {
       // Ensure session exists to avoid FK constraint failure (race with fire-and-forget IPC)
       const existing = sessionsDao.getSession(msg.sessionId)
       if (!existing) {
+        const project = projectsDao.ensureDefaultProject()
         sessionsDao.createSession({
           id: msg.sessionId,
           title: 'New Conversation',
           mode: 'chat',
           createdAt: msg.createdAt,
           updatedAt: msg.createdAt,
+          projectId: project.id,
+          workingFolder: project.working_folder ?? undefined,
+          sshConnectionId: project.ssh_connection_id ?? undefined,
         })
       }
       messagesDao.addMessage(msg)

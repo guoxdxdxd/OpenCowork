@@ -95,6 +95,9 @@ export function initChannelEventListener(): void {
       chatId: string
       content: string
       messageId?: string
+      projectId?: string
+      workingFolder?: string
+      sshConnectionId?: string | null
       chatType?: 'p2p' | 'group'
       audio?: { fileKey: string; fileName?: string; mediaType?: string; durationMs?: number }
     }
