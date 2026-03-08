@@ -5,6 +5,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [0.4.6] - 2026-03-09
 
+### Added
+- **Layout refactor** — new sidebar, top bar, session list panel, right panel, detail panel; NavRail navigation for conversations, skills, translate, SSH, settings.
+- **Cowork mode panels** — TeamPanel (agent team members, tasks, messages), ContextPanel (session context, token stats, compress), StepsPanel, ArtifactsPanel, PermissionDialog for tool approval.
+- **Chat component split** — refactored into AssistantMessage, InputArea, MessageItem, MessageList for clearer structure.
+- **Agent store** — dedicated Zustand store for agent runtime state: tool calls, sub-agents, streaming, approval flow, run changes, background processes; persisted via IPC storage.
+- **gitignore-utils** — Git ignore pattern matching for file operations; supports .gitignore parsing and path exclusion.
+- **SSH handlers** — IPC handlers for SSH session lifecycle, shell, SFTP, config groups/connections; integrated with change tracking.
+- **Layout i18n** — English and Chinese locale files for sidebar, topbar, command palette, right panel, detail panel, title bar.
+
+### Changed
+- **Provider panel & settings** — updated ProviderPanel, SettingsPage, provider-icons; settings dialog layout improvements.
+- **use-chat-actions** — enhanced chat action hooks for agent/team flows.
+- **fs-handlers** — integrated gitignore-utils for ignore-aware file operations.
+- **api-proxy, updater** — maintenance and reliability improvements.
+
+### Removed
+- **package-lock.json** — removed in favor of bun.lock.
+- **qwen_models.json** — bundled Qwen catalog removed; Qwen models now configured via provider store presets.
+
 ## [0.4.5] - 2026-03-07
 
 ### Added
