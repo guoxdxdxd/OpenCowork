@@ -29,7 +29,8 @@
 ---
 
 ## WeChat
-<img width="1146" height="1611" alt="b5dd6b05c83636bb2fd1f8abcb18ae1d" src="https://github.com/user-attachments/assets/404df13c-4e8d-4934-aed1-244f5f75cf53" />
+<img width="1080" height="1518" alt="image" src="https://github.com/user-attachments/assets/c6a42f37-b1f0-4b30-8b95-2e3412861a1c" />
+
 
 ## Project Overview
 
