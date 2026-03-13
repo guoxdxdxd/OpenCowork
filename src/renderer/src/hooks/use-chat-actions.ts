@@ -1909,10 +1909,12 @@ export function useChatActions(): {
   }, [])
 
   const retryLastMessage = useCallback(async () => {
+    stopStreaming()
     const chatStore = useChatStore.getState()
     const sessionId = chatStore.activeSessionId
     if (!sessionId) return
 
+    clearPendingSessionMessages(sessionId)
     await chatStore.loadSessionMessages(sessionId)
     const messages = chatStore.getSessionMessages(sessionId)
     const lastEditable = findLastEditableUserMessage(messages)
@@ -1928,7 +1930,7 @@ export function useChatActions(): {
         ? cloneImageAttachments(lastEditable.draft.images)
         : undefined
     )
-  }, [sendMessage])
+  }, [sendMessage, stopStreaming])
 
   const editAndResend = useCallback(
     async (draft: EditableUserMessageDraft) => {
