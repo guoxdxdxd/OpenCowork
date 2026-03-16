@@ -50,6 +50,70 @@ interface CommandResult {
 
 type CommandHandler = (ctx: CommandContext, args: string) => CommandResult
 
+function tokenizeSlashCommandArguments(text: string): string[] {
+  const normalized = text.trim()
+  if (!normalized) return []
+
+  const args: string[] = []
+  let current = ''
+  let quoteChar: '"' | "'" | null = null
+  let escaping = false
+  let tokenStarted = false
+
+  for (const char of normalized) {
+    if (escaping) {
+      current += char
+      escaping = false
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '\\') {
+      escaping = true
+      tokenStarted = true
+      continue
+    }
+
+    if (quoteChar) {
+      if (char === quoteChar) {
+        quoteChar = null
+      } else {
+        current += char
+      }
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '"' || char === "'") {
+      quoteChar = char
+      tokenStarted = true
+      continue
+    }
+
+    if (/\s/.test(char)) {
+      if (tokenStarted) {
+        args.push(current)
+        current = ''
+        tokenStarted = false
+      }
+      continue
+    }
+
+    current += char
+    tokenStarted = true
+  }
+
+  if (escaping) {
+    current += '\\'
+  }
+
+  if (tokenStarted) {
+    args.push(current)
+  }
+
+  return args
+}
+
 // ── Command Registry ──
 
 const commands = new Map<string, CommandHandler>()
@@ -126,9 +190,10 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
     if (result.reply) {
       const service = ctx.pluginManager.getService(ctx.pluginId)
       if (service) {
-        const send = ctx.pluginType === 'qq-bot' && ctx.data.messageId
-          ? service.replyMessage(ctx.data.messageId, result.reply)
-          : service.sendMessage(ctx.chatId, result.reply)
+        const send =
+          ctx.pluginType === 'qq-bot' && ctx.data.messageId
+            ? service.replyMessage(ctx.data.messageId, result.reply)
+            : service.sendMessage(ctx.chatId, result.reply)
         send.catch((err) => {
           console.error(`[PluginCommand] Failed to send ack for /${cmd}:`, err)
         })
@@ -146,9 +211,10 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
   if (result.reply) {
     const service = ctx.pluginManager.getService(ctx.pluginId)
     if (service) {
-      const send = ctx.pluginType === 'qq-bot' && ctx.data.messageId
-        ? service.replyMessage(ctx.data.messageId, result.reply)
-        : service.sendMessage(ctx.chatId, result.reply)
+      const send =
+        ctx.pluginType === 'qq-bot' && ctx.data.messageId
+          ? service.replyMessage(ctx.data.messageId, result.reply)
+          : service.sendMessage(ctx.chatId, result.reply)
       send.catch((err) => {
         console.error(`[PluginCommand] Failed to send reply for /${cmd}:`, err)
       })
@@ -171,7 +237,7 @@ function handleHelp(ctx: CommandContext, args: string): CommandResult {
     '',
     '/help      — 显示此帮助信息',
     '/new       — 清空当前会话，开始新对话',
-    '/init      — 初始化 AGENTS/SOUL/USER/MEMORY 并分析项目更新 AGENTS.md',
+    '/init [args...] — 初始化 AGENTS/SOUL/USER/MEMORY 并分析项目更新 AGENTS.md',
     '/status    — 查看当前状态信息',
     '/stats     — 查看 Token 用量统计',
     '/compress  — 压缩上下文（清理旧工具结果和思考过程）',
@@ -216,8 +282,8 @@ function handleNew(ctx: CommandContext, args: string): CommandResult {
 }
 
 function handleInit(ctx: CommandContext, args: string): CommandResult {
-  void args
   const agentsPath = path.join(ctx.pluginWorkDir, 'AGENTS.md')
+  const parsedArgs = tokenizeSlashCommandArguments(args)
 
   if (!fs.existsSync(ctx.pluginWorkDir)) {
     fs.mkdirSync(ctx.pluginWorkDir, { recursive: true })
@@ -231,7 +297,9 @@ function handleInit(ctx: CommandContext, args: string): CommandResult {
     agentsPath,
     hasExistingAgents,
     createdFiles: initialization.created,
-    existingFiles: initialization.existing
+    existingFiles: initialization.existing,
+    rawArgs: args,
+    parsedArgs
   })
 
   const statusLine = [
@@ -606,8 +674,18 @@ function buildInitAgentPrompt(options: {
   hasExistingAgents: boolean
   createdFiles: WorkspaceMemoryTemplateFile[]
   existingFiles: WorkspaceMemoryTemplateFile[]
+  rawArgs: string
+  parsedArgs: string[]
 }): string {
-  const { workDir, agentsPath, hasExistingAgents, createdFiles, existingFiles } = options
+  const {
+    workDir,
+    agentsPath,
+    hasExistingAgents,
+    createdFiles,
+    existingFiles,
+    rawArgs,
+    parsedArgs
+  } = options
   const existingNote = hasExistingAgents
     ? `There is already an AGENTS.md at \`${agentsPath}\`. Read it first and suggest improvements — preserve any user-customized sections while enhancing the auto-generated parts.`
     : `No AGENTS.md exists yet. Create a new one at \`${agentsPath}\`.`
@@ -617,6 +695,12 @@ function buildInitAgentPrompt(options: {
       : existingFiles.length > 0
         ? `The workspace already contains memory files: ${existingFiles.map((file) => `\`${file}\``).join(', ')}. Read them before changing anything and preserve user-authored content.`
         : 'No workspace memory files were pre-existing.'
+  const argsNote = rawArgs
+    ? `The user passed slash-command arguments to /init.
+- Raw arguments: ${rawArgs}
+- Parsed arguments: ${JSON.stringify(parsedArgs)}
+Treat them as explicit scope or preferences for initialization, and honor them when analyzing the workspace.`
+    : 'No slash-command arguments were provided.'
 
   return `[System Command: /init]
 
@@ -624,6 +708,7 @@ Please analyze the codebase in \`${workDir}\` and ${hasExistingAgents ? 'update'
 
 ${existingNote}
 ${initializedNote}
+${argsNote}
 
 **Your task:**
 1. Explore the project structure using Glob, Grep, and Read tools. Look at package.json, README.md, config files, source entry points, and key modules.

@@ -49,6 +49,7 @@ import {
 } from '@renderer/lib/image-attachments'
 import { loadCommandSnapshot } from '@renderer/lib/commands/command-loader'
 import {
+  buildSlashCommandUserText,
   parseSlashCommandInput,
   serializeSystemCommand,
   type SystemCommandSnapshot
@@ -362,7 +363,7 @@ async function resolveUserCommand(
 
   return {
     command: loaded.command,
-    userText: parsed.userText,
+    userText: buildSlashCommandUserText(loaded.command.name, parsed.userText, parsed.args),
     titleInput: parsed.userText ? `${loaded.command.name} ${parsed.userText}` : loaded.command.name
   }
 }
@@ -2451,8 +2452,7 @@ function mergeUsage(target: TokenUsage, incoming: TokenUsage): void {
   target.inputTokens += incoming.inputTokens
   target.outputTokens += incoming.outputTokens
   if (incoming.billableInputTokens != null) {
-    target.billableInputTokens =
-      (target.billableInputTokens ?? 0) + incoming.billableInputTokens
+    target.billableInputTokens = (target.billableInputTokens ?? 0) + incoming.billableInputTokens
   }
   if (incoming.cacheCreationTokens) {
     target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + incoming.cacheCreationTokens

@@ -18,7 +18,7 @@ import {
   Check,
   AlertCircle,
   Pencil,
-  Trash2,
+  Trash2
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import {
@@ -26,11 +26,12 @@ import {
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,
-  ContextMenuSeparator,
+  ContextMenuSeparator
 } from '@renderer/components/ui/context-menu'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { createSelectFileTag } from '@renderer/lib/select-file-tags'
 import { cn } from '@renderer/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
 
@@ -68,13 +69,27 @@ const EXT_ICONS: Record<string, React.ReactNode> = {
   '.svg': <Image className="size-3.5 text-green-400" />,
   '.png': <Image className="size-3.5 text-green-400" />,
   '.jpg': <Image className="size-3.5 text-green-400" />,
-  '.gif': <Image className="size-3.5 text-green-400" />,
+  '.gif': <Image className="size-3.5 text-green-400" />
 }
 
 const IGNORED_DIRS = new Set([
-  'node_modules', '.git', '.next', '.nuxt', 'dist', 'build', 'out',
-  '__pycache__', '.venv', 'venv', '.cache', '.idea', '.vscode',
-  'target', 'coverage', '.turbo', '.parcel-cache',
+  'node_modules',
+  '.git',
+  '.next',
+  '.nuxt',
+  'dist',
+  'build',
+  'out',
+  '__pycache__',
+  '.venv',
+  'venv',
+  '.cache',
+  '.idea',
+  '.vscode',
+  'target',
+  'coverage',
+  '.turbo',
+  '.parcel-cache'
 ])
 
 function fileIcon(name: string): React.ReactNode {
@@ -99,7 +114,7 @@ function InlineInput({
   depth,
   icon,
   onConfirm,
-  onCancel,
+  onCancel
 }: {
   defaultValue: string
   depth: number
@@ -166,7 +181,7 @@ function TreeItem({
   onCopyPath,
   onPreview,
   editState,
-  actions,
+  actions
 }: {
   node: TreeNode
   depth: number
@@ -180,7 +195,11 @@ function TreeItem({
   const [copied, setCopied] = useState(false)
   const isDir = node.type === 'directory'
   const isIgnored = isDir && IGNORED_DIRS.has(node.name)
-  const safeEditState = editState ?? { renamingPath: null, newItemParent: null, newItemType: 'file' as const }
+  const safeEditState = editState ?? {
+    renamingPath: null,
+    newItemParent: null,
+    newItemType: 'file' as const
+  }
   const isRenaming = safeEditState.renamingPath === node.path
 
   const handleCopy = useCallback(() => {
@@ -193,26 +212,30 @@ function TreeItem({
     <div
       className={cn(
         'group flex items-center gap-1 py-[1px] pr-2 text-[12px] cursor-pointer rounded-sm hover:bg-muted/60 transition-colors',
-        isIgnored && 'opacity-40',
+        isIgnored && 'opacity-40'
       )}
       style={{ paddingLeft: `${depth * 14 + 4}px` }}
-      onClick={() => isDir && !isIgnored ? onToggle(node.path) : onPreview(node.path, node.name)}
+      onClick={() => (isDir && !isIgnored ? onToggle(node.path) : onPreview(node.path, node.name))}
       title={node.path}
     >
       {/* Expand chevron */}
       {isDir ? (
-        node.expanded
-          ? <ChevronDown className="size-3 shrink-0 text-muted-foreground/50" />
-          : <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" />
+        node.expanded ? (
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground/50" />
+        ) : (
+          <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" />
+        )
       ) : (
         <span className="size-3 shrink-0" />
       )}
 
       {/* Icon */}
       {isDir ? (
-        node.expanded
-          ? <FolderOpen className="size-3.5 shrink-0 text-amber-400" />
-          : <Folder className="size-3.5 shrink-0 text-amber-400/70" />
+        node.expanded ? (
+          <FolderOpen className="size-3.5 shrink-0 text-amber-400" />
+        ) : (
+          <Folder className="size-3.5 shrink-0 text-amber-400/70" />
+        )
       ) : (
         fileIcon(node.name)
       )}
@@ -239,10 +262,12 @@ function TreeItem({
           }}
         />
       ) : (
-        <span className={cn(
-          'truncate',
-          isDir ? 'text-foreground/80 font-medium' : 'text-muted-foreground',
-        )}>
+        <span
+          className={cn(
+            'truncate',
+            isDir ? 'text-foreground/80 font-medium' : 'text-muted-foreground'
+          )}
+        >
           {node.name}
         </span>
       )}
@@ -251,7 +276,10 @@ function TreeItem({
       {!isDir && !isRenaming && (
         <button
           className="ml-auto hidden group-hover:block shrink-0 text-muted-foreground/30 hover:text-muted-foreground transition-colors"
-          onClick={(e) => { e.stopPropagation(); handleCopy() }}
+          onClick={(e) => {
+            e.stopPropagation()
+            handleCopy()
+          }}
           title={t('fileTree.copyPath')}
         >
           {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
@@ -263,22 +291,29 @@ function TreeItem({
   return (
     <>
       <ContextMenu>
-        <ContextMenuTrigger asChild>
-          {rowContent}
-        </ContextMenuTrigger>
+        <ContextMenuTrigger asChild>{rowContent}</ContextMenuTrigger>
         <ContextMenuContent className="w-44">
           {isDir && !isIgnored && (
             <>
-              <ContextMenuItem className="gap-2 text-xs" onSelect={() => actions.onNewFile(node.path)}>
+              <ContextMenuItem
+                className="gap-2 text-xs"
+                onSelect={() => actions.onNewFile(node.path)}
+              >
                 <FilePlus2 className="size-3.5" /> {t('fileTree.newFile')}
               </ContextMenuItem>
-              <ContextMenuItem className="gap-2 text-xs" onSelect={() => actions.onNewFolder(node.path)}>
+              <ContextMenuItem
+                className="gap-2 text-xs"
+                onSelect={() => actions.onNewFolder(node.path)}
+              >
                 <FolderPlus className="size-3.5" /> {t('fileTree.newFolder')}
               </ContextMenuItem>
               <ContextMenuSeparator />
             </>
           )}
-          <ContextMenuItem className="gap-2 text-xs" onSelect={() => actions.onRenameStart(node.path, node.name)}>
+          <ContextMenuItem
+            className="gap-2 text-xs"
+            onSelect={() => actions.onRenameStart(node.path, node.name)}
+          >
             <Pencil className="size-3.5" /> {t('action.rename', { ns: 'common' })}
           </ContextMenuItem>
           <ContextMenuItem className="gap-2 text-xs" onSelect={handleCopy}>
@@ -299,9 +334,13 @@ function TreeItem({
         <InlineInput
           defaultValue={safeEditState.newItemType === 'file' ? 'untitled' : 'new-folder'}
           depth={depth + 1}
-          icon={safeEditState.newItemType === 'file'
-            ? <File className="size-3.5 text-muted-foreground/60" />
-            : <Folder className="size-3.5 text-amber-400/70" />}
+          icon={
+            safeEditState.newItemType === 'file' ? (
+              <File className="size-3.5 text-muted-foreground/60" />
+            ) : (
+              <Folder className="size-3.5 text-amber-400/70" />
+            )
+          }
           onConfirm={actions.onNewItemConfirm}
           onCancel={actions.onNewItemCancel}
         />
@@ -355,14 +394,16 @@ export function FileTreePanel(): React.JSX.Element {
   const [newItemType, setNewItemType] = useState<'file' | 'directory'>('file')
 
   const loadDir = useCallback(async (dirPath: string): Promise<TreeNode[]> => {
-    const result = await ipcClient.invoke('fs:list-dir', { path: dirPath }) as FileEntry[] | { error: string }
+    const result = (await ipcClient.invoke('fs:list-dir', { path: dirPath })) as
+      | FileEntry[]
+      | { error: string }
     if ('error' in result) throw new Error(String(result.error))
     const sorted = sortEntries(result as FileEntry[])
     return sorted.map((e) => ({
       ...e,
       expanded: false,
       loaded: e.type === 'file',
-      children: e.type === 'directory' ? [] : undefined,
+      children: e.type === 'directory' ? [] : undefined
     }))
   }, [])
 
@@ -384,163 +425,199 @@ export function FileTreePanel(): React.JSX.Element {
     loadRoot()
   }, [loadRoot])
 
-  const handleToggle = useCallback(async (dirPath: string) => {
-    const toggleNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-      return Promise.all(nodes.map(async (n) => {
-        if (n.path === dirPath && n.type === 'directory') {
-          if (n.expanded) {
-            return { ...n, expanded: false }
-          }
-          if (!n.loaded) {
-            try {
-              const children = await loadDir(dirPath)
-              return { ...n, expanded: true, loaded: true, children }
-            } catch {
-              return { ...n, expanded: true, loaded: true, children: [] }
+  const handleToggle = useCallback(
+    async (dirPath: string) => {
+      const toggleNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
+        return Promise.all(
+          nodes.map(async (n) => {
+            if (n.path === dirPath && n.type === 'directory') {
+              if (n.expanded) {
+                return { ...n, expanded: false }
+              }
+              if (!n.loaded) {
+                try {
+                  const children = await loadDir(dirPath)
+                  return { ...n, expanded: true, loaded: true, children }
+                } catch {
+                  return { ...n, expanded: true, loaded: true, children: [] }
+                }
+              }
+              return { ...n, expanded: true }
             }
-          }
-          return { ...n, expanded: true }
-        }
-        if (n.children) {
-          return { ...n, children: await toggleNode(n.children) }
-        }
-        return n
-      }))
-    }
-    setTree(await toggleNode(tree))
-  }, [tree, loadDir])
+            if (n.children) {
+              return { ...n, children: await toggleNode(n.children) }
+            }
+            return n
+          })
+        )
+      }
+      setTree(await toggleNode(tree))
+    },
+    [tree, loadDir]
+  )
 
   // Refresh a single directory's children in the tree (after create/rename/delete)
-  const refreshDir = useCallback(async (dirPath: string) => {
-    const refresh = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-      return Promise.all(nodes.map(async (n) => {
-        if (n.path === dirPath && n.type === 'directory') {
-          try {
-            const children = await loadDir(dirPath)
-            return { ...n, expanded: true, loaded: true, children }
-          } catch {
+  const refreshDir = useCallback(
+    async (dirPath: string) => {
+      const refresh = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
+        return Promise.all(
+          nodes.map(async (n) => {
+            if (n.path === dirPath && n.type === 'directory') {
+              try {
+                const children = await loadDir(dirPath)
+                return { ...n, expanded: true, loaded: true, children }
+              } catch {
+                return n
+              }
+            }
+            if (n.children) return { ...n, children: await refresh(n.children) }
             return n
-          }
-        }
-        if (n.children) return { ...n, children: await refresh(n.children) }
-        return n
-      }))
-    }
-    setTree(await refresh(tree))
-  }, [tree, loadDir])
+          })
+        )
+      }
+      setTree(await refresh(tree))
+    },
+    [tree, loadDir]
+  )
 
-  const handleCopyPath = useCallback((filePath: string) => {
-    // Make path relative to working folder if possible
-    const rel = workingFolder && filePath.startsWith(workingFolder)
-      ? filePath.slice(workingFolder.length).replace(/^[\\//]/, '')
-      : filePath
-    useUIStore.getState().setPendingInsertText(rel)
-    navigator.clipboard.writeText(filePath)
-  }, [workingFolder])
+  const handleCopyPath = useCallback(
+    (filePath: string) => {
+      // Make path relative to working folder if possible
+      const rel =
+        workingFolder && filePath.startsWith(workingFolder)
+          ? filePath.slice(workingFolder.length).replace(/^[\\//]/, '')
+          : filePath
+      useUIStore.getState().setPendingInsertText(createSelectFileTag(rel))
+      navigator.clipboard.writeText(filePath)
+    },
+    [workingFolder]
+  )
 
   // --- Context menu action handlers ---
 
   const sep = workingFolder?.includes('/') ? '/' : '\\'
 
-  const handleDelete = useCallback(async (nodePath: string, nodeName: string, isDir: boolean) => {
-    const confirmed = await confirm({
-      title: t('fileTree.deleteConfirm', { type: isDir ? t('fileTree.folder') : t('fileTree.file'), name: nodeName }),
-      variant: 'destructive',
-    })
-    if (!confirmed) return
-    try {
-      await ipcClient.invoke('fs:delete', { path: nodePath })
-      const parentDir = nodePath.substring(0, nodePath.lastIndexOf(sep))
-      if (parentDir === workingFolder) {
-        await loadRoot()
-      } else {
-        await refreshDir(parentDir)
+  const handleDelete = useCallback(
+    async (nodePath: string, nodeName: string, isDir: boolean) => {
+      const confirmed = await confirm({
+        title: t('fileTree.deleteConfirm', {
+          type: isDir ? t('fileTree.folder') : t('fileTree.file'),
+          name: nodeName
+        }),
+        variant: 'destructive'
+      })
+      if (!confirmed) return
+      try {
+        await ipcClient.invoke('fs:delete', { path: nodePath })
+        const parentDir = nodePath.substring(0, nodePath.lastIndexOf(sep))
+        if (parentDir === workingFolder) {
+          await loadRoot()
+        } else {
+          await refreshDir(parentDir)
+        }
+      } catch (err) {
+        console.error('Delete failed:', err)
       }
-    } catch (err) {
-      console.error('Delete failed:', err)
-    }
-  }, [sep, workingFolder, loadRoot, refreshDir])
+    },
+    [sep, t, workingFolder, loadRoot, refreshDir]
+  )
 
-  const handleRenameStart = useCallback((nodePath: string, _nodeName: string) => {
+  const handleRenameStart = useCallback((nodePath: string) => {
     setRenamingPath(nodePath)
     setNewItemParent(null)
   }, [])
 
-  const handleRenameConfirm = useCallback(async (newName: string) => {
-    if (!renamingPath) return
-    const parentDir = renamingPath.substring(0, renamingPath.lastIndexOf(sep))
-    const newPath = parentDir + sep + newName
-    try {
-      await ipcClient.invoke('fs:move', { from: renamingPath, to: newPath })
-      setRenamingPath(null)
-      if (parentDir === workingFolder) {
-        await loadRoot()
-      } else {
-        await refreshDir(parentDir)
+  const handleRenameConfirm = useCallback(
+    async (newName: string) => {
+      if (!renamingPath) return
+      const parentDir = renamingPath.substring(0, renamingPath.lastIndexOf(sep))
+      const newPath = parentDir + sep + newName
+      try {
+        await ipcClient.invoke('fs:move', { from: renamingPath, to: newPath })
+        setRenamingPath(null)
+        if (parentDir === workingFolder) {
+          await loadRoot()
+        } else {
+          await refreshDir(parentDir)
+        }
+      } catch (err) {
+        console.error('Rename failed:', err)
       }
-    } catch (err) {
-      console.error('Rename failed:', err)
-    }
-  }, [renamingPath, sep, workingFolder, loadRoot, refreshDir])
+    },
+    [renamingPath, sep, workingFolder, loadRoot, refreshDir]
+  )
 
   const handleRenameCancel = useCallback(() => setRenamingPath(null), [])
 
-  const handleNewFile = useCallback(async (dirPath: string) => {
-    setNewItemParent(dirPath)
-    setNewItemType('file')
-    setRenamingPath(null)
-    // Ensure the directory is expanded
-    const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-      return Promise.all(nodes.map(async (n) => {
-        if (n.path === dirPath && n.type === 'directory' && !n.expanded) {
-          if (!n.loaded) {
-            const children = await loadDir(dirPath)
-            return { ...n, expanded: true, loaded: true, children }
-          }
-          return { ...n, expanded: true }
-        }
-        if (n.children) return { ...n, children: await expandNode(n.children) }
-        return n
-      }))
-    }
-    setTree(await expandNode(tree))
-  }, [tree, loadDir])
-
-  const handleNewFolder = useCallback(async (dirPath: string) => {
-    setNewItemParent(dirPath)
-    setNewItemType('directory')
-    setRenamingPath(null)
-    const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-      return Promise.all(nodes.map(async (n) => {
-        if (n.path === dirPath && n.type === 'directory' && !n.expanded) {
-          if (!n.loaded) {
-            const children = await loadDir(dirPath)
-            return { ...n, expanded: true, loaded: true, children }
-          }
-          return { ...n, expanded: true }
-        }
-        if (n.children) return { ...n, children: await expandNode(n.children) }
-        return n
-      }))
-    }
-    setTree(await expandNode(tree))
-  }, [tree, loadDir])
-
-  const handleNewItemConfirm = useCallback(async (name: string) => {
-    if (!newItemParent) return
-    const newPath = newItemParent + sep + name
-    try {
-      if (newItemType === 'directory') {
-        await ipcClient.invoke('fs:mkdir', { path: newPath })
-      } else {
-        await ipcClient.invoke('fs:write-file', { path: newPath, content: '' })
+  const handleNewFile = useCallback(
+    async (dirPath: string) => {
+      setNewItemParent(dirPath)
+      setNewItemType('file')
+      setRenamingPath(null)
+      // Ensure the directory is expanded
+      const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
+        return Promise.all(
+          nodes.map(async (n) => {
+            if (n.path === dirPath && n.type === 'directory' && !n.expanded) {
+              if (!n.loaded) {
+                const children = await loadDir(dirPath)
+                return { ...n, expanded: true, loaded: true, children }
+              }
+              return { ...n, expanded: true }
+            }
+            if (n.children) return { ...n, children: await expandNode(n.children) }
+            return n
+          })
+        )
       }
-      setNewItemParent(null)
-      await refreshDir(newItemParent)
-    } catch (err) {
-      console.error('Create failed:', err)
-    }
-  }, [newItemParent, newItemType, sep, refreshDir])
+      setTree(await expandNode(tree))
+    },
+    [tree, loadDir]
+  )
+
+  const handleNewFolder = useCallback(
+    async (dirPath: string) => {
+      setNewItemParent(dirPath)
+      setNewItemType('directory')
+      setRenamingPath(null)
+      const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
+        return Promise.all(
+          nodes.map(async (n) => {
+            if (n.path === dirPath && n.type === 'directory' && !n.expanded) {
+              if (!n.loaded) {
+                const children = await loadDir(dirPath)
+                return { ...n, expanded: true, loaded: true, children }
+              }
+              return { ...n, expanded: true }
+            }
+            if (n.children) return { ...n, children: await expandNode(n.children) }
+            return n
+          })
+        )
+      }
+      setTree(await expandNode(tree))
+    },
+    [tree, loadDir]
+  )
+
+  const handleNewItemConfirm = useCallback(
+    async (name: string) => {
+      if (!newItemParent) return
+      const newPath = newItemParent + sep + name
+      try {
+        if (newItemType === 'directory') {
+          await ipcClient.invoke('fs:mkdir', { path: newPath })
+        } else {
+          await ipcClient.invoke('fs:write-file', { path: newPath, content: '' })
+        }
+        setNewItemParent(null)
+        await refreshDir(newItemParent)
+      } catch (err) {
+        console.error('Create failed:', err)
+      }
+    },
+    [newItemParent, newItemType, sep, refreshDir]
+  )
 
   const handleNewItemCancel = useCallback(() => setNewItemParent(null), [])
 
@@ -553,10 +630,10 @@ export function FileTreePanel(): React.JSX.Element {
     onNewFile: handleNewFile,
     onNewFolder: handleNewFolder,
     onNewItemConfirm: handleNewItemConfirm,
-    onNewItemCancel: handleNewItemCancel,
+    onNewItemCancel: handleNewItemCancel
   }
 
-  const handlePreview = useCallback((filePath: string, _name: string) => {
+  const handlePreview = useCallback((filePath: string) => {
     // Open file in unified preview panel
     useUIStore.getState().openFilePreview(filePath)
   }, [])
@@ -623,7 +700,10 @@ export function FileTreePanel(): React.JSX.Element {
       {/* Stats */}
       {tree.length > 0 && (
         <div className="text-[9px] text-muted-foreground/30 px-1">
-          {t('fileTree.stats', { folders: tree.filter((n) => n.type === 'directory').length, files: tree.filter((n) => n.type === 'file').length })}
+          {t('fileTree.stats', {
+            folders: tree.filter((n) => n.type === 'directory').length,
+            files: tree.filter((n) => n.type === 'file').length
+          })}
         </div>
       )}
     </div>

@@ -18,7 +18,9 @@ import {
   type EditableUserMessageDraft,
   type ImageAttachment
 } from '@renderer/lib/image-attachments'
+import { selectFileTextToPlainText } from '@renderer/lib/select-file-tags'
 import { SystemCommandCard } from './SystemCommandCard'
+import { SelectFileInlineText } from './SelectFileInlineText'
 
 interface UserMessageProps {
   content: string | ContentBlock[]
@@ -32,7 +34,9 @@ export function UserMessage({ content, isLast, onEdit }: UserMessageProps): Reac
   const plainText = currentDraft.text
   const allImages = currentDraft.images
   const command = currentDraft.command
-  const copyText = command ? `/${command.name}${plainText ? ` ${plainText}` : ''}` : plainText
+  const copyText = command
+    ? `/${command.name}${plainText ? ` ${selectFileTextToPlainText(plainText)}` : ''}`
+    : selectFileTextToPlainText(plainText)
 
   const fullText =
     typeof content === 'string'
@@ -245,7 +249,11 @@ export function UserMessage({ content, isLast, onEdit }: UserMessageProps): Reac
         ) : (
           <>
             {command && <SystemCommandCard command={command} />}
-            {plainText && <div className="text-sm whitespace-pre-wrap leading-relaxed">{plainText}</div>}
+            {plainText && (
+              <div className="text-sm leading-relaxed">
+                <SelectFileInlineText text={plainText} />
+              </div>
+            )}
             {allImages.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {allImages.map((img) => (

@@ -41,8 +41,15 @@ import {
   type EditableUserMessageDraft,
   type ImageAttachment
 } from '@renderer/lib/image-attachments'
+import {
+  createSelectFileTag,
+  getSelectFileMentionQuery,
+  hasSelectFileTag,
+  selectFileTextToPlainText
+} from '@renderer/lib/select-file-tags'
 import { SkillsMenu } from './SkillsMenu'
 import { ModelSwitcher } from './ModelSwitcher'
+import { SelectFileInlineText } from './SelectFileInlineText'
 import { listCommands, type CommandCatalogItem } from '@renderer/lib/commands/command-loader'
 import { useMcpStore } from '@renderer/stores/mcp-store'
 import {
@@ -74,6 +81,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@renderer/components/ui/dialog'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 
 function ContextRing(): React.JSX.Element | null {
   const chatView = useUIStore((s) => s.chatView)
@@ -209,6 +217,11 @@ interface InputHistoryDraft {
   selectedSkill: string | null
 }
 
+interface FileSearchItem {
+  name: string
+  path: string
+}
+
 const EMPTY_QUEUED_MESSAGES: PendingSessionMessageItem[] = []
 const EMPTY_SESSION_MESSAGES: UnifiedMessage[] = []
 const INPUT_HISTORY_LIMIT = 30
@@ -222,7 +235,7 @@ const MAX_SLASH_COMMAND_RESULTS = 8
 function getSlashCommandQuery(text: string): string | null {
   const normalized = text.trimStart()
   const match = normalized.match(/^\/([^\s]*)$/)
-  return match ? match[1] ?? '' : null
+  return match ? (match[1] ?? '') : null
 }
 
 function scoreSlashCommand(name: string, query: string): number {
@@ -260,6 +273,8 @@ function areQueuedMessagesEqual(
     if (leftMsg.id !== rightMsg.id) return false
     if (leftMsg.text !== rightMsg.text) return false
     if (leftMsg.createdAt !== rightMsg.createdAt) return false
+    if (leftMsg.command?.name !== rightMsg.command?.name) return false
+    if (leftMsg.command?.content !== rightMsg.command?.content) return false
     if (leftMsg.images.length !== rightMsg.images.length) return false
     for (let j = 0; j < leftMsg.images.length; j += 1) {
       if (leftMsg.images[j].id !== rightMsg.images[j].id) return false
@@ -269,7 +284,7 @@ function areQueuedMessagesEqual(
 }
 
 function summarizeQueuedMessage(text: string): string {
-  const normalized = text.replace(/\s+/g, ' ').trim()
+  const normalized = selectFileTextToPlainText(text).replace(/\s+/g, ' ').trim()
   if (!normalized) return ''
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized
 }
@@ -300,6 +315,9 @@ export function InputArea({
   const [slashCommands, setSlashCommands] = React.useState<CommandCatalogItem[]>([])
   const [slashCommandsLoading, setSlashCommandsLoading] = React.useState(false)
   const [selectedSlashIndex, setSelectedSlashIndex] = React.useState(0)
+  const [fileSearchResults, setFileSearchResults] = React.useState<FileSearchItem[]>([])
+  const [fileSearchLoading, setFileSearchLoading] = React.useState(false)
+  const [selectedFileSearchIndex, setSelectedFileSearchIndex] = React.useState(0)
   const [attachedImages, setAttachedImages] = React.useState<ImageAttachment[]>([])
   const [isOptimizing, setIsOptimizing] = React.useState(false)
   const [, setOptimizingText] = React.useState('')
@@ -318,6 +336,7 @@ export function InputArea({
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const queueFileInputRef = React.useRef<HTMLInputElement>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
+  const [inputSelection, setInputSelection] = React.useState({ start: 0, end: 0 })
   const [inputHeight, setInputHeight] = React.useState<number | null>(null)
   const dragRef = React.useRef<{ startY: number; startH: number; maxH: number } | null>(null)
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -506,12 +525,13 @@ export function InputArea({
   const saveQueuedMessage = React.useCallback(
     (id: string) => {
       if (!activeSessionId) return
-      if (!queuedMessages.some((msg) => msg.id === id)) return
+      const targetMessage = queuedMessages.find((msg) => msg.id === id)
+      if (!targetMessage) return
 
       const nextDraft: EditableUserMessageDraft = {
         text: editingQueueText.trim(),
         images: cloneImageAttachments(editingQueueImages),
-        command: null
+        command: targetMessage.command
       }
 
       if (!hasEditableDraftContent(nextDraft)) {
@@ -607,6 +627,7 @@ export function InputArea({
     fallbackSuggestion: recommendationFallback,
     textareaRef
   })
+  const hasFileTags = React.useMemo(() => hasSelectFileTag(text), [text])
   const resizeTextarea = React.useCallback(() => {
     const el = textareaRef.current
     if (!el) return
@@ -618,21 +639,43 @@ export function InputArea({
 
     el.style.height = 'auto'
     const suggestionHeight = suggestionMeasureRef.current?.scrollHeight ?? 0
-    const autoMaxHeight = measureText ? getMaxInputHeight() : 200
-    const nextHeight = Math.min(Math.max(el.scrollHeight, suggestionHeight, 60), autoMaxHeight)
+    const contentHeight = hasFileTags ? suggestionHeight : el.scrollHeight
+    const autoMaxHeight = measureText || hasFileTags ? getMaxInputHeight() : 200
+    const nextHeight = Math.min(Math.max(contentHeight, suggestionHeight, 60), autoMaxHeight)
     el.style.height = `${nextHeight}px`
-  }, [getMaxInputHeight, inputHeight, measureText])
+  }, [getMaxInputHeight, hasFileTags, inputHeight, measureText])
 
   React.useEffect(() => {
     resizeTextarea()
   }, [inputHeight, resizeTextarea])
+
+  const syncInputSelection = React.useCallback(() => {
+    const el = textareaRef.current
+    if (!el) return
+    setInputSelection({
+      start: el.selectionStart ?? 0,
+      end: el.selectionEnd ?? 0
+    })
+  }, [])
+
+  React.useEffect(() => {
+    syncInputSelection()
+  }, [syncInputSelection, text])
+
   const focusInputAtEnd = React.useCallback(() => {
     const el = textareaRef.current
     if (!el) return
     el.focus()
     const cursor = el.value.length
     el.setSelectionRange(cursor, cursor)
+    setInputSelection({ start: cursor, end: cursor })
   }, [])
+  const activeFileMention = React.useMemo(() => {
+    if (inputSelection.start !== inputSelection.end) return null
+    return getSelectFileMentionQuery(text, inputSelection.end)
+  }, [inputSelection.end, inputSelection.start, text])
+  const fileQuery = activeFileMention?.query.trim() ?? ''
+  const fileMenuOpen = Boolean(activeFileMention && fileQuery && workingFolder)
   const slashQuery = React.useMemo(() => getSlashCommandQuery(text), [text])
   const filteredSlashCommands = React.useMemo(() => {
     const query = slashQuery ?? ''
@@ -678,6 +721,76 @@ export function InputArea({
   React.useEffect(() => {
     setSelectedSlashIndex(0)
   }, [slashQuery])
+
+  React.useEffect(() => {
+    setSelectedFileSearchIndex(0)
+  }, [fileQuery])
+
+  React.useEffect(() => {
+    if (!fileMenuOpen || !workingFolder) {
+      setFileSearchResults([])
+      setFileSearchLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setFileSearchLoading(true)
+
+    const timer = window.setTimeout(() => {
+      void ipcClient
+        .invoke('fs:search-files', {
+          path: workingFolder,
+          query: fileQuery,
+          limit: 20
+        })
+        .then((result) => {
+          if (cancelled) return
+          if (Array.isArray(result)) {
+            setFileSearchResults(result as FileSearchItem[])
+            return
+          }
+          setFileSearchResults([])
+        })
+        .finally(() => {
+          if (cancelled) return
+          setFileSearchLoading(false)
+        })
+    }, 120)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [fileMenuOpen, fileQuery, workingFolder])
+
+  const insertSelectedFile = React.useCallback(
+    (filePath: string) => {
+      clearHistoryNavigation()
+      setSelectedSkill(null)
+
+      const mention = activeFileMention
+      const tag = createSelectFileTag(filePath)
+      if (!mention || !tag) return
+
+      const before = text.slice(0, mention.start)
+      const after = text.slice(mention.end)
+      const suffix =
+        after.startsWith(' ') || after.startsWith('\n') || after.length === 0 ? '' : ' '
+      const nextText = `${before}${tag}${suffix}${after}`
+      const nextCursor = before.length + tag.length + suffix.length
+
+      setText(nextText)
+      requestAnimationFrame(() => {
+        resizeTextarea()
+        const el = textareaRef.current
+        if (!el) return
+        el.focus()
+        el.setSelectionRange(nextCursor, nextCursor)
+        setInputSelection({ start: nextCursor, end: nextCursor })
+      })
+    },
+    [activeFileMention, clearHistoryNavigation, resizeTextarea, text]
+  )
 
   const insertSlashCommand = React.useCallback(
     (commandName: string) => {
@@ -981,6 +1094,40 @@ export function InputArea({
     if (e.nativeEvent.isComposing) return
     if (isOptimizing) return // Disable input during optimization
 
+    if (fileMenuOpen) {
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedFileSearchIndex((prev) =>
+          fileSearchResults.length === 0 ? 0 : (prev + 1) % fileSearchResults.length
+        )
+        return
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedFileSearchIndex((prev) =>
+          fileSearchResults.length === 0
+            ? 0
+            : (prev - 1 + fileSearchResults.length) % fileSearchResults.length
+        )
+        return
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'Tab' || e.key === 'Enter')) {
+        const selectedFile = fileSearchResults[selectedFileSearchIndex]
+        if (selectedFile) {
+          e.preventDefault()
+          insertSelectedFile(selectedFile.path)
+          return
+        }
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'Escape') {
+        e.preventDefault()
+        const nextCursor = activeFileMention?.start ?? 0
+        e.currentTarget.setSelectionRange(nextCursor, nextCursor)
+        setInputSelection({ start: nextCursor, end: nextCursor })
+        return
+      }
+    }
+
     if (slashMenuOpen) {
       if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
         e.preventDefault()
@@ -1056,12 +1203,18 @@ export function InputArea({
     if (isOptimizing) return // Disable input during optimization
     clearHistoryNavigation()
     setText(e.target.value)
+    setInputSelection({
+      start: e.target.selectionStart ?? e.target.value.length,
+      end: e.target.selectionEnd ?? e.target.value.length
+    })
     if (inputHeight) return
     const el = e.target
     // Ensure we disable field-sizing: content to control height manually
     el.style.setProperty('field-sizing', 'fixed')
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+    const measureHeight = suggestionMeasureRef.current?.scrollHeight ?? 0
+    const nextHeight = hasFileTags ? measureHeight : el.scrollHeight
+    el.style.height = `${Math.min(Math.max(nextHeight, 60), 200)}px`
   }
 
   // Paste handler for images
@@ -1095,7 +1248,16 @@ export function InputArea({
         : fileArr
       if (imageFiles.length > 0) addImages(imageFiles)
       if (otherFiles.length > 0) {
-        const paths = otherFiles.map((f) => (f as File & { path: string }).path).filter(Boolean)
+        const paths = otherFiles
+          .map((f) => (f as File & { path: string }).path)
+          .filter(Boolean)
+          .map((filePath) => {
+            if (!workingFolder || !filePath.startsWith(workingFolder)) {
+              return createSelectFileTag(filePath)
+            }
+            return createSelectFileTag(filePath.slice(workingFolder.length).replace(/^[\\/]/, ''))
+          })
+          .filter(Boolean)
         if (paths.length > 0) {
           const insertion = paths.join('\n')
           setText((prev) => (prev ? `${prev}\n${insertion}` : insertion))
@@ -1360,6 +1522,7 @@ export function InputArea({
                       {queuedMessages.map((msg) => {
                         const isEditing = editingQueueItemId === msg.id
                         const summaryText = summarizeQueuedMessage(msg.text)
+                        const commandLabel = msg.command ? `/${msg.command.name}` : ''
                         return (
                           <div
                             key={msg.id}
@@ -1392,6 +1555,11 @@ export function InputArea({
                                     </Button>
                                   </div>
                                 </div>
+                                {msg.command && (
+                                  <div className="rounded-md border border-violet-500/20 bg-violet-500/5 px-2.5 py-1.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                                    /{msg.command.name}
+                                  </div>
+                                )}
                                 <Textarea
                                   value={editingQueueText}
                                   onChange={(e) => setEditingQueueText(e.target.value)}
@@ -1448,8 +1616,14 @@ export function InputArea({
                                 <div className="min-w-0 flex-1">
                                   <div className="truncate text-xs leading-5 text-foreground/90">
                                     {summaryText ||
+                                      commandLabel ||
                                       t('input.queueImageOnly', { defaultValue: '[仅图片]' })}
                                   </div>
+                                  {commandLabel && summaryText && (
+                                    <div className="mt-1 text-[10px] text-violet-700 dark:text-violet-300">
+                                      {commandLabel}
+                                    </div>
+                                  )}
                                   {msg.images.length > 0 && (
                                     <div className="mt-1 flex items-center gap-1.5">
                                       <span className="rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
@@ -1682,9 +1856,21 @@ export function InputArea({
                 aria-hidden="true"
                 className="pointer-events-none invisible absolute inset-0 whitespace-pre-wrap break-words p-1 text-base md:text-sm"
               >
-                {measureText || text || ' '}
+                {hasFileTags ? (
+                  <SelectFileInlineText text={measureText || text || ' '} overlay />
+                ) : (
+                  measureText || text || ' '
+                )}
               </div>
-              {suggestionText && (
+              {hasFileTags && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words p-1 text-base text-foreground md:text-sm"
+                >
+                  <SelectFileInlineText text={text || ' '} overlay />
+                </div>
+              )}
+              {suggestionText && !hasFileTags && (
                 <>
                   <div
                     aria-hidden="true"
@@ -1706,22 +1892,87 @@ export function InputArea({
                 onChange={handleInput}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                onFocus={handleRecommendationFocus}
+                onFocus={() => {
+                  handleRecommendationFocus()
+                  syncInputSelection()
+                }}
                 onBlur={handleRecommendationBlur}
-                onClick={handleRecommendationSelectionChange}
-                onKeyUp={handleRecommendationSelectionChange}
-                onSelect={handleRecommendationSelectionChange}
+                onClick={() => {
+                  handleRecommendationSelectionChange()
+                  syncInputSelection()
+                }}
+                onKeyUp={() => {
+                  handleRecommendationSelectionChange()
+                  syncInputSelection()
+                }}
+                onSelect={() => {
+                  handleRecommendationSelectionChange()
+                  syncInputSelection()
+                }}
                 onCompositionStart={handleRecommendationCompositionStart}
-                onCompositionEnd={handleRecommendationCompositionEnd}
+                onCompositionEnd={() => {
+                  handleRecommendationCompositionEnd()
+                  syncInputSelection()
+                }}
                 placeholder={
                   effectivePlaceholder ?? t(placeholderKeys[mode] ?? 'input.placeholder')
                 }
-                className="relative z-10 min-h-[60px] w-full resize-none border-0 bg-transparent dark:bg-transparent p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1"
+                className={`relative z-10 min-h-[60px] w-full resize-none border-0 bg-transparent dark:bg-transparent p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1 ${hasFileTags ? 'text-transparent caret-foreground selection:bg-primary/20' : ''}`}
                 rows={1}
                 disabled={disabled || isOptimizing}
               />
+              {fileMenuOpen && (
+                <div className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border border-border/70 bg-popover shadow-xl">
+                  <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+                    <Command className="size-3.5" />
+                    <span>{t('input.fileSuggestions', { defaultValue: '文件建议' })}</span>
+                    <span className="ml-auto rounded-full border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px]">
+                      @{fileQuery}
+                    </span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-1.5">
+                    {fileSearchLoading ? (
+                      <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+                        <Spinner className="size-3.5" />
+                        <span>{t('input.loadingFiles', { defaultValue: '搜索文件中...' })}</span>
+                      </div>
+                    ) : fileSearchResults.length === 0 ? (
+                      <div className="px-2 py-3 text-xs text-muted-foreground">
+                        {t('input.noFilesFound', { defaultValue: '没有匹配的文件' })}
+                      </div>
+                    ) : (
+                      fileSearchResults.map((file, index) => {
+                        const isSelected = index === selectedFileSearchIndex
+                        return (
+                          <button
+                            key={file.path}
+                            type="button"
+                            className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              isSelected
+                                ? 'bg-accent text-accent-foreground'
+                                : 'hover:bg-muted/50 text-foreground'
+                            }`}
+                            onMouseDown={(event) => {
+                              event.preventDefault()
+                              insertSelectedFile(file.path)
+                            }}
+                          >
+                            <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">{file.name}</div>
+                              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                                {file.path}
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
               {slashMenuOpen && (
-                <div className="absolute inset-x-0 top-full z-30 mt-2 overflow-hidden rounded-xl border border-border/70 bg-popover shadow-xl">
+                <div className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border border-border/70 bg-popover shadow-xl">
                   <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
                     <Command className="size-3.5" />
                     <span>{t('input.commandSuggestions', { defaultValue: '命令建议' })}</span>

@@ -6,6 +6,7 @@ export interface SystemCommandSnapshot {
 export interface ParsedSlashCommandInput {
   commandName: string
   userText: string
+  args: string[]
 }
 
 export interface ParsedSystemCommandTag {
@@ -37,6 +38,87 @@ export function normalizeCommandName(name: string): string {
   return name.trim().toLowerCase()
 }
 
+function tokenizeSlashCommandArguments(text: string): string[] {
+  const normalized = text.trim()
+  if (!normalized) return []
+
+  const args: string[] = []
+  let current = ''
+  let quoteChar: '"' | "'" | null = null
+  let escaping = false
+  let tokenStarted = false
+
+  for (const char of normalized) {
+    if (escaping) {
+      current += char
+      escaping = false
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '\\') {
+      escaping = true
+      tokenStarted = true
+      continue
+    }
+
+    if (quoteChar) {
+      if (char === quoteChar) {
+        quoteChar = null
+      } else {
+        current += char
+      }
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '"' || char === "'") {
+      quoteChar = char
+      tokenStarted = true
+      continue
+    }
+
+    if (/\s/.test(char)) {
+      if (tokenStarted) {
+        args.push(current)
+        current = ''
+        tokenStarted = false
+      }
+      continue
+    }
+
+    current += char
+    tokenStarted = true
+  }
+
+  if (escaping) {
+    current += '\\'
+  }
+
+  if (tokenStarted) {
+    args.push(current)
+  }
+
+  return args
+}
+
+export function buildSlashCommandUserText(
+  commandName: string,
+  userText: string,
+  args: string[]
+): string {
+  if (!userText) return ''
+
+  return `<system-reminder>
+The user invoked slash command /${normalizeCommandName(commandName)} with explicit arguments.
+Raw arguments: ${userText}
+Parsed arguments: ${JSON.stringify(args)}
+Treat these values as slash-command parameters.
+</system-reminder>
+
+${userText}`
+}
+
 export function parseSlashCommandInput(text: string): ParsedSlashCommandInput | null {
   const normalized = text.trimStart()
   if (!normalized.startsWith('/')) return null
@@ -44,9 +126,12 @@ export function parseSlashCommandInput(text: string): ParsedSlashCommandInput | 
   const match = normalized.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/)
   if (!match) return null
 
+  const userText = match[2]?.trim() ?? ''
+
   return {
     commandName: match[1].trim(),
-    userText: match[2]?.trim() ?? ''
+    userText,
+    args: tokenizeSlashCommandArguments(userText)
   }
 }
 

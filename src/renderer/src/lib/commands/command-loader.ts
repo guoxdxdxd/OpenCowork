@@ -18,7 +18,9 @@ export async function listCommands(): Promise<CommandCatalogItem[]> {
 
 export async function loadCommandSnapshot(
   name: string
-): Promise<{ command: SystemCommandSnapshot; summary: string } | { error: string; notFound?: boolean }> {
+): Promise<
+  { command: SystemCommandSnapshot; summary: string } | { error: string; notFound?: boolean }
+> {
   try {
     const result = (await ipcClient.invoke(IPC.COMMANDS_LOAD, { name })) as
       | { name?: string; content?: string; summary?: string; error?: string; notFound?: boolean }

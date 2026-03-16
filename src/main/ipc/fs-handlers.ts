@@ -35,6 +35,10 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   '.heif': 'image/heif'
 }
 
+const FILE_SEARCH_CACHE_TTL_MS = 5_000
+const FILE_SEARCH_MAX_RESULTS = 20
+const fileSearchCache = new Map<string, { expiresAt: number; files: string[] }>()
+
 type GrepResultItem = { file: string; line: number; text: string }
 type GrepLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | null
 
@@ -217,6 +221,66 @@ function normalizeRipgrepGlob(pattern: string): string {
     return `*${normalized}`
   }
   return normalized
+}
+
+function scoreFileSearchMatch(filePath: string, query: string): number {
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase()
+  const normalizedQuery = query.replace(/\\/g, '/').trim().toLowerCase()
+  if (!normalizedQuery) return Number.POSITIVE_INFINITY
+
+  const fileName = path.basename(normalizedPath)
+  if (fileName === normalizedQuery) return 0
+  if (fileName.startsWith(normalizedQuery)) return 1
+
+  const fileNameIndex = fileName.indexOf(normalizedQuery)
+  if (fileNameIndex >= 0) return 10 + fileNameIndex
+
+  if (normalizedPath === normalizedQuery) return 20
+
+  const pathIndex = normalizedPath.indexOf(normalizedQuery)
+  if (pathIndex >= 0) return 30 + pathIndex
+
+  let cursor = 0
+  let gapScore = 0
+  for (const char of normalizedQuery) {
+    const nextIndex = normalizedPath.indexOf(char, cursor)
+    if (nextIndex < 0) return Number.POSITIVE_INFINITY
+    gapScore += nextIndex - cursor
+    cursor = nextIndex + 1
+  }
+
+  return 100 + gapScore
+}
+
+async function listSearchableFiles(searchRoot: string): Promise<string[]> {
+  const normalizedRoot = path.resolve(searchRoot)
+  const now = Date.now()
+  const cached = fileSearchCache.get(normalizedRoot)
+  if (cached && cached.expiresAt > now) {
+    return cached.files
+  }
+
+  const matcher = await createLocalGitIgnoreContext(normalizedRoot)
+  const matches = await glob('**/*', {
+    cwd: normalizedRoot,
+    nodir: true,
+    dot: true,
+    ignore: buildGlobIgnorePatterns('**/*')
+  })
+
+  const files: string[] = []
+  for (const match of matches) {
+    const absolutePath = path.join(normalizedRoot, match)
+    if (await matcher.ignores(absolutePath, false)) continue
+    files.push(match.replace(/\\/g, '/'))
+  }
+
+  fileSearchCache.set(normalizedRoot, {
+    expiresAt: now + FILE_SEARCH_CACHE_TTL_MS,
+    files
+  })
+
+  return files
 }
 
 function isBinaryFile(filePath: string): boolean {
@@ -659,6 +723,38 @@ export function registerFsHandlers(): void {
       return { error: String(err) }
     }
   })
+
+  ipcMain.handle(
+    'fs:search-files',
+    async (_event, args: { path: string; query: string; limit?: number }) => {
+      try {
+        const searchRoot = path.resolve(args.path || process.cwd())
+        const normalizedQuery = args.query?.trim()
+        if (!normalizedQuery) return []
+
+        const files = await listSearchableFiles(searchRoot)
+        const limit = Math.max(1, Math.min(args.limit ?? FILE_SEARCH_MAX_RESULTS, 100))
+
+        return files
+          .map((filePath) => ({
+            path: filePath,
+            score: scoreFileSearchMatch(filePath, normalizedQuery)
+          }))
+          .filter((item) => Number.isFinite(item.score))
+          .sort((left, right) => {
+            if (left.score !== right.score) return left.score - right.score
+            return left.path.localeCompare(right.path, undefined, { sensitivity: 'base' })
+          })
+          .slice(0, limit)
+          .map((item) => ({
+            path: item.path,
+            name: path.basename(item.path)
+          }))
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
 
   ipcMain.handle(
     'fs:grep',

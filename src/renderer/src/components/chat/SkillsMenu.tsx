@@ -1,6 +1,15 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Plus, Sparkles, Loader2, Command, MessageSquare, Settings2, Check, Cable } from 'lucide-react'
+import {
+  Plus,
+  Sparkles,
+  Loader2,
+  Command,
+  MessageSquare,
+  Settings2,
+  Check,
+  Cable
+} from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import {
   DropdownMenu,
@@ -13,7 +22,7 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger
 } from '@renderer/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useSkillsStore } from '@renderer/stores/skills-store'
@@ -111,7 +120,7 @@ export function SkillsMenu({
       <DropdownMenuContent align="start" className="w-56">
         <DropdownMenuLabel>{t('skills.addToChat')}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        
+
         <DropdownMenuGroup>
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
@@ -120,7 +129,9 @@ export function SkillsMenu({
             </DropdownMenuSubTrigger>
             <DropdownMenuPortal>
               <DropdownMenuSubContent className="w-64 max-h-80 overflow-y-auto">
-                <DropdownMenuLabel>{t('skills.availableCommands', { defaultValue: '可用命令' })}</DropdownMenuLabel>
+                <DropdownMenuLabel>
+                  {t('skills.availableCommands', { defaultValue: '可用命令' })}
+                </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 {commandsLoading ? (
                   <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
@@ -176,9 +187,7 @@ export function SkillsMenu({
                 ) : skills.length === 0 ? (
                   <div className="px-2 py-4 text-center text-xs text-muted-foreground">
                     <p>{t('skills.noSkills')}</p>
-                    <p className="mt-1 text-[10px] opacity-70">
-                      ~/.open-cowork/skills/
-                    </p>
+                    <p className="mt-1 text-[10px] opacity-70">~/.open-cowork/skills/</p>
                   </div>
                 ) : (
                   skills.map((skill) => (
@@ -214,7 +223,9 @@ export function SkillsMenu({
             </DropdownMenuSubTrigger>
             <DropdownMenuPortal>
               <DropdownMenuSubContent className="w-56 max-h-80 overflow-y-auto">
-                <DropdownMenuLabel>{t('skills.availableChannels', 'Available Channels')}</DropdownMenuLabel>
+                <DropdownMenuLabel>
+                  {t('skills.availableChannels', 'Available Channels')}
+                </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 {configuredChannels.length === 0 ? (
                   <div className="px-2 py-4 text-center text-xs text-muted-foreground">
@@ -280,7 +291,9 @@ export function SkillsMenu({
             </DropdownMenuSubTrigger>
             <DropdownMenuPortal>
               <DropdownMenuSubContent className="w-56 max-h-80 overflow-y-auto">
-                <DropdownMenuLabel>{t('skills.availableMcps', 'Connected MCP Servers')}</DropdownMenuLabel>
+                <DropdownMenuLabel>
+                  {t('skills.availableMcps', 'Connected MCP Servers')}
+                </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 {connectedMcpServers.length === 0 ? (
                   <div className="px-2 py-4 text-center text-xs text-muted-foreground">

@@ -1,25 +1,39 @@
-import { ipcMain } from 'electron'
+import { app, ipcMain } from 'electron'
 import * as fs from 'fs'
-import * as path from 'path'
 import * as os from 'os'
+import * as path from 'path'
 
-const COMMANDS_DIR = path.join(os.homedir(), '.open-cowork', 'commands')
+const USER_COMMANDS_DIR = path.join(os.homedir(), '.open-cowork', 'commands')
 
 export interface CommandInfo {
   name: string
   summary: string
 }
 
-function ensureCommandsDir(): void {
-  if (!fs.existsSync(COMMANDS_DIR)) {
-    fs.mkdirSync(COMMANDS_DIR, { recursive: true })
+function getBundledCommandsDir(): string {
+  const isDev = !app.isPackaged
+  if (isDev) {
+    return path.join(app.getAppPath(), 'resources', 'commands')
+  }
+
+  const unpackedDir = path.join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'commands')
+  if (fs.existsSync(unpackedDir)) {
+    return unpackedDir
+  }
+
+  return path.join(process.resourcesPath, 'resources', 'commands')
+}
+
+function ensureUserCommandsDir(): void {
+  if (!fs.existsSync(USER_COMMANDS_DIR)) {
+    fs.mkdirSync(USER_COMMANDS_DIR, { recursive: true })
   }
 }
 
-function getCommandEntries(): fs.Dirent[] {
-  ensureCommandsDir()
+function listCommandEntries(dir: string): fs.Dirent[] {
+  if (!fs.existsSync(dir)) return []
   return fs
-    .readdirSync(COMMANDS_DIR, { withFileTypes: true })
+    .readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
 }
 
@@ -44,33 +58,69 @@ function summarizeCommand(content: string): string {
   return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized
 }
 
-function resolveCommandPath(name: string): string | null {
+function resolveBundledCommandPath(name: string): string | null {
   const normalized = normalizeCommandName(name)
   if (!normalized) return null
 
-  const matched = getCommandEntries().find(
+  const bundledDir = getBundledCommandsDir()
+  const matched = listCommandEntries(bundledDir).find(
     (entry) => normalizeCommandName(commandNameFromFilename(entry.name)) === normalized
   )
 
   if (!matched) return null
-  return path.join(COMMANDS_DIR, matched.name)
+  return path.join(bundledDir, matched.name)
+}
+
+function resolveUserCommandPath(name: string): string | null {
+  const normalized = normalizeCommandName(name)
+  if (!normalized) return null
+
+  const matched = listCommandEntries(USER_COMMANDS_DIR).find(
+    (entry) => normalizeCommandName(commandNameFromFilename(entry.name)) === normalized
+  )
+
+  if (!matched) return null
+  return path.join(USER_COMMANDS_DIR, matched.name)
+}
+
+function resolveCommandPath(name: string): string | null {
+  return resolveBundledCommandPath(name) ?? resolveUserCommandPath(name)
+}
+
+function collectCommands(): CommandInfo[] {
+  const commandsByName = new Map<string, CommandInfo>()
+  const commandPaths = [
+    ...listCommandEntries(getBundledCommandsDir()).map((entry) =>
+      path.join(getBundledCommandsDir(), entry.name)
+    ),
+    ...listCommandEntries(USER_COMMANDS_DIR).map((entry) =>
+      path.join(USER_COMMANDS_DIR, entry.name)
+    )
+  ]
+
+  for (const commandPath of commandPaths) {
+    const name = commandNameFromFilename(path.basename(commandPath))
+    const normalizedName = normalizeCommandName(name)
+    if (commandsByName.has(normalizedName)) continue
+
+    const content = fs.readFileSync(commandPath, 'utf-8')
+    commandsByName.set(normalizedName, {
+      name,
+      summary: summarizeCommand(content)
+    })
+  }
+
+  return [...commandsByName.values()].sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+  )
 }
 
 export function registerCommandsHandlers(): void {
-  ensureCommandsDir()
+  ensureUserCommandsDir()
 
   ipcMain.handle('commands:list', async (): Promise<CommandInfo[]> => {
     try {
-      return getCommandEntries()
-        .map((entry) => {
-          const fullPath = path.join(COMMANDS_DIR, entry.name)
-          const content = fs.readFileSync(fullPath, 'utf-8')
-          return {
-            name: commandNameFromFilename(entry.name),
-            summary: summarizeCommand(content)
-          }
-        })
-        .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }))
+      return collectCommands()
     } catch {
       return []
     }
