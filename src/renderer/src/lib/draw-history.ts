@@ -1,11 +1,40 @@
 import type { ImageErrorCode } from '@renderer/lib/api/types'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 
+export type DrawRunMode = 'image' | 'gif'
+
+export type DrawRunImageKind = 'generated' | 'gif-grid' | 'gif-frame' | 'gif-output'
+
+export type DrawGifInputMode = 'text' | 'reference'
+
 export interface DrawRunImage {
   id: string
   src: string
   mediaType?: string
   filePath?: string
+  kind?: DrawRunImageKind
+  label?: string
+  frameIndex?: number
+}
+
+export interface DrawGifInputSnapshot {
+  inputMode: DrawGifInputMode
+  characterPrompt: string
+  stylePrompt: string
+  actionPrompt: string
+  referenceImage: {
+    dataUrl: string
+    mediaType: string
+  } | null
+  frameDurationMs: number
+  gridSize: number
+  stage?: 'requesting' | 'processing' | 'completed'
+}
+
+export interface DrawRunMeta {
+  providerId?: string
+  modelId?: string
+  gif?: DrawGifInputSnapshot
 }
 
 export interface DrawRunError {
@@ -18,6 +47,8 @@ export interface DrawRun {
   prompt: string
   providerName: string
   modelName: string
+  mode: DrawRunMode
+  meta: DrawRunMeta | null
   createdAt: number
   isGenerating: boolean
   images: DrawRunImage[]
@@ -29,6 +60,8 @@ interface DrawRunRow {
   prompt: string
   provider_name: string
   model_name: string
+  mode: string | null
+  meta_json: string | null
   created_at: number
   is_generating: number
   images_json: string
@@ -67,6 +100,8 @@ function fromRow(row: DrawRunRow, interruptedMessage: string): DrawRun {
     prompt: row.prompt,
     providerName: row.provider_name,
     modelName: row.model_name,
+    mode: row.mode === 'gif' ? 'gif' : 'image',
+    meta: safeParseJson<DrawRunMeta | null>(row.meta_json, null),
     createdAt: row.created_at,
     isGenerating: row.is_generating === 1,
     images: safeParseJson<DrawRunImage[]>(row.images_json, []),
@@ -96,6 +131,8 @@ export async function savePersistedDrawRun(run: DrawRun): Promise<void> {
     prompt: run.prompt,
     providerName: run.providerName,
     modelName: run.modelName,
+    mode: run.mode,
+    metaJson: run.meta ? JSON.stringify(run.meta) : null,
     createdAt: run.createdAt,
     isGenerating: run.isGenerating,
     imagesJson: JSON.stringify(run.images),

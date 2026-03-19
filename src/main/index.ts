@@ -48,6 +48,7 @@ import { registerNotifyHandlers } from './ipc/notify-handlers'
 import { registerScreenshotHandlers } from './ipc/screenshot-handlers'
 import { registerWebSearchHandlers } from './ipc/web-search-handlers'
 import { registerOauthHandlers } from './ipc/oauth-handlers'
+import { registerImageGifHandlers } from './ipc/image-gif-handlers'
 import { loadPersistedJobs, cancelAllJobs } from './cron/cron-scheduler'
 import { McpManager } from './mcp/mcp-manager'
 import { closeDb } from './db/database'
@@ -465,6 +466,7 @@ if (gotSingleInstanceLock) {
     registerNotifyHandlers()
     registerWebSearchHandlers()
     registerOauthHandlers()
+    registerImageGifHandlers()
 
     // Clipboard: write PNG image from base64 data
     ipcMain.handle('clipboard:write-image', (_event, args: { data: string }) => {

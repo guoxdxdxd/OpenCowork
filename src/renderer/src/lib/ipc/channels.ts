@@ -171,6 +171,7 @@ export const IPC = {
 
   // Images
   IMAGE_PERSIST_GENERATED: 'image:persist-generated',
+  IMAGE_CREATE_GIF_FROM_GRID: 'image:create-gif-from-grid',
 
   // Desktop Control
   DESKTOP_SCREENSHOT_CAPTURE: 'desktop:screenshot:capture',

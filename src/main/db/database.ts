@@ -21,6 +21,21 @@ function hasColumn(database: Database.Database, tableName: string, columnName: s
   }
 }
 
+function ensureColumn(
+  database: Database.Database,
+  tableName: string,
+  columnName: string,
+  definition: string
+): void {
+  if (hasColumn(database, tableName, columnName)) {
+    return
+  }
+
+  const safeTable = tableName.replace(/"/g, '""')
+  const safeColumn = columnName.replace(/"/g, '""')
+  database.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeColumn}" ${definition}`)
+}
+
 function sanitizeProjectName(rawName: string): string {
   const cleaned = rawName
     .replace(/[<>:"/\\|?*]/g, ' ')
@@ -376,6 +391,8 @@ export function getDb(): Database.Database {
       prompt TEXT NOT NULL,
       provider_name TEXT NOT NULL,
       model_name TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'image',
+      meta_json TEXT,
       created_at INTEGER NOT NULL,
       is_generating INTEGER NOT NULL DEFAULT 0,
       images_json TEXT NOT NULL DEFAULT '[]',
@@ -385,6 +402,9 @@ export function getDb(): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_draw_runs_created_at ON draw_runs(created_at DESC);
   `)
+
+  ensureColumn(db, 'draw_runs', 'mode', "TEXT NOT NULL DEFAULT 'image'")
+  ensureColumn(db, 'draw_runs', 'meta_json', 'TEXT')
 
   // --- QQ wakeup windows table ---
   db.exec(`

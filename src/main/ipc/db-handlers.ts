@@ -248,6 +248,8 @@ export function registerDbHandlers(): void {
         prompt: string
         providerName: string
         modelName: string
+        mode?: string
+        metaJson?: string | null
         createdAt: number
         isGenerating: boolean
         imagesJson: string

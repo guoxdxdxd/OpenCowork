@@ -5,6 +5,8 @@ export interface DrawRunRow {
   prompt: string
   provider_name: string
   model_name: string
+  mode: string
+  meta_json: string | null
   created_at: number
   is_generating: number
   images_json: string
@@ -22,6 +24,8 @@ export function saveDrawRun(run: {
   prompt: string
   providerName: string
   modelName: string
+  mode?: string
+  metaJson?: string | null
   createdAt: number
   isGenerating: boolean
   imagesJson: string
@@ -35,17 +39,21 @@ export function saveDrawRun(run: {
       prompt,
       provider_name,
       model_name,
+      mode,
+      meta_json,
       created_at,
       is_generating,
       images_json,
       error_json,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     run.id,
     run.prompt,
     run.providerName,
     run.modelName,
+    run.mode ?? 'image',
+    run.metaJson ?? null,
     run.createdAt,
     run.isGenerating ? 1 : 0,
     run.imagesJson,

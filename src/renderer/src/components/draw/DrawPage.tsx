@@ -11,9 +11,12 @@ import {
 import { nanoid } from 'nanoid'
 import {
   ArrowLeft,
+  ChevronDown,
+  Download,
   Image as ImageIcon,
   ImagePlus,
   Loader2,
+  RefreshCcw,
   Settings,
   Sparkles,
   Square,
@@ -25,6 +28,11 @@ import { toast } from 'sonner'
 import { Badge } from '@renderer/components/ui/badge'
 import { Button } from '@renderer/components/ui/button'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger
+} from '@renderer/components/ui/collapsible'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -32,6 +40,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@renderer/components/ui/dialog'
+import { Input } from '@renderer/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -66,9 +75,14 @@ import {
   deletePersistedDrawRun,
   listPersistedDrawRuns,
   savePersistedDrawRun,
+  type DrawGifInputMode,
+  type DrawGifInputSnapshot,
   type DrawRun,
-  type DrawRunImage
+  type DrawRunImage,
+  type DrawRunMode
 } from '@renderer/lib/draw-history'
+import { IPC } from '@renderer/lib/ipc/channels'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { cn } from '@renderer/lib/utils'
 import { modelSupportsVision, useProviderStore } from '@renderer/stores/provider-store'
 import { useUIStore } from '@renderer/stores/ui-store'
@@ -164,6 +178,163 @@ function formatTime(timestamp: number): string {
   })
 }
 
+const GIF_GRID_SIZE = 768
+const GIF_FRAME_DURATION_MS = 120
+
+type GenerateTarget = {
+  provider: AIProvider
+  model: AIModelConfig
+  config: ProviderConfig
+}
+
+interface PersistedImageAsset {
+  filePath: string
+  data: string
+  mediaType: string
+}
+
+interface GifPostprocessResult {
+  success: boolean
+  error?: string
+  grid?: PersistedImageAsset
+  frames?: PersistedImageAsset[]
+  gif?: PersistedImageAsset
+}
+
+function isOpenAiTransparentProvider(config: ProviderConfig): boolean {
+  return config.type === 'openai-images'
+}
+
+function buildGifProviderConfig(config: ProviderConfig): ProviderConfig {
+  if (!isOpenAiTransparentProvider(config)) {
+    return config
+  }
+
+  const requestOverrides = config.requestOverrides
+  return {
+    ...config,
+    requestOverrides: {
+      headers: requestOverrides?.headers,
+      omitBodyKeys: requestOverrides?.omitBodyKeys,
+      body: {
+        ...(requestOverrides?.body ?? {}),
+        background: 'transparent',
+        output_format: 'png'
+      }
+    }
+  }
+}
+
+function toDataUrl(data: string, mediaType: string): string {
+  return `data:${mediaType};base64,${data}`
+}
+
+function attachmentToPersistableReference(image: ImageAttachment | null): {
+  dataUrl: string
+  mediaType: string
+} | null {
+  if (!image) return null
+  return {
+    dataUrl: image.dataUrl,
+    mediaType: image.mediaType
+  }
+}
+
+function buildGifPrompt(
+  input: DrawGifInputSnapshot,
+  options?: { transparentBackgroundRequested?: boolean }
+): string {
+  const referenceInstruction =
+    input.inputMode === 'reference'
+      ? `Use the attached reference image as the primary character reference. Preserve identity, silhouette, clothing, colors, and facial traits across all nine panels. Additional character notes: ${input.characterPrompt || 'none'}.`
+      : `Character design: ${input.characterPrompt}.`
+
+  return [
+    'Create one single square 3x3 animation sprite sheet for a GIF workflow.',
+    'Exactly 9 panels arranged in 3 columns and 3 rows.',
+    'One character only, full body visible in every panel.',
+    ...(options?.transparentBackgroundRequested
+      ? [
+          'The output must be a real PNG sprite sheet with a true alpha channel and a fully transparent background.',
+          'Do not draw checkerboards, transparency grids, matte patterns, colored backdrops, shadows on a floor, or any fake transparency indicator.',
+          'This is a hard requirement: output a true transparent PNG asset with alpha pixels, not a simulated transparent background.'
+        ]
+      : ['Use a plain, clean, uniform background with no texture or distracting pattern.']),
+    'No borders, no gutters, no spacing, no captions, no text, no speech bubbles, no watermarks.',
+    'Do not place panel numbers, frame markers, labels, badges, corner tags, or any text such as P1, P2, 1, 2, frame1, frame 01 in any corner or panel.',
+    'Keep the same camera angle, framing, lighting, composition, character size, center position, and foot baseline across all 9 panels.',
+    'The action must be a single simple continuous motion only.',
+    'Do not combine multiple actions, do not switch to a second action, and do not create complex choreography.',
+    'Interpret the user action as one simple motion arc and spread it across 9 consecutive frames.',
+    'Each adjacent panel must differ only slightly from the previous one.',
+    'Use micro-movements only: very small pose changes, very small limb displacement, very small head movement.',
+    'Avoid large pose changes, big swings, jumps, squash and stretch, dramatic anticipation, or abrupt transitions.',
+    'Prioritize maximum continuity and smoothness over dramatic expression.',
+    'Each panel must be equal-sized and perfectly aligned for precise slicing.',
+    referenceInstruction,
+    `Style direction: ${input.stylePrompt}.`,
+    `Single simple action to animate continuously: ${input.actionPrompt}.`,
+    `The final output must be a single square image designed for exact ${GIF_GRID_SIZE}x${GIF_GRID_SIZE} normalization and left-to-right, top-to-bottom playback.`
+  ].join(' ')
+}
+
+function buildGifRunSummary(input: DrawGifInputSnapshot): string {
+  const parts = [
+    input.inputMode === 'reference' ? '参考图模式' : `角色：${input.characterPrompt}`,
+    input.inputMode === 'reference' && input.characterPrompt
+      ? `角色补充：${input.characterPrompt}`
+      : null,
+    `风格：${input.stylePrompt}`,
+    `动作：${input.actionPrompt}`
+  ].filter(Boolean)
+
+  return parts.join('｜')
+}
+
+function drawRunImageFromAsset(
+  asset: PersistedImageAsset,
+  kind: DrawRunImage['kind'],
+  label: string,
+  frameIndex?: number
+): DrawRunImage {
+  return {
+    id: nanoid(),
+    src: toDataUrl(asset.data, asset.mediaType),
+    mediaType: asset.mediaType,
+    filePath: asset.filePath,
+    kind,
+    label,
+    frameIndex
+  }
+}
+
+function getGifAssets(run: DrawRun): {
+  grid: DrawRunImage | null
+  gif: DrawRunImage | null
+  frames: DrawRunImage[]
+} {
+  return {
+    grid: run.images.find((image) => image.kind === 'gif-grid') ?? null,
+    gif: run.images.find((image) => image.kind === 'gif-output') ?? null,
+    frames: run.images.filter((image) => image.kind === 'gif-frame')
+  }
+}
+
+function getRunStatusLabel(
+  run: DrawRun,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (!run.isGenerating) {
+    return run.error ? t('drawPage.failed') : t('drawPage.completed')
+  }
+
+  if (run.mode === 'gif' && run.meta?.gif?.stage === 'processing') {
+    return t('drawPage.processingGif')
+  }
+
+  return t('drawPage.generating')
+}
+
 export function DrawPage(): React.JSX.Element {
   const { t } = useTranslation('layout')
   const closeDrawPage = useUIStore((state) => state.closeDrawPage)
@@ -175,7 +346,12 @@ export function DrawPage(): React.JSX.Element {
   const setActiveImageProvider = useProviderStore((state) => state.setActiveImageProvider)
   const setActiveImageModel = useProviderStore((state) => state.setActiveImageModel)
 
+  const [drawMode, setDrawMode] = useState<DrawRunMode>('image')
   const [prompt, setPrompt] = useState('')
+  const [gifInputMode, setGifInputMode] = useState<DrawGifInputMode>('text')
+  const [gifCharacterPrompt, setGifCharacterPrompt] = useState('')
+  const [gifStylePrompt, setGifStylePrompt] = useState('')
+  const [gifActionPrompt, setGifActionPrompt] = useState('')
   const [runs, setRuns] = useState<DrawRun[]>([])
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
@@ -264,6 +440,53 @@ export function DrawPage(): React.JSX.Element {
     if (!modelDialogOpen) return
     setDialogProviderId(selectedProvider?.id ?? providerModelGroups[0]?.provider.id ?? null)
   }, [modelDialogOpen, providerModelGroups, selectedProvider])
+
+  const resolveGenerationTarget = useCallback(
+    (providerId?: string, modelId?: string): GenerateTarget | null => {
+      const resolvedProvider = providerId
+        ? (providers.find((provider) => provider.id === providerId) ?? null)
+        : selectedProvider
+      if (!resolvedProvider) return null
+
+      const resolvedModel = modelId
+        ? (resolvedProvider.models.find((model) => model.id === modelId) ?? null)
+        : (resolvedProvider.models.find((model) => model.id === selectedModel?.id) ?? selectedModel)
+      if (!resolvedModel) return null
+
+      const config = useProviderStore
+        .getState()
+        .getProviderConfigById(resolvedProvider.id, resolvedModel.id)
+      if (!config) return null
+
+      return {
+        provider: resolvedProvider,
+        model: resolvedModel,
+        config
+      }
+    },
+    [providers, selectedModel, selectedProvider]
+  )
+
+  const resetGifForm = useCallback((): void => {
+    setGifInputMode('text')
+    setGifCharacterPrompt('')
+    setGifStylePrompt('')
+    setGifActionPrompt('')
+    setAttachedImages([])
+  }, [])
+
+  const buildCurrentGifSnapshot = useCallback((): DrawGifInputSnapshot => {
+    return {
+      inputMode: gifInputMode,
+      characterPrompt: gifCharacterPrompt.trim(),
+      stylePrompt: gifStylePrompt.trim(),
+      actionPrompt: gifActionPrompt.trim(),
+      referenceImage: attachmentToPersistableReference(attachedImages[0] ?? null),
+      frameDurationMs: GIF_FRAME_DURATION_MS,
+      gridSize: GIF_GRID_SIZE,
+      stage: 'requesting'
+    }
+  }, [attachedImages, gifActionPrompt, gifCharacterPrompt, gifInputMode, gifStylePrompt])
 
   const addImages = useCallback(async (files: File[]): Promise<void> => {
     const results = await Promise.all(files.map(fileToImageAttachment))
@@ -384,7 +607,7 @@ export function DrawPage(): React.JSX.Element {
 
   const handleOptimizePrompt = useCallback(async (): Promise<void> => {
     const trimmedPrompt = prompt.trim()
-    if (!trimmedPrompt || isGenerating || isOptimizingPrompt) return
+    if (drawMode === 'gif' || !trimmedPrompt || isGenerating || isOptimizingPrompt) return
 
     const fastTarget = pickFastTextModel(providers)
     if (!fastTarget) {
@@ -409,7 +632,7 @@ export function DrawPage(): React.JSX.Element {
     } finally {
       setIsOptimizingPrompt(false)
     }
-  }, [attachedImages, isGenerating, isOptimizingPrompt, prompt, providers, t])
+  }, [attachedImages, drawMode, isGenerating, isOptimizingPrompt, prompt, providers, t])
 
   const handleUseOptimizedPrompt = useCallback((): void => {
     if (!optimizedPrompt.trim()) return
@@ -424,22 +647,102 @@ export function DrawPage(): React.JSX.Element {
     }
   }, [])
 
-  const handleGenerate = useCallback(async (): Promise<void> => {
+  const handleDownloadAsset = useCallback(
+    async (image: DrawRunImage | null, fallbackName: string): Promise<void> => {
+      if (!image?.filePath) return
+
+      try {
+        const readResult = (await ipcClient.invoke(IPC.FS_READ_FILE_BINARY, {
+          path: image.filePath
+        })) as { data?: string; error?: string }
+
+        if (readResult.error || !readResult.data) {
+          throw new Error(readResult.error || 'Failed to read generated asset.')
+        }
+
+        const saveResult = (await ipcClient.invoke(IPC.FS_SELECT_SAVE_FILE, {
+          defaultPath: fallbackName,
+          filters: [
+            {
+              name: 'Images',
+              extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg']
+            }
+          ]
+        })) as { path?: string; canceled?: boolean }
+
+        if (saveResult.canceled || !saveResult.path) return
+
+        const writeResult = (await ipcClient.invoke(IPC.FS_WRITE_FILE_BINARY, {
+          path: saveResult.path,
+          data: readResult.data
+        })) as { success?: boolean; error?: string }
+
+        if (writeResult.error) {
+          throw new Error(writeResult.error)
+        }
+
+        toast.success(t('drawPage.downloadSuccess'))
+      } catch (error) {
+        toast.error(t('drawPage.downloadFailed'), {
+          description: error instanceof Error ? error.message : String(error)
+        })
+      }
+    },
+    [t]
+  )
+
+  const postprocessGifGrid = useCallback(
+    async (runId: string, image: DrawRunImage): Promise<DrawRunImage[]> => {
+      const base64Data = image.src.startsWith('data:') ? image.src.split(',', 2)[1] || '' : ''
+      const result = (await ipcClient.invoke(IPC.IMAGE_CREATE_GIF_FROM_GRID, {
+        runId,
+        filePath: image.filePath,
+        data: base64Data,
+        mediaType: image.mediaType,
+        frameDurationMs: GIF_FRAME_DURATION_MS
+      })) as GifPostprocessResult
+
+      if (!result.success || !result.grid || !result.gif || !result.frames?.length) {
+        throw new Error(result.error || t('drawPage.gifProcessFailed'))
+      }
+
+      return [
+        drawRunImageFromAsset(result.grid, 'gif-grid', t('drawPage.gifGridLabel')),
+        ...result.frames.map((frame, index) =>
+          drawRunImageFromAsset(
+            frame,
+            'gif-frame',
+            t('drawPage.gifFrameLabel', { index: index + 1 }),
+            index + 1
+          )
+        ),
+        drawRunImageFromAsset(result.gif, 'gif-output', t('drawPage.gifOutputLabel'))
+      ]
+    },
+    [t]
+  )
+
+  const generateStandardRun = useCallback(async (): Promise<void> => {
     const trimmedPrompt = prompt.trim()
     if (!trimmedPrompt) return
-    if (!selectedProvider || !selectedModel) return
 
-    if (!selectedProvider.enabled) {
+    const target = resolveGenerationTarget()
+    if (!target) {
+      toast.error(t('drawPage.noModel'))
+      return
+    }
+
+    if (!target.provider.enabled) {
       toast.error(t('drawPage.providerDisabled'))
       return
     }
 
-    if (!selectedModel.enabled) {
+    if (!target.model.enabled) {
       toast.error(t('drawPage.modelDisabled'))
       return
     }
 
-    const ready = await ensureProviderAuthReady(selectedProvider.id)
+    const ready = await ensureProviderAuthReady(target.provider.id)
     if (!ready) {
       toast.error(t('drawPage.authRequired'), {
         action: {
@@ -450,22 +753,19 @@ export function DrawPage(): React.JSX.Element {
       return
     }
 
-    const providerConfig = useProviderStore
-      .getState()
-      .getProviderConfigById(selectedProvider.id, selectedModel.id)
-    if (!providerConfig) {
-      toast.error(t('drawPage.noModel'))
-      return
-    }
-
     const runId = nanoid()
     const createdAt = Date.now()
     const controller = new AbortController()
     const newRun: DrawRun = {
       id: runId,
       prompt: trimmedPrompt,
-      providerName: selectedProvider.name,
-      modelName: selectedModel.name,
+      providerName: target.provider.name,
+      modelName: target.model.name,
+      mode: 'image',
+      meta: {
+        providerId: target.provider.id,
+        modelId: target.model.id
+      },
       createdAt,
       isGenerating: true,
       images: [],
@@ -477,7 +777,7 @@ export function DrawPage(): React.JSX.Element {
     setRuns((current) => [newRun, ...current])
     persistRun(newRun)
 
-    const provider = createProvider(providerConfig)
+    const provider = createProvider(target.config)
     const content: string | ContentBlock[] =
       attachedImages.length > 0
         ? [
@@ -502,7 +802,7 @@ export function DrawPage(): React.JSX.Element {
       for await (const event of provider.sendMessage(
         messages,
         [],
-        providerConfig,
+        target.config,
         controller.signal
       )) {
         switch (event.type) {
@@ -569,20 +869,291 @@ export function DrawPage(): React.JSX.Element {
     openSettingsPage,
     persistRun,
     prompt,
-    selectedModel,
-    selectedProvider,
+    resolveGenerationTarget,
     t,
     updateRun
   ])
 
+  const generateGifRun = useCallback(
+    async (
+      snapshot: DrawGifInputSnapshot,
+      providerId?: string,
+      modelId?: string
+    ): Promise<void> => {
+      if (snapshot.inputMode === 'text' && !snapshot.characterPrompt.trim()) {
+        toast.error(t('drawPage.gifCharacterRequired'))
+        return
+      }
+      if (!snapshot.stylePrompt.trim()) {
+        toast.error(t('drawPage.gifStyleRequired'))
+        return
+      }
+      if (!snapshot.actionPrompt.trim()) {
+        toast.error(t('drawPage.gifActionRequired'))
+        return
+      }
+      if (snapshot.inputMode === 'reference' && !snapshot.referenceImage) {
+        toast.error(t('drawPage.gifReferenceRequired'))
+        return
+      }
+
+      const target = resolveGenerationTarget(providerId, modelId)
+      if (!target) {
+        toast.error(t('drawPage.noModel'))
+        return
+      }
+
+      if (!target.provider.enabled) {
+        toast.error(t('drawPage.providerDisabled'))
+        return
+      }
+
+      if (!target.model.enabled) {
+        toast.error(t('drawPage.modelDisabled'))
+        return
+      }
+
+      const ready = await ensureProviderAuthReady(target.provider.id)
+      if (!ready) {
+        toast.error(t('drawPage.authRequired'), {
+          action: {
+            label: t('drawPage.openProviderSettings'),
+            onClick: () => openSettingsPage('provider')
+          }
+        })
+        return
+      }
+
+      const runId = nanoid()
+      const createdAt = Date.now()
+      const controller = new AbortController()
+      const runMeta: DrawRun['meta'] = {
+        providerId: target.provider.id,
+        modelId: target.model.id,
+        gif: snapshot
+      }
+      const newRun: DrawRun = {
+        id: runId,
+        prompt: buildGifRunSummary(snapshot),
+        providerName: target.provider.name,
+        modelName: target.model.name,
+        mode: 'gif',
+        meta: runMeta,
+        createdAt,
+        isGenerating: true,
+        images: [],
+        error: null
+      }
+
+      abortControllerRef.current = controller
+      setIsGenerating(true)
+      setRuns((current) => [newRun, ...current])
+      persistRun(newRun)
+
+      const providerConfig = buildGifProviderConfig(target.config)
+      const createMessages = (): UnifiedMessage[] => {
+        const promptText = buildGifPrompt(snapshot, {
+          transparentBackgroundRequested: isOpenAiTransparentProvider(providerConfig)
+        })
+        const content: string | ContentBlock[] =
+          snapshot.inputMode === 'reference' && snapshot.referenceImage
+            ? [
+                imageAttachmentToContentBlock({
+                  id: nanoid(),
+                  dataUrl: snapshot.referenceImage.dataUrl,
+                  mediaType: snapshot.referenceImage.mediaType
+                }),
+                {
+                  type: 'text',
+                  text: promptText
+                }
+              ]
+            : promptText
+
+        return [
+          {
+            id: nanoid(),
+            role: 'user',
+            content,
+            createdAt: Date.now()
+          }
+        ]
+      }
+
+      const provider = createProvider(providerConfig)
+      const messages = createMessages()
+      let processed = false
+
+      try {
+        for await (const event of provider.sendMessage(
+          messages,
+          [],
+          providerConfig,
+          controller.signal
+        )) {
+          switch (event.type) {
+            case 'image_generated': {
+              if (processed) break
+              const image = normalizeImageSrc(event)
+              if (!image) break
+              processed = true
+              updateRun(runId, (run) => ({
+                ...run,
+                error: null,
+                meta: run.meta?.gif
+                  ? {
+                      ...run.meta,
+                      gif: {
+                        ...run.meta.gif,
+                        stage: 'processing'
+                      }
+                    }
+                  : run.meta
+              }))
+              try {
+                const processedImages = await postprocessGifGrid(runId, image)
+                updateRun(runId, (run) => ({
+                  ...run,
+                  images: processedImages,
+                  error: null,
+                  meta: run.meta?.gif
+                    ? {
+                        ...run.meta,
+                        gif: {
+                          ...run.meta.gif,
+                          stage: 'completed'
+                        }
+                      }
+                    : run.meta
+                }))
+                return
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error)
+                updateRun(runId, (run) => ({
+                  ...run,
+                  error: {
+                    code: 'unknown',
+                    message
+                  }
+                }))
+                break
+              }
+            }
+            case 'image_error': {
+              const imageError = event.imageError
+              if (!imageError) break
+              updateRun(runId, (run) => ({
+                ...run,
+                error: {
+                  code: imageError.code,
+                  message: imageError.message
+                }
+              }))
+              break
+            }
+            case 'error': {
+              updateRun(runId, (run) => ({
+                ...run,
+                error: {
+                  code: 'unknown',
+                  message: event.error?.message || t('drawPage.unknownError')
+                }
+              }))
+              break
+            }
+            default:
+              break
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          updateRun(runId, (run) => ({
+            ...run,
+            error: {
+              code: 'unknown',
+              message: error instanceof Error ? error.message : String(error)
+            }
+          }))
+        }
+      } finally {
+        finishRun(runId)
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null
+        }
+        setIsGenerating(false)
+      }
+    },
+    [
+      finishRun,
+      openSettingsPage,
+      persistRun,
+      postprocessGifGrid,
+      resolveGenerationTarget,
+      t,
+      updateRun
+    ]
+  )
+
+  const handleRetryGifRun = useCallback(
+    async (run: DrawRun): Promise<void> => {
+      if (run.mode !== 'gif' || !run.meta?.gif) return
+      setDrawMode('gif')
+      setGifInputMode(run.meta.gif.inputMode)
+      setGifCharacterPrompt(run.meta.gif.characterPrompt)
+      setGifStylePrompt(run.meta.gif.stylePrompt)
+      setGifActionPrompt(run.meta.gif.actionPrompt)
+      setAttachedImages(
+        run.meta.gif.referenceImage
+          ? [
+              {
+                id: nanoid(),
+                dataUrl: run.meta.gif.referenceImage.dataUrl,
+                mediaType: run.meta.gif.referenceImage.mediaType
+              }
+            ]
+          : []
+      )
+      if (run.meta.providerId) {
+        setActiveImageProvider(run.meta.providerId)
+      }
+      if (run.meta.modelId) {
+        setActiveImageModel(run.meta.modelId)
+      }
+      await generateGifRun(
+        {
+          ...run.meta.gif,
+          stage: 'requesting'
+        },
+        run.meta.providerId,
+        run.meta.modelId
+      )
+    },
+    [generateGifRun, setActiveImageModel, setActiveImageProvider]
+  )
+
+  const handleGenerate = useCallback(async (): Promise<void> => {
+    if (drawMode === 'gif') {
+      await generateGifRun(buildCurrentGifSnapshot())
+      return
+    }
+
+    await generateStandardRun()
+  }, [buildCurrentGifSnapshot, drawMode, generateGifRun, generateStandardRun])
+
+  const gifFormValid =
+    !!gifStylePrompt.trim() &&
+    !!gifActionPrompt.trim() &&
+    (gifInputMode === 'reference' ? attachedImages.length > 0 : !!gifCharacterPrompt.trim())
+
   const canGenerate =
-    !!prompt.trim() &&
+    (drawMode === 'gif' ? gifFormValid : !!prompt.trim()) &&
     !!selectedProvider &&
     !!selectedModel &&
     !isGenerating &&
     providerModelGroups.length > 0
 
-  const canOptimizePrompt = !!prompt.trim() && !isGenerating && !isOptimizingPrompt
+  const canOptimizePrompt =
+    drawMode === 'image' && !!prompt.trim() && !isGenerating && !isOptimizingPrompt
 
   const selectedOptionValue =
     selectedProvider && selectedModel
@@ -675,36 +1246,46 @@ export function DrawPage(): React.JSX.Element {
               <div className="min-w-0">
                 <h2 className="text-sm font-semibold">{t('drawPage.promptSection')}</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {t('drawPage.promptSectionDesc')}
+                  {drawMode === 'gif'
+                    ? t('drawPage.gifPromptSectionDesc')
+                    : t('drawPage.promptSectionDesc')}
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="text-[10px]">
-                  {prompt.trim().length}
+                  {drawMode === 'gif'
+                    ? gifCharacterPrompt.trim().length +
+                      gifStylePrompt.trim().length +
+                      gifActionPrompt.trim().length
+                    : prompt.trim().length}
                 </Badge>
-                <Button
-                  variant="outline"
-                  size="icon-xs"
-                  onClick={() => fileInputRef.current?.click()}
-                  aria-label={t('drawPage.addImage')}
-                  title={t('drawPage.addImage')}
-                >
-                  <ImagePlus className="size-3.5" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-xs"
-                  onClick={() => void handleOptimizePrompt()}
-                  disabled={!canOptimizePrompt}
-                >
-                  {isOptimizingPrompt ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : (
-                    <Sparkles className="size-3.5" />
-                  )}
-                  {t('drawPage.optimizePrompt')}
-                </Button>
+                {(drawMode === 'image' || gifInputMode === 'reference') && (
+                  <Button
+                    variant="outline"
+                    size="icon-xs"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label={t('drawPage.addImage')}
+                    title={t('drawPage.addImage')}
+                  >
+                    <ImagePlus className="size-3.5" />
+                  </Button>
+                )}
+                {drawMode === 'image' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs"
+                    onClick={() => void handleOptimizePrompt()}
+                    disabled={!canOptimizePrompt}
+                  >
+                    {isOptimizingPrompt ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="size-3.5" />
+                    )}
+                    {t('drawPage.optimizePrompt')}
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -717,6 +1298,32 @@ export function DrawPage(): React.JSX.Element {
               </div>
             </div>
 
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                variant={drawMode === 'image' ? 'default' : 'outline'}
+                size="sm"
+                className="h-7 px-3 text-xs"
+                onClick={() => setDrawMode('image')}
+                disabled={isGenerating}
+              >
+                {t('drawPage.modeImage')}
+              </Button>
+              <Button
+                variant={drawMode === 'gif' ? 'default' : 'outline'}
+                size="sm"
+                className="h-7 px-3 text-xs"
+                onClick={() => setDrawMode('gif')}
+                disabled={isGenerating}
+              >
+                {t('drawPage.modeGif')}
+              </Button>
+              {drawMode === 'gif' && (
+                <Badge variant="secondary" className="text-[10px] font-normal">
+                  {t('drawPage.gifModelWarning')}
+                </Badge>
+              )}
+            </div>
+
             <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
               {selectedProvider && (
                 <ProviderIcon builtinId={selectedProvider.builtinId} size={14} />
@@ -726,6 +1333,29 @@ export function DrawPage(): React.JSX.Element {
               {selectedModel && <ModelIcon icon={selectedModel.icon} size={14} />}
               <span className="truncate">{selectedModel?.name}</span>
             </div>
+
+            {drawMode === 'gif' && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border bg-muted/20 p-2">
+                <Button
+                  variant={gifInputMode === 'text' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                  onClick={() => setGifInputMode('text')}
+                  disabled={isGenerating}
+                >
+                  {t('drawPage.gifTextMode')}
+                </Button>
+                <Button
+                  variant={gifInputMode === 'reference' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                  onClick={() => setGifInputMode('reference')}
+                  disabled={isGenerating}
+                >
+                  {t('drawPage.gifReferenceMode')}
+                </Button>
+              </div>
+            )}
 
             {attachedImages.length > 0 && (
               <div className="mt-4 flex shrink-0 flex-wrap gap-2">
@@ -750,19 +1380,96 @@ export function DrawPage(): React.JSX.Element {
               </div>
             )}
 
-            <Textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onPaste={handlePaste}
-              onDrop={handleDrop}
-              onDragOver={(event) => {
-                if (event.dataTransfer.types.includes('Files')) {
-                  event.preventDefault()
-                }
-              }}
-              placeholder={t('drawPage.promptPlaceholder')}
-              className="mt-4 min-h-[260px] resize-none overflow-y-auto [field-sizing:fixed] md:min-h-0 md:flex-1"
-            />
+            {drawMode === 'gif' ? (
+              <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+                {gifInputMode === 'text' ? (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-foreground">
+                      {t('drawPage.gifCharacterLabel')}
+                    </p>
+                    <Input
+                      value={gifCharacterPrompt}
+                      onChange={(event) => setGifCharacterPrompt(event.target.value)}
+                      placeholder={t('drawPage.gifCharacterPlaceholder')}
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-foreground">
+                      {t('drawPage.gifReferenceLabel')}
+                    </p>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {t('drawPage.gifReferenceHint')}
+                    </p>
+                  </div>
+                )}
+
+                {gifInputMode === 'reference' && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-foreground">
+                      {t('drawPage.gifCharacterOptionalLabel')}
+                    </p>
+                    <Input
+                      value={gifCharacterPrompt}
+                      onChange={(event) => setGifCharacterPrompt(event.target.value)}
+                      placeholder={t('drawPage.gifCharacterOptionalPlaceholder')}
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <p className="mb-1 text-xs font-medium text-foreground">
+                    {t('drawPage.gifStyleLabel')}
+                  </p>
+                  <Input
+                    value={gifStylePrompt}
+                    onChange={(event) => setGifStylePrompt(event.target.value)}
+                    placeholder={t('drawPage.gifStylePlaceholder')}
+                  />
+                </div>
+
+                <div className="min-h-0 flex-1">
+                  <p className="mb-1 text-xs font-medium text-foreground">
+                    {t('drawPage.gifActionLabel')}
+                  </p>
+                  <Textarea
+                    value={gifActionPrompt}
+                    onChange={(event) => setGifActionPrompt(event.target.value)}
+                    placeholder={t('drawPage.gifActionPlaceholder')}
+                    className="min-h-[180px] resize-none overflow-y-auto [field-sizing:fixed]"
+                  />
+                </div>
+
+                <div className="rounded-xl border border-dashed bg-muted/20 p-3 text-xs leading-relaxed text-muted-foreground">
+                  <p>{t('drawPage.gifRulesHint')}</p>
+                  <p className="mt-1">{t('drawPage.gifTransparentProviderHint')}</p>
+                  <p className="mt-1">{t('drawPage.gifOptimizeDisabledHint')}</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Textarea
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  onPaste={handlePaste}
+                  onDrop={handleDrop}
+                  onDragOver={(event) => {
+                    if (event.dataTransfer.types.includes('Files')) {
+                      event.preventDefault()
+                    }
+                  }}
+                  placeholder={t('drawPage.promptPlaceholder')}
+                  className="mt-4 min-h-[260px] resize-none overflow-y-auto [field-sizing:fixed] md:min-h-0 md:flex-1"
+                />
+
+                <p className="mt-3 shrink-0 text-xs leading-relaxed text-muted-foreground">
+                  {t('drawPage.promptHint')}
+                </p>
+                <p className="mt-1 shrink-0 text-xs leading-relaxed text-muted-foreground">
+                  {t('drawPage.pasteImageHint')}
+                </p>
+              </>
+            )}
 
             <input
               ref={fileInputRef}
@@ -771,13 +1478,6 @@ export function DrawPage(): React.JSX.Element {
               className="hidden"
               onChange={handleFileInputChange}
             />
-
-            <p className="mt-3 shrink-0 text-xs leading-relaxed text-muted-foreground">
-              {t('drawPage.promptHint')}
-            </p>
-            <p className="mt-1 shrink-0 text-xs leading-relaxed text-muted-foreground">
-              {t('drawPage.pasteImageHint')}
-            </p>
 
             <div className="mt-4 flex shrink-0 items-center gap-2">
               <Button
@@ -790,11 +1490,27 @@ export function DrawPage(): React.JSX.Element {
                 ) : (
                   <Sparkles className="size-4" />
                 )}
-                {isGenerating ? t('drawPage.generating') : t('drawPage.generate')}
+                {isGenerating
+                  ? drawMode === 'gif'
+                    ? t('drawPage.generatingGif')
+                    : t('drawPage.generating')
+                  : drawMode === 'gif'
+                    ? t('drawPage.generateGif')
+                    : t('drawPage.generate')}
               </Button>
               <Button
                 variant="outline"
-                onClick={isGenerating ? handleStop : () => setPrompt('')}
+                onClick={
+                  isGenerating
+                    ? handleStop
+                    : () => {
+                        if (drawMode === 'gif') {
+                          resetGifForm()
+                        } else {
+                          setPrompt('')
+                        }
+                      }
+                }
                 className="gap-2"
               >
                 {isGenerating ? <Square className="size-4" /> : <Trash2 className="size-4" />}
@@ -971,81 +1687,184 @@ export function DrawPage(): React.JSX.Element {
               </div>
             ) : (
               <div className="space-y-4">
-                {runs.map((run) => (
-                  <div key={run.id} className="rounded-2xl border bg-background/70 p-4 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium leading-relaxed">{run.prompt}</p>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                          <Badge variant="secondary" className="text-[10px] font-normal">
-                            {run.providerName}
-                          </Badge>
-                          <Badge variant="outline" className="text-[10px] font-normal">
-                            {run.modelName}
-                          </Badge>
-                          <span>{formatTime(run.createdAt)}</span>
+                {runs.map((run) => {
+                  const gifAssets =
+                    run.mode === 'gif'
+                      ? getGifAssets(run)
+                      : { grid: null, gif: null, frames: [] as DrawRunImage[] }
+
+                  return (
+                    <div key={run.id} className="rounded-2xl border bg-background/70 p-4 shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium leading-relaxed">{run.prompt}</p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                            <Badge variant="secondary" className="text-[10px] font-normal">
+                              {run.providerName}
+                            </Badge>
+                            <Badge variant="outline" className="text-[10px] font-normal">
+                              {run.modelName}
+                            </Badge>
+                            <Badge variant="outline" className="text-[10px] font-normal">
+                              {run.mode === 'gif' ? t('drawPage.modeGif') : t('drawPage.modeImage')}
+                            </Badge>
+                            <span>{formatTime(run.createdAt)}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div
+                            className={cn(
+                              'flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-medium',
+                              run.isGenerating
+                                ? 'bg-primary/10 text-primary'
+                                : run.error
+                                  ? 'bg-destructive/10 text-destructive'
+                                  : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                            )}
+                          >
+                            {run.isGenerating ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : run.error ? (
+                              <Square className="size-3.5" />
+                            ) : (
+                              <Sparkles className="size-3.5" />
+                            )}
+                            {getRunStatusLabel(run, t)}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            onClick={() => handleDeleteRun(run.id)}
+                            disabled={run.isGenerating}
+                            aria-label={t('drawPage.deleteRecord')}
+                            title={t('drawPage.deleteRecord')}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={cn(
-                            'flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-medium',
-                            run.isGenerating
-                              ? 'bg-primary/10 text-primary'
-                              : run.error
-                                ? 'bg-destructive/10 text-destructive'
-                                : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                          )}
-                        >
-                          {run.isGenerating ? (
-                            <Loader2 className="size-3.5 animate-spin" />
-                          ) : run.error ? (
-                            <Square className="size-3.5" />
-                          ) : (
-                            <Sparkles className="size-3.5" />
-                          )}
-                          {run.isGenerating
-                            ? t('drawPage.generating')
-                            : run.error
-                              ? t('drawPage.failed')
-                              : t('drawPage.completed')}
+
+                      {run.mode === 'gif' && (
+                        <div className="mt-4 flex flex-wrap items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 gap-1.5 text-xs"
+                            onClick={() => void handleRetryGifRun(run)}
+                            disabled={run.isGenerating || !run.meta?.gif}
+                          >
+                            <RefreshCcw className="size-3.5" />
+                            {t('drawPage.retryGif')}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 gap-1.5 text-xs"
+                            onClick={() => void handleDownloadAsset(gifAssets.gif, 'animation.gif')}
+                            disabled={!gifAssets.gif}
+                          >
+                            <Download className="size-3.5" />
+                            {t('drawPage.downloadGif')}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 gap-1.5 text-xs"
+                            onClick={() => void handleDownloadAsset(gifAssets.grid, 'grid.png')}
+                            disabled={!gifAssets.grid}
+                          >
+                            <Download className="size-3.5" />
+                            {t('drawPage.downloadGrid')}
+                          </Button>
                         </div>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          onClick={() => handleDeleteRun(run.id)}
-                          disabled={run.isGenerating}
-                          aria-label={t('drawPage.deleteRecord')}
-                          title={t('drawPage.deleteRecord')}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    </div>
+                      )}
 
-                    {run.error && (
-                      <div className="mt-4">
-                        <ImageGenerationErrorCard
-                          code={run.error.code}
-                          message={run.error.message}
-                        />
-                      </div>
-                    )}
-
-                    {run.images.length > 0 && (
-                      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                        {run.images.map((image) => (
-                          <ImagePreview
-                            key={image.id}
-                            src={image.src}
-                            alt={run.prompt}
-                            filePath={image.filePath}
+                      {run.error && (
+                        <div className="mt-4">
+                          <ImageGenerationErrorCard
+                            code={run.error.code}
+                            message={run.error.message}
                           />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                        </div>
+                      )}
+
+                      {run.mode === 'gif' ? (
+                        <>
+                          {(gifAssets.gif || gifAssets.grid) && (
+                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                              {gifAssets.gif && (
+                                <div>
+                                  <p className="mb-2 text-xs font-medium text-muted-foreground">
+                                    {t('drawPage.gifOutputLabel')}
+                                  </p>
+                                  <ImagePreview
+                                    src={gifAssets.gif.src}
+                                    alt={run.prompt}
+                                    filePath={gifAssets.gif.filePath}
+                                  />
+                                </div>
+                              )}
+                              {gifAssets.grid && (
+                                <div>
+                                  <p className="mb-2 text-xs font-medium text-muted-foreground">
+                                    {t('drawPage.gifGridLabel')}
+                                  </p>
+                                  <ImagePreview
+                                    src={gifAssets.grid.src}
+                                    alt={run.prompt}
+                                    filePath={gifAssets.grid.filePath}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {gifAssets.frames.length > 0 && (
+                            <Collapsible className="mt-4 rounded-xl border bg-muted/10 px-3 py-2">
+                              <CollapsibleTrigger className="flex w-full items-center justify-between gap-2 text-left text-xs font-medium text-foreground">
+                                <span>
+                                  {t('drawPage.framesSectionTitle', {
+                                    count: gifAssets.frames.length
+                                  })}
+                                </span>
+                                <ChevronDown className="size-4 text-muted-foreground" />
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="pt-3">
+                                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                  {gifAssets.frames.map((image, index) => (
+                                    <div key={image.id}>
+                                      <p className="mb-2 text-xs font-medium text-muted-foreground">
+                                        {t('drawPage.gifFrameLabel', { index: index + 1 })}
+                                      </p>
+                                      <ImagePreview
+                                        src={image.src}
+                                        alt={run.prompt}
+                                        filePath={image.filePath}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          )}
+                        </>
+                      ) : (
+                        run.images.length > 0 && (
+                          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                            {run.images.map((image) => (
+                              <ImagePreview
+                                key={image.id}
+                                src={image.src}
+                                alt={run.prompt}
+                                filePath={image.filePath}
+                              />
+                            ))}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
