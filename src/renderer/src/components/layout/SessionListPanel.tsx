@@ -107,6 +107,11 @@ interface VisibleProjectGroup {
 }
 
 const HISTORY_AUTO_COLLAPSE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
+const RECENT_MINUTES_MS = 10 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+const WEEK_MS = 7 * DAY_MS
+const TWO_WEEKS_MS = 14 * DAY_MS
+const MONTH_MS = 30 * DAY_MS
 
 export function SessionListPanel(): React.JSX.Element {
   const { t } = useTranslation('layout')
@@ -185,6 +190,7 @@ export function SessionListPanel(): React.JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const editRef = useRef<HTMLInputElement>(null)
+  const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{
     id: string
     title: string
@@ -217,6 +223,7 @@ export function SessionListPanel(): React.JSX.Element {
     () => new Set()
   )
   const projectIdSet = useMemo(() => new Set(projects.map((project) => project.id)), [projects])
+  const initialProjectCollapseAppliedRef = useRef(false)
   const draggingRef = useRef(false)
   const startXRef = useRef(0)
   const startWidthRef = useRef(
@@ -246,11 +253,42 @@ export function SessionListPanel(): React.JSX.Element {
         .join('|'),
     () => ''
   )
+  const formatSessionRecency = useCallback(
+    (updatedAt: number): string => {
+      const elapsed = Date.now() - updatedAt
+      if (elapsed < RECENT_MINUTES_MS) {
+        return t('sidebar.recentMinutes', { defaultValue: '最近几分钟' })
+      }
+      if (elapsed < DAY_MS) {
+        return t('sidebar.today')
+      }
+      if (elapsed < DAY_MS * 2) {
+        return t('sidebar.yesterday')
+      }
+      if (elapsed < WEEK_MS) {
+        return t('sidebar.recentWeek', { defaultValue: '最近一周' })
+      }
+      if (elapsed < TWO_WEEKS_MS) {
+        return t('sidebar.twoWeeks', { defaultValue: '2周内' })
+      }
+      if (elapsed < MONTH_MS) {
+        return t('sidebar.oneMonth', { defaultValue: '1个月内' })
+      }
+      return t('sidebar.older')
+    },
+    [t]
+  )
 
   useEffect(() => {
     if (!renameDialog) return
     requestAnimationFrame(() => renameInputRef.current?.select())
   }, [renameDialog])
+
+  useEffect(() => {
+    if (initialProjectCollapseAppliedRef.current || projects.length === 0) return
+    setCollapsedProjectIds(new Set(projects.map((project) => project.id)))
+    initialProjectCollapseAppliedRef.current = true
+  }, [projects])
 
   useEffect(() => {
     if (isDraggingSidebar) return
@@ -685,7 +723,7 @@ export function SessionListPanel(): React.JSX.Element {
       <ContextMenuTrigger asChild>
         <button
           className={cn(
-            'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
+            'group flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
             session.id === activeSessionId &&
               useUIStore.getState().chatView === 'session' &&
               !useUIStore.getState().settingsPageOpen
@@ -702,10 +740,46 @@ export function SessionListPanel(): React.JSX.Element {
             setEditTitle(session.title)
             setTimeout(() => editRef.current?.select(), 0)
           }}
+          onMouseEnter={() => setHoveredSessionId(session.id)}
+          onMouseLeave={() =>
+            setHoveredSessionId((current) => (current === session.id ? null : current))
+          }
         >
-          <span className="shrink-0">
+          <span className="relative flex size-4 shrink-0 items-center justify-center">
             {session.pinned ? (
-              <Pin className="size-3.5 text-muted-foreground/50" />
+              <button
+                type="button"
+                className="flex size-4 items-center justify-center text-amber-500/75 transition-all duration-150 hover:-rotate-12 hover:text-amber-500"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  togglePinSession(session.id)
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+                title={t('action.unpin', { ns: 'common' })}
+              >
+                <Pin className="size-3.5" />
+              </button>
+            ) : hoveredSessionId === session.id ? (
+              <button
+                type="button"
+                className="flex size-4 items-center justify-center text-muted-foreground/65 transition-all duration-150 hover:scale-105 hover:text-foreground/80"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  togglePinSession(session.id)
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+                title={t('sidebar.pinToTop')}
+              >
+                <Pin className="size-3.25" />
+              </button>
             ) : session.icon ? (
               <DynamicIcon name={session.icon as never} className="size-4" />
             ) : (
@@ -759,20 +833,32 @@ export function SessionListPanel(): React.JSX.Element {
                   {getPendingSessionMessageCountForSession(session.id)}
                 </span>
               )}
-              {session.pinned && <Pin className="size-3 text-muted-foreground/30 -rotate-45" />}
               {session.mode !== mode && (
                 <span className="rounded bg-muted px-1 py-px text-[8px] uppercase text-muted-foreground/40">
                   {session.mode}
                 </span>
               )}
-              {session.messageCount > 0 && (
-                <span className="text-[10px] text-muted-foreground/40">{session.messageCount}</span>
-              )}
+              <span className="text-[10px] text-muted-foreground/40">
+                {formatSessionRecency(session.updatedAt)}
+              </span>
             </span>
           )}
         </button>
       </ContextMenuTrigger>
       <ContextMenuContent className="w-48">
+        <ContextMenuItem
+          onClick={() => {
+            togglePinSession(session.id)
+            toast.success(
+              session.pinned
+                ? t('sidebar_toast.sessionUnpinned', { defaultValue: '会话已取消置顶' })
+                : t('sidebar_toast.sessionPinned', { defaultValue: '会话已置顶' })
+            )
+          }}
+        >
+          {session.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+          {session.pinned ? t('action.unpin', { ns: 'common' }) : t('sidebar.pinToTop')}
+        </ContextMenuItem>
         <ContextMenuItem onClick={() => openRenameDialog('session', session.id, session.title)}>
           <Pencil className="size-4" />
           {t('action.rename', { ns: 'common' })}
