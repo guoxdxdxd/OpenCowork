@@ -6,6 +6,7 @@ description: 配置钉钉机器人实现 AI 自动回复，支持流式卡片和
 # 钉钉集成 / DingTalk Integration
 
 OpenCowork 通过钉钉 Stream API 连接钉钉开放平台，实现消息自动回复。支持两种回复模式：
+
 - **流式卡片**：实时流式输出 AI 回复（需配置卡片模板）
 - **实时消息**：通过 sessionWebhook 直接回复消息
 
@@ -44,11 +45,11 @@ OpenCowork 通过钉钉 Stream API 连接钉钉开放平台，实现消息自动
 
 进入 **设置 → 插件 → 钉钉**，填入：
 
-| 配置项 | 说明 | 必填 |
-|--------|------|------|
-| AppKey | 钉钉应用 AppKey | ✅ |
-| AppSecret | 钉钉应用 AppSecret | ✅ |
-| cardTemplateId | AI 流式卡片模板 ID（可选，启用流式回复） | ❌ |
+| 配置项         | 说明                                     | 必填 |
+| -------------- | ---------------------------------------- | ---- |
+| AppKey         | 钉钉应用 AppKey                          | ✅   |
+| AppSecret      | 钉钉应用 AppSecret                       | ✅   |
+| cardTemplateId | AI 流式卡片模板 ID（可选，启用流式回复） | ❌   |
 
 ![OpenCowork 钉钉插件配置](/images/opencowork-dingtalk-config.png)
 
@@ -96,11 +97,11 @@ OpenCowork 通过钉钉 Stream API 连接钉钉开放平台，实现消息自动
 
 ## 消息类型支持 / Message Types
 
-| 类型 | 接收 | 发送 | 流式卡片 |
-|------|------|------|---------|
-| 文本 | ✅ | ✅ | ✅ |
-| Markdown | ❌ | ✅ | ✅ |
-| 图片 | ✅ | ✅ | ❌ |
+| 类型     | 接收 | 发送 | 流式卡片 |
+| -------- | ---- | ---- | -------- |
+| 文本     | ✅   | ✅   | ✅       |
+| Markdown | ❌   | ✅   | ✅       |
+| 图片     | ✅   | ✅   | ❌       |
 
 ## 常见问题 / FAQ
 

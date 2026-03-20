@@ -106,7 +106,7 @@ Schema 迁移使用内联 `ALTER TABLE` + `try/catch` 实现幂等性：
 ```typescript
 // 添加新列（如果已存在则忽略错误）
 try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN model TEXT`);
+  db.exec(`ALTER TABLE sessions ADD COLUMN model TEXT`)
 } catch {
   // 列已存在，忽略
 }

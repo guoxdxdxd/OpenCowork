@@ -24,11 +24,11 @@ flowchart TD
 
 ```typescript
 // 注册插件工厂
-pluginManager.registerFactory('feishu', FeishuPluginFactory);
-pluginManager.registerFactory('dingtalk', DingTalkPluginFactory);
+pluginManager.registerFactory('feishu', FeishuPluginFactory)
+pluginManager.registerFactory('dingtalk', DingTalkPluginFactory)
 
 // 创建插件实例
-const plugin = pluginManager.create('feishu', config);
+const plugin = pluginManager.create('feishu', config)
 ```
 
 ## WebSocket 传输层 / WebSocket Transport
@@ -49,9 +49,9 @@ const plugin = pluginManager.create('feishu', config);
 // forceApproval=true 跳过所有工具审批
 await runAgentLoop({
   messages: [userMessage],
-  forceApproval: true,  // 自动批准所有工具调用
-  sessionId: pluginSessionId,
-});
+  forceApproval: true, // 自动批准所有工具调用
+  sessionId: pluginSessionId
+})
 ```
 
 <Callout type="warning">
@@ -64,12 +64,12 @@ await runAgentLoop({
 
 ## 支持的平台 / Supported Platforms
 
-| 平台 | 文档 |
-|------|------|
-| 飞书 | [飞书集成](/docs/plugins/feishu) |
-| 钉钉 | [钉钉集成](/docs/plugins/dingtalk) |
-| QQ | [QQ 机器人集成](/docs/plugins/qq) |
+| 平台     | 文档                                    |
+| -------- | --------------------------------------- |
+| 飞书     | [飞书集成](/docs/plugins/feishu)        |
+| 钉钉     | [钉钉集成](/docs/plugins/dingtalk)      |
+| QQ       | [QQ 机器人集成](/docs/plugins/qq)       |
 | Telegram | [Telegram 集成](/docs/plugins/telegram) |
-| Discord | [Discord 集成](/docs/plugins/discord) |
+| Discord  | [Discord 集成](/docs/plugins/discord)   |
 | WhatsApp | [WhatsApp 集成](/docs/plugins/whatsapp) |
-| 企业微信 | [企业微信集成](/docs/plugins/wecom) |
+| 企业微信 | [企业微信集成](/docs/plugins/wecom)     |

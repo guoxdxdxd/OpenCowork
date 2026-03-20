@@ -62,7 +62,7 @@ Teammate 之间通过 `MessageQueue` 通信：
 `ConcurrencyLimiter` 控制同时运行的 Teammate 数量，防止 API 速率限制：
 
 ```typescript
-const limiter = new ConcurrencyLimiter(3); // 最多 3 个并发
+const limiter = new ConcurrencyLimiter(3) // 最多 3 个并发
 ```
 
 ## 生命周期 / Lifecycle

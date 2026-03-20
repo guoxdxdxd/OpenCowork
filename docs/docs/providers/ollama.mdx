@@ -38,21 +38,21 @@ ollama list
 
 进入 **设置 → AI 提供商**，添加新提供商：
 
-| 配置项 | 值 |
-|--------|-----|
-| 协议 | `openai-chat` |
+| 配置项   | 值                          |
+| -------- | --------------------------- |
+| 协议     | `openai-chat`               |
 | Base URL | `http://localhost:11434/v1` |
-| API Key | `ollama`（任意字符串） |
+| API Key  | `ollama`（任意字符串）      |
 
 ## 推荐模型 / Recommended Models
 
-| 模型 | 大小 | 适用场景 |
-|------|------|---------|
-| `llama3.2:3b` | 2GB | 快速响应，低配机器 |
-| `llama3.2:8b` | 5GB | 通用对话 |
-| `qwen2.5:7b` | 4.7GB | 中文优化 |
-| `deepseek-r1:7b` | 4.7GB | 推理任务 |
-| `codellama:13b` | 7.4GB | 代码生成 |
+| 模型             | 大小  | 适用场景           |
+| ---------------- | ----- | ------------------ |
+| `llama3.2:3b`    | 2GB   | 快速响应，低配机器 |
+| `llama3.2:8b`    | 5GB   | 通用对话           |
+| `qwen2.5:7b`     | 4.7GB | 中文优化           |
+| `deepseek-r1:7b` | 4.7GB | 推理任务           |
+| `codellama:13b`  | 7.4GB | 代码生成           |
 
 <Callout type="tip">
   Ollama 默认监听 `http://localhost:11434`。如果修改了端口，记得同步更新 OpenCowork 中的 Base URL。

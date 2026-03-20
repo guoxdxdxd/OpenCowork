@@ -15,17 +15,17 @@ interface APIProvider {
     messages: Message[],
     config: ProviderConfig,
     signal?: AbortSignal
-  ): AsyncIterable<StreamEvent>;
+  ): AsyncIterable<StreamEvent>
 }
 ```
 
 ## 支持的协议 / Protocols
 
-| 协议 | 文件 | 适用提供商 |
-|------|------|-----------|
-| `anthropic` | `anthropic.ts` | Claude 系列 |
-| `openai-chat` | `openai-chat.ts` | OpenAI、DeepSeek、Ollama 等 |
-| `openai-responses` | `openai-responses.ts` | OpenAI Responses API |
+| 协议               | 文件                  | 适用提供商                  |
+| ------------------ | --------------------- | --------------------------- |
+| `anthropic`        | `anthropic.ts`        | Claude 系列                 |
+| `openai-chat`      | `openai-chat.ts`      | OpenAI、DeepSeek、Ollama 等 |
+| `openai-responses` | `openai-responses.ts` | OpenAI Responses API        |
 
 ## StreamEvent 类型
 
@@ -52,12 +52,12 @@ type StreamEvent =
 
 每个模型可以通过 `category` 字段标注用途：
 
-| 分类 | 说明 |
-|------|------|
-| `chat` | 聊天/对话模型（默认） |
-| `image` | 图像生成模型（如 DALL·E、Flux） |
-| `speech` | 语音模型 |
-| `embedding` | 向量嵌入模型 |
+| 分类        | 说明                            |
+| ----------- | ------------------------------- |
+| `chat`      | 聊天/对话模型（默认）           |
+| `image`     | 图像生成模型（如 DALL·E、Flux） |
+| `speech`    | 语音模型                        |
+| `embedding` | 向量嵌入模型                    |
 
 图像模型需将 `category` 设置为 `image`，才能被[图像生成插件](/docs/features/app-plugins)识别和使用。
 

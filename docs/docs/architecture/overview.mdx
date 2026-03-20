@@ -48,25 +48,25 @@ flowchart TD
 
 ### 主进程 (`src/main/`)
 
-| 模块 | 职责 |
-|------|------|
-| `index.ts` | 创建窗口、系统托盘、注册 IPC 处理器 |
-| `ipc/` | 各域 IPC 处理器（fs、db、plugins、mcp、cron） |
-| `db/database.ts` | SQLite 数据库管理 |
-| `plugins/` | 消息平台插件服务 |
-| `cron/` | 定时任务调度 |
-| `mcp/` | MCP 服务器管理 |
+| 模块             | 职责                                          |
+| ---------------- | --------------------------------------------- |
+| `index.ts`       | 创建窗口、系统托盘、注册 IPC 处理器           |
+| `ipc/`           | 各域 IPC 处理器（fs、db、plugins、mcp、cron） |
+| `db/database.ts` | SQLite 数据库管理                             |
+| `plugins/`       | 消息平台插件服务                              |
+| `cron/`          | 定时任务调度                                  |
+| `mcp/`           | MCP 服务器管理                                |
 
 ### 渲染进程 (`src/renderer/src/`)
 
-| 模块 | 职责 |
-|------|------|
-| `lib/agent/` | Agent 循环、工具注册、系统提示 |
-| `lib/api/` | AI 提供商适配层 |
-| `lib/tools/` | 内置工具实现 |
-| `lib/preview/` | 文件预览查看器 |
-| `stores/` | Zustand 状态管理 |
-| `hooks/` | React 自定义 Hooks |
+| 模块           | 职责                           |
+| -------------- | ------------------------------ |
+| `lib/agent/`   | Agent 循环、工具注册、系统提示 |
+| `lib/api/`     | AI 提供商适配层                |
+| `lib/tools/`   | 内置工具实现                   |
+| `lib/preview/` | 文件预览查看器                 |
+| `stores/`      | Zustand 状态管理               |
+| `hooks/`       | React 自定义 Hooks             |
 
 ## 数据流 / Data Flow
 

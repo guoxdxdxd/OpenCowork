@@ -1,6 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
+
 - `src/app/` contains Next.js App Router entries, including route groups (`(home)`), docs layout, API handlers (`api/search/route.ts`), and generated text endpoints (`llms*`, `og`).
 - `src/components/` stores reusable UI and feature components.
 - `src/lib/` holds shared utilities and layout helpers.
@@ -10,6 +11,7 @@
 - `.next/` and `node_modules/` are build/dependency artifacts and must stay uncommitted.
 
 ## Build, Test, and Development Commands
+
 - `npm install`: install dependencies (triggers `postinstall` MDX generation).
 - `npm run dev`: start local development server at `http://localhost:3000`.
 - `npm run types:check`: regenerate doc collections, run Next type generation, then `tsc --noEmit`.
@@ -18,6 +20,7 @@
 - `docker compose up --build`: build and run the containerized production service.
 
 ## Coding Style & Naming Conventions
+
 - Use TypeScript-first, strict-safe code (`tsconfig.json` has `strict: true`).
 - Follow existing 2-space indentation and semicolon conventions in project files.
 - Use App Router naming (`layout.tsx`, `page.tsx`, `route.ts`) for routes and handlers.
@@ -25,12 +28,14 @@
 - Use the `@/*` import alias for code under `src/`.
 
 ## Testing Guidelines
+
 - No dedicated unit/integration test runner is configured yet.
 - Treat `npm run types:check` and `npm run build` as required pre-merge checks.
 - For doc/UI changes, validate in `npm run dev` and verify navigation, search, and Mermaid rendering.
 - If you add a test framework, place tests in `src/**/__tests__/` or `src/**/*.{test,spec}.ts(x)` and add matching npm scripts.
 
 ## Commit & Pull Request Guidelines
+
 - Match existing history style: imperative, concise subjects such as `Add ...`, `Fix ...`, `Bump ...`, `Rewrite ...`.
 - Keep commit subjects focused and explain motivation in the body when behavior changes.
 - PRs should include scope, linked issue/context, and screenshots for visible docs/UI updates.

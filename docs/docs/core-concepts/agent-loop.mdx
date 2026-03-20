@@ -61,11 +61,11 @@ type AgentEvent =
 每次 Agent 循环都接受一个 `AbortSignal`，用于取消正在进行的请求：
 
 ```typescript
-const controller = new AbortController();
-const loop = runAgentLoop(config, controller.signal);
+const controller = new AbortController()
+const loop = runAgentLoop(config, controller.signal)
 
 // 取消
-controller.abort();
+controller.abort()
 ```
 
 ## 上下文压缩 / Context Compression

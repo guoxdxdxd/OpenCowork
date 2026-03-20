@@ -7,11 +7,11 @@ description: 搭建 OpenCowork 本地开发环境。
 
 ## 前置要求 / Prerequisites
 
-| 工具 | 版本 | 说明 |
-|------|------|------|
-| Node.js | 18+ | 推荐使用 LTS 版本 |
-| npm | 9+ | 随 Node.js 安装 |
-| Git | 任意 | 版本控制 |
+| 工具    | 版本 | 说明              |
+| ------- | ---- | ----------------- |
+| Node.js | 18+  | 推荐使用 LTS 版本 |
+| npm     | 9+   | 随 Node.js 安装   |
+| Git     | 任意 | 版本控制          |
 
 ## 克隆与安装 / Clone & Install
 
@@ -28,6 +28,7 @@ npm run dev
 ```
 
 这会同时启动：
+
 - Electron 主进程
 - Vite 开发服务器（渲染进程，支持 HMR）
 
@@ -87,7 +88,7 @@ npm run format
 
 ```typescript
 // 等价于 src/renderer/src/lib/agent/agent-loop.ts
-import { runAgentLoop } from '@renderer/lib/agent/agent-loop';
+import { runAgentLoop } from '@renderer/lib/agent/agent-loop'
 ```
 
 配置在 `tsconfig.web.json` 和 `electron.vite.config.ts` 中。

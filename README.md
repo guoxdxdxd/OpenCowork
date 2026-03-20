@@ -35,9 +35,10 @@
 
 ## 🚀 Why OpenCowork?
 
-Traditional LLM interfaces are often "environment-isolated islands." Developers spend 50% of their time copy-pasting code, terminal logs, and file contents between the chat and their IDE. 
+Traditional LLM interfaces are often "environment-isolated islands." Developers spend 50% of their time copy-pasting code, terminal logs, and file contents between the chat and their IDE.
 
 **OpenCowork solves this by providing:**
+
 - **Local Agency:** Agents can directly read/write files and execute shell commands with your permission.
 - **Context Awareness:** No more manual context feeding. Agents explore your codebase and logs autonomously.
 - **Task Orchestration:** Complex tasks (like "Refactor this module and update tests") are broken down and handled by specialized sub-agents.
@@ -58,6 +59,7 @@ OpenCowork is deeply inspired by **Claude CoWork**. We believe the future of pro
 ## 🛠️ Quick Start
 
 Prerequisites:
+
 - Node.js >= 18
 - npm >= 9
 

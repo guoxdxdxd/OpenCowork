@@ -32,8 +32,8 @@ export const IPC_CHANNELS = {
   // Cron
   CRON_CREATE: 'cron:create',
   CRON_DELETE: 'cron:delete',
-  CRON_LIST: 'cron:list',
-} as const;
+  CRON_LIST: 'cron:list'
+} as const
 ```
 
 ## 调用模式 / Invocation Patterns
@@ -42,14 +42,12 @@ export const IPC_CHANNELS = {
 
 ```typescript
 // 渲染进程
-const sessions = await window.electron.ipc.invoke(
-  IPC_CHANNELS.DB_GET_SESSIONS
-);
+const sessions = await window.electron.ipc.invoke(IPC_CHANNELS.DB_GET_SESSIONS)
 
 // 主进程
 ipcMain.handle(IPC_CHANNELS.DB_GET_SESSIONS, () => {
-  return db.prepare('SELECT * FROM sessions').all();
-});
+  return db.prepare('SELECT * FROM sessions').all()
+})
 ```
 
 ### 事件推送（on）
@@ -57,11 +55,11 @@ ipcMain.handle(IPC_CHANNELS.DB_GET_SESSIONS, () => {
 ```typescript
 // 渲染进程监听插件消息
 window.electron.ipc.on('plugin:message', (event, message) => {
-  pluginStore.addMessage(message);
-});
+  pluginStore.addMessage(message)
+})
 
 // 主进程推送
-mainWindow.webContents.send('plugin:message', parsedMessage);
+mainWindow.webContents.send('plugin:message', parsedMessage)
 ```
 
 ## Fire-and-Forget 模式
@@ -70,7 +68,7 @@ mainWindow.webContents.send('plugin:message', parsedMessage);
 
 ```typescript
 // 不 await，不阻塞 UI
-window.electron.ipc.invoke('db:saveMessage', message);
+window.electron.ipc.invoke('db:saveMessage', message)
 ```
 
 这保证了 UI 的流畅性，即使数据库写入稍有延迟也不影响用户体验。

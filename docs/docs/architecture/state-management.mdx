@@ -9,50 +9,51 @@ OpenCowork 使用 Zustand + Immer 进行状态管理，所有 store 位于 `src/
 
 ## 核心 Store / Core Stores
 
-| Store | 职责 |
-|-------|------|
-| `chat-store` | 会话和消息，持久化到 SQLite |
-| `agent-store` | Agent 循环运行时状态 |
-| `plugin-store` | 插件实例和状态 |
-| `settings-store` | 用户偏好设置 |
-| `provider-store` | AI 提供商配置 |
-| `task-store` | 任务列表（计划模式） |
-| `plan-store` | 计划数据 |
-| `team-store` | Agent 团队状态 |
-| `cron-store` | 定时任务 |
-| `mcp-store` | MCP 服务器 |
-| `ui-store` | UI 状态（侧边栏、主题等） |
+| Store            | 职责                        |
+| ---------------- | --------------------------- |
+| `chat-store`     | 会话和消息，持久化到 SQLite |
+| `agent-store`    | Agent 循环运行时状态        |
+| `plugin-store`   | 插件实例和状态              |
+| `settings-store` | 用户偏好设置                |
+| `provider-store` | AI 提供商配置               |
+| `task-store`     | 任务列表（计划模式）        |
+| `plan-store`     | 计划数据                    |
+| `team-store`     | Agent 团队状态              |
+| `cron-store`     | 定时任务                    |
+| `mcp-store`      | MCP 服务器                  |
+| `ui-store`       | UI 状态（侧边栏、主题等）   |
 
 ## Store 模式 / Store Pattern
 
 所有 store 使用 Zustand + Immer 中间件：
 
 ```typescript
-import { create } from 'zustand';
-import { immer } from 'zustand/middleware/immer';
-import { persist } from 'zustand/middleware';
+import { create } from 'zustand'
+import { immer } from 'zustand/middleware/immer'
+import { persist } from 'zustand/middleware'
 
 export const useChatStore = create<ChatStore>()(
   persist(
     immer((set, get) => ({
       sessions: [],
-      addSession: (session) => set((state) => {
-        state.sessions.push(session);
-      }),
+      addSession: (session) =>
+        set((state) => {
+          state.sessions.push(session)
+        })
     })),
     { name: 'chat-store' }
   )
-);
+)
 ```
 
 ## 持久化策略 / Persistence
 
-| Store | 持久化方式 |
-|-------|-----------|
-| `chat-store` | SQLite（via IPC，fire-and-forget） |
-| `settings-store` | localStorage（Zustand persist） |
-| `provider-store` | localStorage（Zustand persist） |
-| `agent-store` | IPC storage |
+| Store            | 持久化方式                         |
+| ---------------- | ---------------------------------- |
+| `chat-store`     | SQLite（via IPC，fire-and-forget） |
+| `settings-store` | localStorage（Zustand persist）    |
+| `provider-store` | localStorage（Zustand persist）    |
+| `agent-store`    | IPC storage                        |
 
 ## Immer 的使用 / Using Immer
 
@@ -61,7 +62,7 @@ Immer 允许直接修改 state（内部转换为不可变更新）：
 ```typescript
 // 直接修改，无需展开
 set((state) => {
-  state.messages[sessionId].push(newMessage);
-  state.sessions.find(s => s.id === sessionId).updatedAt = Date.now();
-});
+  state.messages[sessionId].push(newMessage)
+  state.sessions.find((s) => s.id === sessionId).updatedAt = Date.now()
+})
 ```
