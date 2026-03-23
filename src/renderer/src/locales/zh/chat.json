@@ -76,6 +76,37 @@
     "openDocs": "打开官网帮助",
     "close": "稍后再看",
     "startNow": "开始使用",
+    "progress": "第 {{current}} / {{total}} 步",
+    "previous": "上一步",
+    "next": "下一步",
+    "finish": "完成",
+    "skip": "跳过引导",
+    "steps": {
+      "leftSidebar": {
+        "title": "这是左侧项目与会话区",
+        "description": "这里按“项目 → 会话”组织你的工作。你可以在这里切项目、切历史会话、搜索消息，也能快速回到之前的上下文。"
+      },
+      "sessionActions": {
+        "title": "这里是项目/会话快捷操作",
+        "description": "这里可以新建项目、新建会话、导出会话，也能配合右键菜单完成重命名、置顶、复制、删除等操作。"
+      },
+      "composer": {
+        "title": "这是输入区",
+        "description": "你大多数操作都从这里开始：输入需求、发送消息、上传图片、切模型、开联网、进 Plan Mode。Enter 发送，Shift+Enter 换行。"
+      },
+      "mentions": {
+        "title": "在这里用 @ 引用文件",
+        "description": "在输入框中键入 @，系统会基于当前工作目录搜索文件。选中后会插入结构化文件引用，比手输路径更稳定，也更适合代码任务。"
+      },
+      "commands": {
+        "title": "这里打开命令 / Skill / MCP",
+        "description": "点击这个 +，可以往当前消息里加入命令、Skill、Channels 和 MCP Servers。输入 / 则会触发聊天命令建议。"
+      },
+      "rightPanel": {
+        "title": "这是右侧执行面板",
+        "description": "这里用来盯执行过程和上下文：Steps 看当前步骤，Files 看文件树，Artifacts 看改动产物，Context 看目录、模型、token 和后台命令。"
+      }
+    },
     "sections": {
       "leftSidebar": {
         "title": "左侧：项目与会话",

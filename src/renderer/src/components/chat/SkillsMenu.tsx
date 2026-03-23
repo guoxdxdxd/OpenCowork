@@ -104,6 +104,7 @@ export function SkillsMenu({
           <span className="inline-flex">
             <DropdownMenuTrigger asChild>
               <Button
+                data-tour="composer-plus"
                 variant="ghost"
                 size="icon"
                 className="size-8 shrink-0 rounded-lg"

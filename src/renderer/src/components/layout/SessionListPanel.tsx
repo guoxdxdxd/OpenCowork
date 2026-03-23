@@ -1139,6 +1139,7 @@ export function SessionListPanel(): React.JSX.Element {
   return (
     <>
       <div
+        data-tour="left-sidebar"
         className="relative flex h-full shrink-0 flex-col overflow-hidden border-r bg-background/50"
         style={{
           width: clampLeftSidebarWidth(
@@ -1156,7 +1157,7 @@ export function SessionListPanel(): React.JSX.Element {
               <span className="text-[10px] text-muted-foreground">({sessions.length})</span>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          <div data-tour="session-actions" className="flex items-center gap-1">
             {sessions.some((s) => s.messageCount > 0) && (
               <Button
                 variant="ghost"

@@ -76,6 +76,37 @@
     "openDocs": "Open Help Site",
     "close": "Maybe later",
     "startNow": "Start using it",
+    "progress": "Step {{current}} / {{total}}",
+    "previous": "Previous",
+    "next": "Next",
+    "finish": "Finish",
+    "skip": "Skip",
+    "steps": {
+      "leftSidebar": {
+        "title": "This is the project and session area",
+        "description": "Your work is organized here as projects and sessions. Use it to switch projects, revisit old sessions, and search earlier context."
+      },
+      "sessionActions": {
+        "title": "These are the project and session quick actions",
+        "description": "Use this area to create projects, start a session, export conversations, and combine it with right-click actions for rename, pin, duplicate, or delete."
+      },
+      "composer": {
+        "title": "This is the composer",
+        "description": "Most work starts here: describe the task, send messages, attach images, switch models, enable web search, or enter Plan Mode. Enter sends, Shift+Enter adds a newline."
+      },
+      "mentions": {
+        "title": "Use @ here to mention files",
+        "description": "Type @ inside the composer to search files from the current working folder. This inserts structured file references, which is much better than typing paths manually."
+      },
+      "commands": {
+        "title": "Open commands, Skills, and MCP here",
+        "description": "Click this + button to add commands, Skills, Channels, and MCP Servers to the current message. Typing / in the composer opens slash-command suggestions."
+      },
+      "rightPanel": {
+        "title": "This is the execution panel",
+        "description": "Use it to monitor progress and context: Steps shows what is running, Files shows the tree, Artifacts shows changed files, and Context shows folder, model, tokens, and background commands."
+      }
+    },
     "sections": {
       "leftSidebar": {
         "title": "Left: Projects and Sessions",

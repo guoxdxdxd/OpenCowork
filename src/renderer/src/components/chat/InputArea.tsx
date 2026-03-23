@@ -1688,7 +1688,7 @@ export function InputArea({
   }, [])
 
   return (
-    <div ref={rootRef} className="px-4 py-3 pb-4">
+    <div ref={rootRef} data-tour="composer" className="px-4 py-3 pb-4">
       {/* API key warning */}
       {!hasApiKey && (
         <button
