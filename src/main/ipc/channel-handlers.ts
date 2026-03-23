@@ -87,6 +87,52 @@ async function normalizeQrDisplayUrl(url?: string): Promise<string | undefined> 
   }
 }
 
+function resolveSourceFileName(source: string, fallback: string): string {
+  const value = source.trim()
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value)
+      const fileName = path.basename(url.pathname)
+      return decodeURIComponent(fileName || fallback)
+    } catch {
+      return fallback
+    }
+  }
+
+  const sanitized = value.split('?')[0]
+  return path.basename(sanitized) || fallback
+}
+
+async function readBinarySource(
+  source: string,
+  fallbackName: string
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const value = source.trim()
+  if (!value) {
+    throw new Error('File path is empty')
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    const response = await fetch(value)
+    if (!response.ok) {
+      throw new Error(`Download URL failed: HTTP ${response.status}`)
+    }
+    return {
+      buffer: Buffer.from(await response.arrayBuffer()),
+      fileName: resolveSourceFileName(value, fallbackName)
+    }
+  }
+
+  if (!fs.existsSync(value)) {
+    throw new Error(`File not found: ${value}`)
+  }
+
+  return {
+    buffer: fs.readFileSync(value),
+    fileName: resolveSourceFileName(value, fallbackName)
+  }
+}
+
 // ── Persistence helpers ──
 
 function buildToolsMap(
@@ -639,6 +685,54 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
       const db = getDb()
       db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(args.title, args.sessionId)
       return { ok: true }
+    }
+  )
+
+  // ── Weixin media send ──
+
+  ipcMain.handle(
+    'plugin:weixin:send-image',
+    async (
+      _event,
+      args: { pluginId: string; chatId: string; filePath: string; content?: string }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/weixin/weixin-service').WeixinService
+        | undefined
+      if (!service) return { error: 'Weixin plugin not running or not found' }
+
+      try {
+        const { buffer } = await readBinarySource(args.filePath, 'image.png')
+        const result = await service.sendImage(args.chatId, buffer, args.content)
+        return { ok: true, messageId: result.messageId }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Weixin] send-image failed:', msg)
+        return { error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'plugin:weixin:send-file',
+    async (
+      _event,
+      args: { pluginId: string; chatId: string; filePath: string; content?: string }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/weixin/weixin-service').WeixinService
+        | undefined
+      if (!service) return { error: 'Weixin plugin not running or not found' }
+
+      try {
+        const { buffer, fileName } = await readBinarySource(args.filePath, 'file')
+        const result = await service.sendFile(args.chatId, buffer, fileName, args.content)
+        return { ok: true, messageId: result.messageId }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Weixin] send-file failed:', msg)
+        return { error: msg }
+      }
     }
   )
 

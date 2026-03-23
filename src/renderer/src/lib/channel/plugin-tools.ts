@@ -317,6 +317,82 @@ const feishuSendFile: ToolHandler = {
   requiresApproval: () => true
 }
 
+const weixinSendImage: ToolHandler = {
+  definition: {
+    name: 'WeixinSendImage',
+    description:
+      'Send an image to an official Weixin chat. Accepts either an absolute local file path or an HTTP/HTTPS URL. Optionally send `content` as a text message before the image.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plugin_id: { type: 'string', description: 'The official Weixin channel instance ID' },
+        chat_id: { type: 'string', description: 'The Weixin chat ID to send the image to' },
+        file_path: {
+          type: 'string',
+          description: 'Absolute local file path OR an HTTP/HTTPS URL pointing to the image'
+        },
+        content: {
+          type: 'string',
+          description: 'Optional text to send before the image as a separate text message'
+        }
+      },
+      required: ['plugin_id', 'chat_id', 'file_path']
+    }
+  },
+  execute: async (input, ctx) => {
+    if (!isPluginToolEnabled(input.plugin_id as string, 'WeixinSendImage')) {
+      return toolDisabledError('WeixinSendImage')
+    }
+    const result = (await ctx.ipc.invoke(IPC.PLUGIN_WEIXIN_SEND_IMAGE, {
+      pluginId: input.plugin_id,
+      chatId: input.chat_id,
+      filePath: input.file_path,
+      content: input.content
+    })) as { ok?: boolean; error?: string; messageId?: string }
+    if (result?.error) throw new Error(`WeixinSendImage failed: ${result.error}`)
+    return JSON.stringify({ ok: true, messageId: result?.messageId })
+  },
+  requiresApproval: () => true
+}
+
+const weixinSendFile: ToolHandler = {
+  definition: {
+    name: 'WeixinSendFile',
+    description:
+      'Send a file to an official Weixin chat. Accepts either an absolute local file path or an HTTP/HTTPS URL. Optionally send `content` as a text message before the file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plugin_id: { type: 'string', description: 'The official Weixin channel instance ID' },
+        chat_id: { type: 'string', description: 'The Weixin chat ID to send the file to' },
+        file_path: {
+          type: 'string',
+          description: 'Absolute local file path OR an HTTP/HTTPS URL pointing to the file'
+        },
+        content: {
+          type: 'string',
+          description: 'Optional text to send before the file as a separate text message'
+        }
+      },
+      required: ['plugin_id', 'chat_id', 'file_path']
+    }
+  },
+  execute: async (input, ctx) => {
+    if (!isPluginToolEnabled(input.plugin_id as string, 'WeixinSendFile')) {
+      return toolDisabledError('WeixinSendFile')
+    }
+    const result = (await ctx.ipc.invoke(IPC.PLUGIN_WEIXIN_SEND_FILE, {
+      pluginId: input.plugin_id,
+      chatId: input.chat_id,
+      filePath: input.file_path,
+      content: input.content
+    })) as { ok?: boolean; error?: string; messageId?: string }
+    if (result?.error) throw new Error(`WeixinSendFile failed: ${result.error}`)
+    return JSON.stringify({ ok: true, messageId: result?.messageId })
+  },
+  requiresApproval: () => true
+}
+
 const feishuListChatMembers: ToolHandler = {
   definition: {
     name: 'FeishuListChatMembers',
@@ -654,6 +730,8 @@ const FEISHU_TOOLS: ToolHandler[] = [
   feishuBitableDeleteRecords
 ]
 
+const WEIXIN_TOOLS: ToolHandler[] = [weixinSendImage, weixinSendFile]
+
 const ALL_PLUGIN_TOOLS: ToolHandler[] = [
   pluginSendMessage,
   pluginReplyMessage,
@@ -661,6 +739,7 @@ const ALL_PLUGIN_TOOLS: ToolHandler[] = [
   pluginListGroups,
   pluginSummarizeGroup,
   pluginGetCurrentChatMessages,
+  ...WEIXIN_TOOLS,
   ...FEISHU_TOOLS
 ]
 

@@ -337,7 +337,7 @@ export function ChatHomePage(): React.JSX.Element {
 
   return (
     <div className="flex flex-1 flex-col overflow-auto bg-gradient-to-b from-background via-background to-muted/20">
-      <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col justify-center px-4 py-8">
+      <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-8">
         <div className="mb-5 flex justify-center">
           <div
             data-tour="mode-switch"
@@ -664,73 +664,81 @@ export function ChatHomePage(): React.JSX.Element {
           </div>
         )}
 
-        {/* Input area */}
-        <div className="mx-auto w-full max-w-3xl">
-          <InputArea
-            onSend={handleSend}
-            onSelectFolder={mode !== 'chat' ? handleOpenFolderDialog : undefined}
-            workingFolder={workingFolder}
-            hideWorkingFolderIndicator
-            isStreaming={false}
-          />
-        </div>
-
-        <div className="mx-auto mt-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-xl border bg-primary/5 px-5 py-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-              <BookOpen className="size-4 text-primary" />
-              <span>{t('guide.bannerTitle')}</span>
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">{t('guide.bannerDesc')}</p>
+        <div className="mt-auto">
+          {/* Input area */}
+          <div className="mx-auto w-full max-w-3xl">
+            <InputArea
+              onSend={handleSend}
+              onSelectFolder={mode !== 'chat' ? handleOpenFolderDialog : undefined}
+              workingFolder={workingFolder}
+              hideWorkingFolderIndicator
+              isStreaming={false}
+            />
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="shrink-0"
-            onClick={() => useUIStore.getState().setConversationGuideOpen(true)}
-          >
-            {t('guide.openButton')}
-          </Button>
-        </div>
 
-        {/* Keyboard shortcuts hint */}
-        <div className="mx-auto mt-4 w-full max-w-3xl rounded-xl border bg-muted/30 px-5 py-3">
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[11px]">
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+N
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.newChat')}</span>
+          <div className="mx-auto mt-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-xl border bg-primary/5 px-5 py-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <BookOpen className="size-4 text-primary" />
+                <span>{t('guide.bannerTitle')}</span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">{t('guide.bannerDesc')}</p>
             </div>
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+K
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.commands')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+B
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.sidebarShortcut')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+/
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.shortcutsShortcut')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+,
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.settingsShortcut')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                Ctrl+D
-              </kbd>
-              <span className="text-muted-foreground/60">{t('messageList.duplicateShortcut')}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => useUIStore.getState().setConversationGuideOpen(true)}
+            >
+              {t('guide.openButton')}
+            </Button>
+          </div>
+
+          {/* Keyboard shortcuts hint */}
+          <div className="mx-auto mt-4 w-full max-w-3xl rounded-xl border bg-muted/30 px-5 py-3">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[11px]">
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+N
+                </kbd>
+                <span className="text-muted-foreground/60">{t('messageList.newChat')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+K
+                </kbd>
+                <span className="text-muted-foreground/60">{t('messageList.commands')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+B
+                </kbd>
+                <span className="text-muted-foreground/60">{t('messageList.sidebarShortcut')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+/
+                </kbd>
+                <span className="text-muted-foreground/60">
+                  {t('messageList.shortcutsShortcut')}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+,
+                </kbd>
+                <span className="text-muted-foreground/60">
+                  {t('messageList.settingsShortcut')}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  Ctrl+D
+                </kbd>
+                <span className="text-muted-foreground/60">
+                  {t('messageList.duplicateShortcut')}
+                </span>
+              </div>
             </div>
           </div>
         </div>

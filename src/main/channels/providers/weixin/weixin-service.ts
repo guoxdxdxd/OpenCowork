@@ -94,7 +94,7 @@ export class WeixinService extends BasePluginService {
     this.pollPromise = null
   }
 
-  async sendMessage(chatId: string, content: string): Promise<{ messageId: string }> {
+  private getContextTokenForChat(chatId: string): string {
     const accountId = this._instance.config.accountId || ''
     const contextToken = this.contextTokens.get(`${accountId}:${chatId}`)
     if (!contextToken) {
@@ -102,7 +102,39 @@ export class WeixinService extends BasePluginService {
         'Missing context token for this Weixin chat. Send can only reply to existing conversations.'
       )
     }
-    return this.api.sendMessage({ toUserId: chatId, text: content, contextToken })
+    return contextToken
+  }
+
+  async sendMessage(chatId: string, content: string): Promise<{ messageId: string }> {
+    return this.api.sendMessage({
+      toUserId: chatId,
+      text: content,
+      contextToken: this.getContextTokenForChat(chatId)
+    })
+  }
+
+  async sendImage(chatId: string, buffer: Buffer, text?: string): Promise<{ messageId: string }> {
+    return this.api.sendImage({
+      toUserId: chatId,
+      buffer,
+      text,
+      contextToken: this.getContextTokenForChat(chatId)
+    })
+  }
+
+  async sendFile(
+    chatId: string,
+    buffer: Buffer,
+    fileName: string,
+    text?: string
+  ): Promise<{ messageId: string }> {
+    return this.api.sendFile({
+      toUserId: chatId,
+      buffer,
+      fileName,
+      text,
+      contextToken: this.getContextTokenForChat(chatId)
+    })
   }
 
   async replyMessage(messageId: string, content: string): Promise<{ messageId: string }> {
@@ -209,14 +241,17 @@ export class WeixinService extends BasePluginService {
     let images: ChannelIncomingMessageData['images']
     let effectiveContent = content
 
-    if (msgType === 'image' && imageItem?.file_id) {
+    if (msgType === 'image' && imageItem) {
       try {
-        const download = await this.api.downloadMessageImage({
+        const download = await this.api.downloadInboundImage({
           messageId: msg.message_id ?? msg.client_id ?? messageId,
           fileId: imageItem.file_id,
           aesKey: imageItem.aes_key,
+          rawAesKeyHex: imageItem.aeskey,
           md5sum: imageItem.md5sum,
-          fileName: imageItem.file_name
+          fileName: imageItem.file_name,
+          media: imageItem.media,
+          thumbMedia: imageItem.thumb_media
         })
         if (download.buffer.byteLength > 0) {
           images = [
@@ -228,7 +263,7 @@ export class WeixinService extends BasePluginService {
         }
       } catch (error) {
         console.warn('[Weixin] Failed to download inbound image:', error)
-        effectiveContent = `[User sent an image but download failed: ${imageItem.file_id}]`
+        effectiveContent = `[User sent an image but download failed: ${imageItem.file_id || imageItem.media?.encrypt_query_param || 'unknown'}]`
       }
     }
 

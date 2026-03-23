@@ -1355,8 +1355,8 @@ export function useChatActions(): {
               }
             }
           }
-          // Check if any active channel is Feishu (has file/image send capability)
           const hasFeishuChannel = activeChannels.some((c) => c.type === 'feishu-bot')
+          const hasWeixinChannel = activeChannels.some((c) => c.type === 'weixin-official')
 
           channelLines.push(
             '',
@@ -1367,8 +1367,10 @@ export function useChatActions(): {
             'When the user asks you to generate reports, documents, or any deliverable and wants it sent to a chat:',
             '1. **Write the file** using the Write tool (e.g. `report.md`, `analysis.csv`, `summary.html`).',
             hasFeishuChannel
-              ? '2. **Send the file** using FeishuSendFile (for Feishu chats) or share key content via PluginSendMessage (for other platforms).'
-              : '2. **Share the content** via PluginSendMessage, or inform the user where the file was saved.',
+              ? '2. **Send the file** using FeishuSendFile (for Feishu chats), WeixinSendFile (for 官方微信 chats), or share key content via PluginSendMessage for other platforms.'
+              : hasWeixinChannel
+                ? '2. **Send the file** using WeixinSendFile (for 官方微信 chats), or share key content via PluginSendMessage for other platforms.'
+                : '2. **Share the content** via PluginSendMessage, or inform the user where the file was saved.',
             '3. **Provide a brief summary** in your response so the user knows what was generated.',
             'Prefer writing to a file + sending it over pasting long content (>30 lines) directly in chat messages.'
           )
@@ -1431,6 +1433,7 @@ export function useChatActions(): {
             .channels.find((p) => p.id === session.pluginId)
           const chatId = session.externalChatId.replace(/^plugin:[^:]+:chat:/, '')
           const isFeishu = channelMeta?.type === 'feishu-bot'
+          const isWeixin = channelMeta?.type === 'weixin-official'
           const channelDescriptor = channelMeta
             ? useChannelStore.getState().getDescriptor(channelMeta.type)
             : undefined
@@ -1457,7 +1460,15 @@ export function useChatActions(): {
                   `- **FeishuSendFile**: Send a file (PDF, document, spreadsheet, etc.)`,
                   `Both require plugin_id="${session.pluginId}" and chat_id="${chatId}".`
                 ].join('\n')
-              : ''
+              : isWeixin
+                ? [
+                    `\n### Weixin Media Tools`,
+                    `You can send images and files to this chat:`,
+                    `- **WeixinSendImage**: Send an image file (screenshot, generated image, etc.)`,
+                    `- **WeixinSendFile**: Send a file (PDF, document, spreadsheet, etc.)`,
+                    `Both require plugin_id="${session.pluginId}" and chat_id="${chatId}".`
+                  ].join('\n')
+                : ''
           ]
             .filter(Boolean)
             .join('\n')

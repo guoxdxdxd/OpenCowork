@@ -394,6 +394,8 @@ async function _runCronAgentAsync(
     'PluginListGroups',
     'PluginSummarizeGroup',
     'PluginGetCurrentChatMessages',
+    'WeixinSendImage',
+    'WeixinSendFile',
     'FeishuSendImage',
     'FeishuSendFile',
     'FeishuListChatMembers',
@@ -429,7 +431,7 @@ async function _runCronAgentAsync(
       const channelLines = allChannels.map(
         (c) => `- **${c.name}** (channel_id: \`${c.id}\`, type: ${c.type})`
       )
-      channelInfo = `\n## Available Messaging Channels\n${channelLines.join('\n')}\nYou can send messages via these channels using PluginSendMessage (set plugin_id to channel_id, and include chat_id).\nFor Feishu channels, you can also use FeishuSendImage and FeishuSendFile to send media.\n`
+      channelInfo = `\n## Available Messaging Channels\n${channelLines.join('\n')}\nYou can send messages via these channels using PluginSendMessage (set plugin_id to channel_id, and include chat_id).\nFor 官方微信 channels, you can also use WeixinSendImage and WeixinSendFile to send media.\nFor Feishu channels, you can also use FeishuSendImage and FeishuSendFile to send media.\n`
     }
   }
 

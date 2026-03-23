@@ -85,6 +85,8 @@ export const IPC = {
   // Weixin-specific
   PLUGIN_WEIXIN_LOGIN_START: 'plugin:weixin:login-start',
   PLUGIN_WEIXIN_LOGIN_WAIT: 'plugin:weixin:login-wait',
+  PLUGIN_WEIXIN_SEND_IMAGE: 'plugin:weixin:send-image',
+  PLUGIN_WEIXIN_SEND_FILE: 'plugin:weixin:send-file',
 
   // Feishu-specific
   PLUGIN_FEISHU_SEND_IMAGE: 'plugin:feishu:send-image',

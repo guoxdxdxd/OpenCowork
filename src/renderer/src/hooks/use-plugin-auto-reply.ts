@@ -91,6 +91,8 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     pluginTypeFromTask === 'feishu-bot' ||
     channelTypeFromStore === 'feishu' ||
     pluginTypeFromTask === 'feishu'
+  const isWeixinChannel =
+    channelTypeFromStore === 'weixin-official' || pluginTypeFromTask === 'weixin-official'
   if (!features.autoReply) {
     console.log(`[PluginAutoReply] Auto-reply disabled for plugin ${pluginId}, skipping`)
     return
@@ -462,10 +464,14 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       `2. **Send the file directly to the user** via the plugin so they receive it without extra steps:`,
       isFeishu
         ? `   - Use **FeishuSendFile** (plugin_id="${pluginId}", chat_id="${chatId}") to deliver the generated file.`
-        : `   - Use **PluginSendMessage** to share the file content or a download-ready summary with the user.`,
+        : isWeixinChannel
+          ? `   - Use **WeixinSendFile** (plugin_id="${pluginId}", chat_id="${chatId}") to deliver the generated file.`
+          : `   - Use **PluginSendMessage** to share the file content or a download-ready summary with the user.`,
       isFeishu
         ? `   - Use **FeishuSendImage** if the deliverable is an image (chart, screenshot, diagram).`
-        : '',
+        : isWeixinChannel
+          ? `   - Use **WeixinSendImage** if the deliverable is an image (chart, screenshot, diagram).`
+          : '',
       `3. **Also provide a brief summary** in your text response so the user knows what the file contains without opening it.`,
       `4. **Format guidelines**: Prefer Markdown (.md) for reports and documentation, CSV for tabular data, HTML for rich formatted reports, JSON for structured data. Use the format that best serves the user's needs.`,
       `5. **Do NOT paste entire file contents as chat messages** when the content is long (>30 lines). Write it to a file and send the file instead — this provides a much better user experience.`,
@@ -479,7 +485,15 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
             `For @mentions, fetch member open_id via **FeishuListChatMembers** and call **FeishuAtMember** (plain '@' text will not mention).`,
             `Always prefer sending files over pasting long content in messages.`
           ].join('\n')
-        : ''
+        : isWeixinChannel
+          ? [
+              `\n### Weixin Media Tools`,
+              `You can send images and files to this chat:`,
+              `- **WeixinSendImage**: Send an image (local path or URL). plugin_id="${pluginId}", chat_id="${chatId}"`,
+              `- **WeixinSendFile**: Send a file (local path or URL). plugin_id="${pluginId}", chat_id="${chatId}"`,
+              `Always prefer sending files over pasting long content in messages.`
+            ].join('\n')
+          : ''
     ]
       .filter(Boolean)
       .join('\n')

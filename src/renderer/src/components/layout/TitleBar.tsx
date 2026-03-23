@@ -8,7 +8,6 @@ import {
   Terminal,
   Square,
   HelpCircle,
-  User,
   Camera,
   Check,
   Pencil,
@@ -17,6 +16,7 @@ import {
   Download,
   Loader2
 } from 'lucide-react'
+import appIconUrl from '../../../../../resources/icon.png'
 import { Button } from '@renderer/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@renderer/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
@@ -63,6 +63,8 @@ export function TitleBar({ updateInfo, onOpenUpdateDialog }: TitleBarProps): Rea
   const [isEditingName, setIsEditingName] = useState(false)
   const [editName, setEditName] = useState(userName)
   const [friendlyMessage, setFriendlyMessage] = useState('')
+  const hasCustomAvatar = Boolean(userAvatar)
+  const displayAvatar = userAvatar || appIconUrl
 
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const streamingMessageId = useChatStore((s) => s.streamingMessageId)
@@ -190,11 +192,11 @@ export function TitleBar({ updateInfo, onOpenUpdateDialog }: TitleBarProps): Rea
         <HoverCard>
           <HoverCardTrigger asChild>
             <button className="flex size-7 items-center justify-center overflow-hidden rounded-full bg-muted ring-1 ring-border/50 transition-all hover:ring-primary/50 hover:scale-105">
-              {userAvatar ? (
-                <img src={userAvatar} alt="avatar" className="size-full object-cover" />
-              ) : (
-                <User className="size-4 text-muted-foreground" />
-              )}
+              <img
+                src={displayAvatar}
+                alt="avatar"
+                className={hasCustomAvatar ? 'size-full object-cover' : 'size-full object-contain p-0.5'}
+              />
             </button>
           </HoverCardTrigger>
           <HoverCardContent side="bottom" align="start" className="w-60 p-0 overflow-hidden">
@@ -207,11 +209,11 @@ export function TitleBar({ updateInfo, onOpenUpdateDialog }: TitleBarProps): Rea
                 onClick={handleAvatarClick}
                 className="group relative flex size-14 items-center justify-center overflow-hidden rounded-full bg-muted ring-2 ring-background shadow-md transition-all hover:ring-primary/50"
               >
-                {userAvatar ? (
-                  <img src={userAvatar} alt="avatar" className="size-full object-cover" />
-                ) : (
-                  <User className="size-7 text-muted-foreground" />
-                )}
+                <img
+                  src={displayAvatar}
+                  alt="avatar"
+                  className={hasCustomAvatar ? 'size-full object-cover' : 'size-full object-contain p-1'}
+                />
                 <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
                   <Camera className="size-4 text-white" />
                 </div>

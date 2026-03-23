@@ -17,7 +17,6 @@ const openPreviewHandler: ToolHandler = {
       'IMPORTANT: You MUST call this tool right after creating or editing any of these file types:\n' +
       '- HTML files (.html/.htm): renders a live preview in an iframe, great for data visualizations (ECharts, D3, Chart.js), interactive pages, reports, dashboards, etc.\n' +
       '- Spreadsheet files (.csv/.tsv): shows an editable table view with undo/redo and search.\n' +
-      '- Any other text/code file: displays with syntax highlighting via Monaco Editor.\n\n' +
       'When the user asks you to create a chart, visualization, single-page app, report, or any visual output, ' +
       'prefer generating a self-contained HTML file (with inline CSS/JS and CDN libraries like ECharts, Chart.js, D3, etc.), ' +
       'then immediately call OpenPreview to show the result. This gives the user instant visual feedback without leaving the app.',
@@ -32,7 +31,7 @@ const openPreviewHandler: ToolHandler = {
           type: 'string',
           enum: ['preview', 'code'],
           description:
-            'View mode: "preview" for rendered HTML view, "code" for source code with syntax highlighting. Defaults based on file type (HTML→preview, others→code).'
+            'View mode: "preview" for rendered HTML view, "code" for source code with syntax highlighting. Defaults to "preview".'
         }
       },
       required: ['file_path']
@@ -40,7 +39,7 @@ const openPreviewHandler: ToolHandler = {
   },
   execute: async (input, ctx) => {
     const filePath = resolveToolPath(input.file_path, ctx.workingFolder)
-    const viewMode = input.view_mode as 'preview' | 'code' | undefined
+    const viewMode = (input.view_mode as 'preview' | 'code' | undefined) ?? 'preview'
     const sshConnectionId = resolveSshConnectionId(filePath, ctx.sshConnectionId)
 
     // Import dynamically to avoid circular deps at module level

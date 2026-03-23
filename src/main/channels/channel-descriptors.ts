@@ -34,6 +34,8 @@ const FEISHU_PLUGIN_TOOLS = [
   'FeishuBitableDeleteRecords'
 ]
 
+const WEIXIN_PLUGIN_TOOLS = [...COMMON_PLUGIN_TOOLS, 'WeixinSendImage', 'WeixinSendFile']
+
 /** Built-in channel provider descriptors */
 export const CHANNEL_PROVIDERS: ChannelProviderDescriptor[] = [
   // ── China ──
@@ -158,7 +160,7 @@ export const CHANNEL_PROVIDERS: ChannelProviderDescriptor[] = [
     description: '官方微信绑定渠道（扫码登录 + 长轮询）',
     icon: 'wechat',
     builtin: true,
-    tools: COMMON_PLUGIN_TOOLS,
+    tools: WEIXIN_PLUGIN_TOOLS,
     configSchema: [
       {
         key: 'baseUrl',
