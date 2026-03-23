@@ -508,16 +508,15 @@ export function TitleBar({ updateInfo, onOpenUpdateDialog }: TitleBarProps): Rea
         {/* Help */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <a
-              href="https://open-cowork.shop/"
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
               className="titlebar-no-drag inline-flex size-7 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 transition-all"
+              onClick={() => useUIStore.getState().setConversationGuideOpen(true)}
             >
               <HelpCircle className="size-4" />
-            </a>
+            </button>
           </TooltipTrigger>
-          <TooltipContent>{t('topbar.help', { defaultValue: 'Help Center' })}</TooltipContent>
+          <TooltipContent>{t('topbar.help', { defaultValue: '新人引导' })}</TooltipContent>
         </Tooltip>
       </div>
 
