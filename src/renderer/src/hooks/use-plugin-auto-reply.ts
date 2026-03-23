@@ -30,7 +30,7 @@ import { IPC } from '@renderer/lib/ipc/channels'
 import { registerPluginTools, isPluginToolsRegistered } from '@renderer/lib/channel/plugin-tools'
 import { DEFAULT_PLUGIN_PERMISSIONS } from '@renderer/lib/channel/types'
 import { loadLayeredMemorySnapshot } from '@renderer/lib/agent/memory-files'
-import type { UnifiedMessage, ProviderConfig } from '@renderer/lib/api/types'
+import type { UnifiedMessage, ProviderConfig, ContentBlock } from '@renderer/lib/api/types'
 import type { AgentLoopConfig } from '@renderer/lib/agent/types'
 import type { ToolContext } from '@renderer/lib/tools/tool-types'
 import { hasPendingSessionMessagesForSession } from '@renderer/hooks/use-chat-actions'
@@ -523,14 +523,14 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   }
 
   // ── Build user message ──
-  let userContent: string | Array<Record<string, unknown>> = effectiveContent
+  let userContent: UnifiedMessage['content'] = effectiveContent
   if (task.images?.length) {
     if (supportsVision) {
-      const blocks: Array<Record<string, unknown>> = []
+      const blocks: ContentBlock[] = []
       for (const img of task.images) {
         blocks.push({
           type: 'image',
-          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+          source: { type: 'base64', mediaType: img.mediaType, data: img.base64 }
         })
       }
       if (effectiveContent) {
@@ -546,7 +546,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const userMsg: UnifiedMessage = {
     id: nanoid(),
     role: 'user',
-    content: userContent as string,
+    content: userContent,
     createdAt: Date.now()
   }
 

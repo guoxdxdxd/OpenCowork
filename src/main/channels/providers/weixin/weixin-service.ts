@@ -11,6 +11,7 @@ import {
   WeixinApi,
   type WeixinInboundMessage,
   type WeixinMessageItem,
+  type WeixinImageItem,
   DEFAULT_WEIXIN_BASE_URL
 } from './weixin-api'
 
@@ -21,7 +22,11 @@ const VOICE_ITEM = 3
 const FILE_ITEM = 4
 const VIDEO_ITEM = 5
 
-function extractContent(items?: WeixinMessageItem[]): { content: string; msgType: string } {
+function extractContent(items?: WeixinMessageItem[]): {
+  content: string
+  msgType: string
+  imageItem?: WeixinImageItem
+} {
   if (!items?.length) {
     return { content: '', msgType: 'text' }
   }
@@ -34,7 +39,11 @@ function extractContent(items?: WeixinMessageItem[]): { content: string; msgType
       return { content: item.voice_item.text, msgType: 'voice' }
     }
     if (item.type === IMAGE_ITEM) {
-      return { content: '[图片]', msgType: 'image' }
+      return {
+        content: '[User sent an image]',
+        msgType: 'image',
+        imageItem: item.image_item
+      }
     }
     if (item.type === FILE_ITEM) {
       return {
@@ -145,7 +154,7 @@ export class WeixinService extends BasePluginService {
         }
 
         for (const msg of response.msgs || []) {
-          this.handleIncomingMessage(accountId, msg)
+          void this.handleIncomingMessage(accountId, msg)
         }
       } catch (error) {
         if (!this.polling) {
@@ -164,7 +173,7 @@ export class WeixinService extends BasePluginService {
     }
   }
 
-  private handleIncomingMessage(accountId: string, msg: WeixinInboundMessage): void {
+  private async handleIncomingMessage(accountId: string, msg: WeixinInboundMessage): Promise<void> {
     if (msg.message_type !== USER_MESSAGE_TYPE) {
       return
     }
@@ -174,8 +183,8 @@ export class WeixinService extends BasePluginService {
       return
     }
 
-    const { content, msgType } = extractContent(msg.item_list)
-    if (!content) {
+    const { content, msgType, imageItem } = extractContent(msg.item_list)
+    if (!content && msgType !== 'image') {
       return
     }
 
@@ -197,13 +206,40 @@ export class WeixinService extends BasePluginService {
       }
     }
 
+    let images: ChannelIncomingMessageData['images']
+    let effectiveContent = content
+
+    if (msgType === 'image' && imageItem?.file_id) {
+      try {
+        const download = await this.api.downloadMessageImage({
+          messageId: msg.message_id ?? msg.client_id ?? messageId,
+          fileId: imageItem.file_id,
+          aesKey: imageItem.aes_key,
+          md5sum: imageItem.md5sum,
+          fileName: imageItem.file_name
+        })
+        if (download.buffer.byteLength > 0) {
+          images = [
+            {
+              base64: download.buffer.toString('base64'),
+              mediaType: download.mediaType || 'image/png'
+            }
+          ]
+        }
+      } catch (error) {
+        console.warn('[Weixin] Failed to download inbound image:', error)
+        effectiveContent = `[User sent an image but download failed: ${imageItem.file_id}]`
+      }
+    }
+
     const parsed: ChannelIncomingMessageData = {
       chatId: userId,
       senderId: userId,
       senderName: userId,
-      content,
+      content: effectiveContent,
       messageId,
       timestamp,
+      images,
       msgType,
       chatType: 'p2p',
       chatName: userId

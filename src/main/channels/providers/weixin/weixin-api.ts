@@ -2,11 +2,21 @@ import { randomBytes } from 'crypto'
 
 export const DEFAULT_WEIXIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 
+export interface WeixinImageItem {
+  file_id?: string
+  file_name?: string
+  md5sum?: string
+  aes_key?: string
+  width?: number
+  height?: number
+  [key: string]: unknown
+}
+
 export interface WeixinMessageItem {
   type?: number
   text_item?: { text?: string }
   voice_item?: { text?: string }
-  image_item?: unknown
+  image_item?: WeixinImageItem
   file_item?: { file_name?: string }
   video_item?: unknown
 }
@@ -94,6 +104,42 @@ async function postJson<T>(params: {
   }
 }
 
+async function postBinary(params: {
+  baseUrl: string
+  path: string
+  body: unknown
+  token?: string
+  routeTag?: string
+  timeoutMs?: number
+  signal?: AbortSignal
+}): Promise<{ buffer: Buffer; mediaType: string }> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 40000)
+  const signal = params.signal
+    ? AbortSignal.any([params.signal, controller.signal])
+    : controller.signal
+
+  try {
+    const response = await fetch(`${normalizeBaseUrl(params.baseUrl)}/${params.path}`, {
+      method: 'POST',
+      headers: buildHeaders(params.token, params.routeTag),
+      body: JSON.stringify(params.body),
+      signal
+    })
+
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => '')
+      throw new Error(`HTTP ${response.status}: ${rawText || response.statusText}`)
+    }
+
+    const mediaType = response.headers.get('content-type') || 'application/octet-stream'
+    const buffer = Buffer.from(await response.arrayBuffer())
+    return { buffer, mediaType }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export class WeixinApi {
   constructor(
     private readonly baseUrl: string,
@@ -114,6 +160,31 @@ export class WeixinApi {
       routeTag: this.routeTag,
       timeoutMs,
       signal
+    })
+  }
+
+  async downloadMessageImage(params: {
+    messageId: number | string
+    fileId: string
+    aesKey?: string
+    md5sum?: string
+    fileName?: string
+    signal?: AbortSignal
+  }): Promise<{ buffer: Buffer; mediaType: string }> {
+    return postBinary({
+      baseUrl: this.baseUrl,
+      path: 'ilink/bot/downloadmessageimage',
+      body: {
+        message_id: params.messageId,
+        file_id: params.fileId,
+        aes_key: params.aesKey || '',
+        md5sum: params.md5sum || '',
+        file_name: params.fileName || ''
+      },
+      token: this.token,
+      routeTag: this.routeTag,
+      timeoutMs: 20000,
+      signal: params.signal
     })
   }
 
