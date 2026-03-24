@@ -79,31 +79,20 @@ function ChannelIcon({
 
 function ChannelConfigPanel({
   plugin,
-  projectId,
-  projectName
+  projectId
 }: {
   plugin: PluginInstance
   projectId?: string
-  projectName?: string
 }): React.JSX.Element {
-  return (
-    <ChannelConfigPanelContent
-      key={plugin.id}
-      plugin={plugin}
-      projectId={projectId}
-      projectName={projectName}
-    />
-  )
+  return <ChannelConfigPanelContent key={plugin.id} plugin={plugin} projectId={projectId} />
 }
 
 function ChannelConfigPanelContent({
   plugin,
-  projectId,
-  projectName
+  projectId
 }: {
   plugin: PluginInstance
   projectId?: string
-  projectName?: string
 }): React.JSX.Element {
   const { t } = useTranslation('settings')
   const updateChannel = useChannelStore((s) => s.updateChannel)
@@ -474,49 +463,6 @@ function ChannelConfigPanelContent({
           </section>
         ))}
       </div>
-
-      {projectId && (
-        <>
-          <section className="space-y-2 mb-4">
-            <label className="text-xs font-medium">
-              {t('channel.boundProject', 'Bound Project')}
-            </label>
-            <div className="rounded-md border p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs">{boundProject?.name ?? t('channel.unboundProject', '未绑定项目')}</p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {t(
-                      'channel.boundProjectDesc',
-                      '频道工作目录会自动跟随绑定项目的工作目录。'
-                    )}
-                  </p>
-                </div>
-                {isBoundToCurrentProject ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={() => void updateChannel(plugin.id, { projectId: null })}
-                  >
-                    {t('channel.unbindCurrentProject', '解绑')}
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={() => void updateChannel(plugin.id, { projectId })}
-                  >
-                    {t('channel.bindCurrentProject', {
-                      defaultValue: projectName ? `绑定到 ${projectName}` : '绑定到当前项目'
-                    })}
-                  </Button>
-                )}
-              </div>
-            </div>
-          </section>
-        </>
-      )}
 
       <Separator className="mb-4" />
 
@@ -1032,10 +978,9 @@ const PLUGIN_CATEGORIES: { label: string; types: string[] }[] = [
 
 interface ChannelPanelProps {
   projectId?: string
-  projectName?: string
 }
 
-export function ChannelPanel({ projectId, projectName }: ChannelPanelProps = {}): React.JSX.Element {
+export function ChannelPanel({ projectId }: ChannelPanelProps = {}): React.JSX.Element {
   const { t } = useTranslation('settings')
   const channels = useChannelStore((s) => s.channels)
   const selectedChannelId = useChannelStore((s) => s.selectedChannelId)
@@ -1103,19 +1048,7 @@ export function ChannelPanel({ projectId, projectName }: ChannelPanelProps = {})
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="mb-4 shrink-0">
-        <h2 className="text-lg font-semibold text-foreground">{t('channel.title', 'Channels')}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {projectId
-            ? t(
-                'channel.projectSubtitle',
-                '管理当前项目绑定的聊天频道，频道工作目录会自动跟随项目。'
-              )
-            : t('channel.subtitle', 'Configure and manage your messaging channels')}
-        </p>
-      </div>
-
-      <div className="grid min-h-0 flex-1 overflow-hidden rounded-3xl border border-border/60 bg-background/70 md:grid-cols-[280px_minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[280px_minmax(0,1fr)]">
         <div className="flex min-h-0 flex-col border-r border-border/60 bg-muted/10">
           <div className="border-b border-border/60 px-4 py-4">
             <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground/60">
@@ -1272,11 +1205,7 @@ export function ChannelPanel({ projectId, projectName }: ChannelPanelProps = {})
 
         <div className="min-h-0 min-w-0 bg-background/60">
           {selectedChannel ? (
-            <ChannelConfigPanel
-              plugin={selectedChannel}
-              projectId={projectId}
-              projectName={projectName}
-            />
+            <ChannelConfigPanel plugin={selectedChannel} projectId={projectId} />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               {t('channel.selectToConfig', 'Select a channel to configure')}

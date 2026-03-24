@@ -170,7 +170,7 @@ export function ProjectArchivePage(): React.JSX.Element {
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-3xl border border-border/60 bg-background/70 shadow-[0_24px_60px_-30px_rgba(0,0,0,0.55)] backdrop-blur-sm">
           {activeTab === 'channels' ? (
             <div className="min-h-0 flex-1 p-4">
-              <ChannelPanel projectId={activeProjectId ?? undefined} projectName={activeProject.name} />
+              <ChannelPanel projectId={activeProjectId ?? undefined} />
             </div>
           ) : loading ? (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
