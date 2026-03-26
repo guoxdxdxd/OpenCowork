@@ -81,7 +81,9 @@ export function ChatHomePage(): React.JSX.Element {
   const mainModelSelectionMode = useSettingsStore((s) => s.mainModelSelectionMode)
   const conversationGuideSeen = useSettingsStore((s) => s.conversationGuideSeen)
   const autoModelSelectionsBySession = useUIStore((s) => s.autoModelSelectionsBySession)
-  const autoSelection = activeSessionId ? (autoModelSelectionsBySession[activeSessionId] ?? null) : null
+  const autoSelection = activeSessionId
+    ? (autoModelSelectionsBySession[activeSessionId] ?? null)
+    : null
   const handleSend = (text: string, images?: ImageAttachment[]): void => {
     const chatStore = useChatStore.getState()
     const sessionId = chatStore.createSession(mode, activeProject?.id ?? undefined)
@@ -121,7 +123,8 @@ export function ChatHomePage(): React.JSX.Element {
     chat: t('messageList.homeTitleChat'),
     clarify: t('messageList.homeTitleClarify'),
     cowork: t('messageList.homeTitleCowork'),
-    code: t('messageList.homeTitleCode')
+    code: t('messageList.homeTitleCode'),
+    acp: t('messageList.homeTitleAcp')
   }[mode]
 
   let homeDescription = t('messageList.homeDescChatGeneral')
@@ -146,6 +149,8 @@ export function ChatHomePage(): React.JSX.Element {
       : homeHasVision
         ? t('messageList.homeDescCodeVision')
         : t('messageList.homeDescCodeGeneral')
+  } else if (mode === 'acp') {
+    homeDescription = t('messageList.homeDescAcp')
   } else {
     homeDescription = homeHasVision
       ? t('messageList.homeDescChatVision')

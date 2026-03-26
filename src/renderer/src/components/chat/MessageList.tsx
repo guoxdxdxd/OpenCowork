@@ -5,7 +5,15 @@ import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { MessageItem } from './MessageItem'
-import { MessageSquare, CircleHelp, Briefcase, Code2, ArrowDown, Loader2 } from 'lucide-react'
+import {
+  MessageSquare,
+  CircleHelp,
+  Briefcase,
+  Code2,
+  ShieldCheck,
+  ArrowDown,
+  Loader2
+} from 'lucide-react'
 
 import type { ContentBlock, ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
 import {
@@ -33,6 +41,11 @@ const modeHints = {
     icon: <Code2 className="size-12 text-muted-foreground/20" />,
     titleKey: 'messageList.startCoding',
     descKey: 'messageList.startCodingDesc'
+  },
+  acp: {
+    icon: <ShieldCheck className="size-12 text-muted-foreground/20" />,
+    titleKey: 'messageList.startAcp',
+    descKey: 'messageList.startAcpDesc'
   }
 }
 

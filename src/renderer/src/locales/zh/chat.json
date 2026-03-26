@@ -66,7 +66,11 @@
     "recommendationDefaultChat": "帮我基于当前上下文整理一个更清晰、可直接执行的问题。",
     "recommendationDefaultClarify": "请继续追问我，直到把目标、约束、边界和验收标准问清楚。",
     "recommendationDefaultCowork": "基于当前上下文，帮我拆出下一步最值得执行的协作任务。",
-    "recommendationDefaultCode": "基于当前上下文，帮我给出下一步最合适的代码修改目标和实现要求。"
+    "recommendationDefaultCode": "基于当前上下文，帮我给出下一步最合适的代码修改目标和实现要求。",
+    "startAcp": "开始 ACP 会话",
+    "startAcpDesc": "先澄清目标、背景、约束和验收标准，再做架构设计与任务分派，最后再进入实现。",
+    "homeTitleAcp": "ACP 模式",
+    "homeDescAcp": "ACP 模式下先把目标、背景、约束和验收标准问清楚，再进行架构设计与任务拆分，最后才进入编码。"
   },
   "guide": {
     "title": "对话页新人引导",

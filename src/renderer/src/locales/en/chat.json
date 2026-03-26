@@ -66,7 +66,11 @@
     "recommendationDefaultChat": "Help me turn the current context into a clearer question I can directly ask next.",
     "recommendationDefaultClarify": "Keep questioning me until the goal, constraints, boundaries, and acceptance criteria are clear.",
     "recommendationDefaultCowork": "Based on the current context, suggest the next collaborative task worth executing.",
-    "recommendationDefaultCode": "Based on the current context, suggest the next code change goal and implementation requirements."
+    "recommendationDefaultCode": "Based on the current context, suggest the next code change goal and implementation requirements.",
+    "startAcp": "Start an ACP session",
+    "startAcpDesc": "First clarify the goal, background, constraints, and acceptance criteria. Then design the architecture and delegate tasks before writing code.",
+    "homeTitleAcp": "ACP mode",
+    "homeDescAcp": "In ACP mode, begin by clarifying goals, background, constraints, and acceptance criteria. Then propose an architecture and task breakdown before implementation."
   },
   "guide": {
     "title": "Conversation Onboarding",
