@@ -158,6 +158,9 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD = 80
 const STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD = 150
 const LOAD_MORE_ROW_KEY = '__load_more__'
 const TAIL_STATIC_MESSAGE_COUNT = 4
+const INITIAL_SCROLL_SETTLE_FRAMES = 18
+const USER_SEND_SCROLL_SETTLE_FRAMES = 12
+const FOLLOW_BOTTOM_SETTLE_FRAMES = 3
 
 function isToolResultOnlyUserMessage(message: UnifiedMessage): boolean {
   return (
@@ -310,6 +313,7 @@ export function MessageList({
   const [isAtBottom, setIsAtBottom] = React.useState(true)
   const pendingInitialScrollSessionIdRef = React.useRef<string | null>(null)
   const shouldStickToBottomRef = React.useRef(true)
+  const latestRealUserCreatedAtRef = React.useRef(0)
   const preserveScrollOnPrependRef = React.useRef<{ offset: number; size: number } | null>(null)
   const scheduledScrollFrameRef = React.useRef<number | null>(null)
   const messageCount = messages.length
@@ -378,6 +382,16 @@ export function MessageList({
     return getMessageTailSignal(getMessageLookup(messages).get(streamingMessageId))
   }, [messages, streamingMessageId])
 
+  const latestRealUserCreatedAt = React.useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (isRealUserMessage(message)) {
+        return message.createdAt
+      }
+    }
+    return 0
+  }, [messages])
+
   const scrollToBottomImmediate = React.useCallback(
     (behavior: ScrollBehavior = 'auto') => {
       const ref = listRef.current
@@ -387,15 +401,6 @@ export function MessageList({
     },
     [virtualRowKeys.length]
   )
-
-  const scheduleScrollToBottom = React.useCallback(() => {
-    if (scheduledScrollFrameRef.current !== null) return
-    scheduledScrollFrameRef.current = window.requestAnimationFrame(() => {
-      scheduledScrollFrameRef.current = null
-      if (!shouldStickToBottomRef.current) return
-      scrollToBottomImmediate()
-    })
-  }, [scrollToBottomImmediate])
 
   const syncBottomState = React.useCallback(() => {
     const ref = listRef.current
@@ -409,6 +414,43 @@ export function MessageList({
     setIsAtBottom((prev) => (prev === nextAtBottom ? prev : nextAtBottom))
   }, [streamingMessageId])
 
+  const requestScrollToBottom = React.useCallback(
+    ({
+      behavior = 'auto',
+      force = false,
+      maxFrames = 1
+    }: {
+      behavior?: ScrollBehavior
+      force?: boolean
+      maxFrames?: number
+    } = {}) => {
+      if (scheduledScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scheduledScrollFrameRef.current)
+        scheduledScrollFrameRef.current = null
+      }
+
+      let framesLeft = Math.max(1, maxFrames)
+
+      const run = (): void => {
+        scheduledScrollFrameRef.current = null
+        if (!force && !shouldStickToBottomRef.current) return
+
+        scrollToBottomImmediate(behavior)
+        framesLeft -= 1
+
+        if (framesLeft > 0) {
+          scheduledScrollFrameRef.current = window.requestAnimationFrame(run)
+          return
+        }
+
+        syncBottomState()
+      }
+
+      scheduledScrollFrameRef.current = window.requestAnimationFrame(run)
+    },
+    [scrollToBottomImmediate, syncBottomState]
+  )
+
   React.useEffect(() => {
     return () => {
       if (scheduledScrollFrameRef.current !== null) {
@@ -421,6 +463,7 @@ export function MessageList({
     setIsAtBottom(true)
     pendingInitialScrollSessionIdRef.current = activeSessionId ?? null
     shouldStickToBottomRef.current = true
+    latestRealUserCreatedAtRef.current = 0
     preserveScrollOnPrependRef.current = null
   }, [activeSessionId])
 
@@ -428,18 +471,30 @@ export function MessageList({
     if (!activeSessionId) return
     if (pendingInitialScrollSessionIdRef.current !== activeSessionId) return
 
-    scrollToBottomImmediate()
+    requestScrollToBottom({ force: true, maxFrames: INITIAL_SCROLL_SETTLE_FRAMES })
     const timer = window.setTimeout(() => {
-      scrollToBottomImmediate()
-      syncBottomState()
-    }, 100)
+      requestScrollToBottom({ force: true, maxFrames: INITIAL_SCROLL_SETTLE_FRAMES })
+    }, 180)
 
     if (messageCount > 0 || streamingMessageId) {
       pendingInitialScrollSessionIdRef.current = null
     }
 
     return () => window.clearTimeout(timer)
-  }, [activeSessionId, messageCount, scrollToBottomImmediate, streamingMessageId, syncBottomState])
+  }, [activeSessionId, messageCount, requestScrollToBottom, streamingMessageId])
+
+  React.useLayoutEffect(() => {
+    if (!activeSessionId || latestRealUserCreatedAt === 0) return
+
+    const previousCreatedAt = latestRealUserCreatedAtRef.current
+    latestRealUserCreatedAtRef.current = latestRealUserCreatedAt
+
+    if (latestRealUserCreatedAt <= previousCreatedAt) return
+
+    shouldStickToBottomRef.current = true
+    setIsAtBottom(true)
+    requestScrollToBottom({ force: true, maxFrames: USER_SEND_SCROLL_SETTLE_FRAMES })
+  }, [activeSessionId, latestRealUserCreatedAt, requestScrollToBottom])
 
   React.useLayoutEffect(() => {
     const pending = preserveScrollOnPrependRef.current
@@ -465,22 +520,19 @@ export function MessageList({
 
   React.useEffect(() => {
     if (!shouldStickToBottomRef.current) return
-    scheduleScrollToBottom()
-  }, [messageCount, scheduleScrollToBottom, streamingMessageId, virtualRowKeys.length])
+    requestScrollToBottom({ maxFrames: FOLLOW_BOTTOM_SETTLE_FRAMES })
+  }, [messageCount, requestScrollToBottom, streamingMessageId, virtualRowKeys.length])
 
   React.useEffect(() => {
     if (!streamingMessageId || !shouldStickToBottomRef.current) return
-    const frame = window.requestAnimationFrame(() => {
-      scrollToBottomImmediate()
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [scrollToBottomImmediate, streamingMessageId, streamingMessageSignal])
+    requestScrollToBottom({ maxFrames: FOLLOW_BOTTOM_SETTLE_FRAMES })
+  }, [requestScrollToBottom, streamingMessageId, streamingMessageSignal])
 
   const scrollToBottom = React.useCallback(() => {
     shouldStickToBottomRef.current = true
     setIsAtBottom(true)
-    scrollToBottomImmediate('smooth')
-  }, [scrollToBottomImmediate])
+    requestScrollToBottom({ behavior: 'smooth', force: true })
+  }, [requestScrollToBottom])
 
   const applySuggestedPrompt = React.useCallback((prompt: string) => {
     const textarea = document.querySelector('textarea')
