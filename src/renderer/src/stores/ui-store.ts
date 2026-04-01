@@ -65,6 +65,7 @@ export type SettingsTab =
   | 'general'
   | 'memory'
   | 'analytics'
+  | 'migration'
   | 'provider'
   | 'modelManagement'
   | 'model'

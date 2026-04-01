@@ -45,10 +45,15 @@ function SubAgentCardInner({
   isLive = false
 }: SubAgentCardProps): React.JSX.Element {
   const { t } = useTranslation('chat')
+  void isLive
 
   const displayName = String(input.subagent_type ?? name)
-  const live = useAgentStore((s) =>
-    isLive ? (s.activeSubAgents[toolUseId] ?? s.completedSubAgents[toolUseId] ?? null) : null
+  const tracked = useAgentStore(
+    (s) =>
+      s.activeSubAgents[toolUseId] ??
+      s.completedSubAgents[toolUseId] ??
+      s.subAgentHistory.find((item) => item.toolUseId === toolUseId) ??
+      null
   )
 
   const outputStr = typeof output === 'string' ? output : undefined
@@ -59,8 +64,9 @@ function SubAgentCardInner({
   const histMeta = parsed.meta
   const histText = parsed.text || outputStr || ''
 
-  const isRunning = live?.isRunning ?? false
-  const isCompleted = !isRunning && (!!output || (live && !live.isRunning))
+  const usage = tracked?.usage ?? histMeta?.usage ?? null
+  const isRunning = tracked?.isRunning ?? false
+  const isCompleted = !isRunning && (!!output || !!tracked)
   const historicalError = outputStr
     ? (() => {
         const parsedOutput = decodeStructuredToolResult(outputStr)
@@ -79,17 +85,19 @@ function SubAgentCardInner({
         )
       })()
     : false
-  const isError = live?.success === false || !!live?.errorMessage || historicalError
+  const isError = tracked?.success === false || !!tracked?.errorMessage || historicalError
 
-  const [now, setNow] = React.useState(live?.startedAt ?? 0)
+  const [now, setNow] = React.useState(tracked?.startedAt ?? 0)
   React.useEffect(() => {
-    if (!live?.isRunning) return
+    if (!tracked?.isRunning) return
     setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
-  }, [live?.isRunning, live?.startedAt])
+  }, [tracked?.isRunning, tracked?.startedAt])
 
-  const elapsed = live ? (live.completedAt ?? now) - live.startedAt : (histMeta?.elapsed ?? null)
+  const elapsed = tracked
+    ? (tracked.completedAt ?? now) - tracked.startedAt
+    : (histMeta?.elapsed ?? null)
   const icon = getSubAgentIcon(displayName)
 
   const descriptionText = input.description ? String(input.description) : ''
@@ -102,7 +110,8 @@ function SubAgentCardInner({
     .filter(Boolean)
     .join(' · ')
 
-  const previewSource = live?.report || live?.streamingText || live?.errorMessage || histText || ''
+  const previewSource =
+    tracked?.report || tracked?.streamingText || tracked?.errorMessage || histText || ''
   const previewText = React.useMemo(() => {
     const trimmed = previewSource.trim()
     if (!trimmed) return ''
@@ -178,14 +187,14 @@ function SubAgentCardInner({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground/60">
-        {live || histMeta ? (
+        {tracked || histMeta ? (
           <>
             <span className="rounded-full border border-border/60 bg-background/70 px-2.5 py-1">
-              {t('subAgent.iter', { count: live?.iteration ?? histMeta?.iterations ?? 0 })}
+              {t('subAgent.iter', { count: tracked?.iteration ?? histMeta?.iterations ?? 0 })}
             </span>
             <span className="rounded-full border border-border/60 bg-background/70 px-2.5 py-1">
               {t('subAgent.calls', {
-                count: live?.toolCalls.length ?? histMeta?.toolCalls.length ?? 0
+                count: tracked?.toolCalls.length ?? histMeta?.toolCalls.length ?? 0
               })}
             </span>
           </>
@@ -196,9 +205,9 @@ function SubAgentCardInner({
             {formatElapsed(elapsed)}
           </span>
         ) : null}
-        {histMeta ? (
+        {usage ? (
           <span className="rounded-full border border-border/60 bg-background/70 px-2.5 py-1 tabular-nums">
-            {formatTokens(getBillableTotalTokens(histMeta.usage))} tok
+            {formatTokens(getBillableTotalTokens(usage))} tok
           </span>
         ) : null}
       </div>

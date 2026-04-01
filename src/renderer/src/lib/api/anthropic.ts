@@ -10,6 +10,10 @@ import type {
 import { ipcStreamRequest, maskHeaders } from '../ipc/api-stream'
 import { registerProvider } from './provider'
 
+function buildAnthropicCacheControl(): { type: 'ephemeral' } {
+  return { type: 'ephemeral' }
+}
+
 function resolveAnthropicEffort(
   config: ProviderConfig
 ): 'low' | 'medium' | 'high' | 'max' | undefined {
@@ -47,27 +51,29 @@ class AnthropicProvider implements APIProvider {
     const requestStartedAt = Date.now()
     let firstTokenAt: number | null = null
     let outputTokens = 0
-    const automaticPromptCacheEnabled = config.enablePromptCache !== false
+    const promptCacheEnabled = config.enablePromptCache !== false
+    const systemPromptCacheEnabled = promptCacheEnabled || config.enableSystemPromptCache === true
     const body: Record<string, unknown> = {
       model: config.model,
       max_tokens: config.maxTokens ?? 32000,
-      ...(automaticPromptCacheEnabled ? { cache_control: { type: 'ephemeral' } } : {}),
+      ...(promptCacheEnabled ? { cache_control: buildAnthropicCacheControl() } : {}),
       ...(config.systemPrompt
         ? {
             system: [
               {
                 type: 'text',
                 text: config.systemPrompt,
-                ...(!automaticPromptCacheEnabled && config.enableSystemPromptCache
-                  ? { cache_control: { type: 'ephemeral' } }
-                  : {})
+                ...(systemPromptCacheEnabled ? { cache_control: buildAnthropicCacheControl() } : {})
               }
             ]
           }
         : {}),
-      messages: this.formatMessages(this.normalizeMessagesForAnthropic(messages)),
+      messages: this.formatMessages(
+        this.normalizeMessagesForAnthropic(messages),
+        promptCacheEnabled
+      ),
       ...(tools.length > 0
-        ? { tools: this.formatTools(tools), tool_choice: { type: 'auto' } }
+        ? { tools: this.formatTools(tools, promptCacheEnabled), tool_choice: { type: 'auto' } }
         : {}),
       stream: true
     }
@@ -103,14 +109,16 @@ class AnthropicProvider implements APIProvider {
     if (config.userAgent) headers['User-Agent'] = config.userAgent
     const bodyStr = JSON.stringify(body)
 
-    // Yield debug info for dev mode inspection
     yield {
       type: 'request_debug',
       debugInfo: {
         url,
         method: 'POST',
         headers: maskHeaders(headers),
-        body: bodyStr,
+        body:
+          bodyStr.length > 4_000
+            ? `${bodyStr.slice(0, 4_000)}\n... [truncated, ${bodyStr.length} chars total]`
+            : bodyStr,
         timestamp: Date.now()
       }
     }
@@ -306,8 +314,8 @@ class AnthropicProvider implements APIProvider {
     }
   }
 
-  formatMessages(messages: UnifiedMessage[]): unknown[] {
-    return messages
+  formatMessages(messages: UnifiedMessage[], promptCacheEnabled = false): unknown[] {
+    const formattedMessages = messages
       .filter((m) => m.role !== 'system')
       .map((m) => {
         if (typeof m.content === 'string') {
@@ -367,6 +375,14 @@ class AnthropicProvider implements APIProvider {
           })
         }
       })
+
+    if (promptCacheEnabled) {
+      this.applyMessageCacheBreakpoint(
+        formattedMessages as Array<{ content: string | Array<Record<string, unknown>> }>
+      )
+    }
+
+    return formattedMessages
   }
 
   private normalizeMessagesForAnthropic(messages: UnifiedMessage[]): UnifiedMessage[] {
@@ -430,11 +446,48 @@ class AnthropicProvider implements APIProvider {
     return normalized
   }
 
-  formatTools(tools: ToolDefinition[]): unknown[] {
-    return tools.map((t) => ({
+  private applyMessageCacheBreakpoint(
+    messages: Array<{ content: string | Array<Record<string, unknown>> }>
+  ): void {
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const message = messages[messageIndex]
+      if (typeof message.content === 'string') {
+        if (!message.content.trim()) continue
+        message.content = [
+          {
+            type: 'text',
+            text: message.content,
+            cache_control: buildAnthropicCacheControl()
+          }
+        ]
+        return
+      }
+
+      for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
+        const block = message.content[blockIndex]
+        if (!this.isExplicitPromptCacheableBlock(block)) continue
+        message.content[blockIndex] = {
+          ...block,
+          cache_control: buildAnthropicCacheControl()
+        }
+        return
+      }
+    }
+  }
+
+  private isExplicitPromptCacheableBlock(block: Record<string, unknown>): boolean {
+    const blockType = block.type
+    return blockType === 'text' || blockType === 'image' || blockType === 'tool_result'
+  }
+
+  formatTools(tools: ToolDefinition[], promptCacheEnabled = false): unknown[] {
+    return tools.map((t, index) => ({
       name: t.name,
       description: t.description,
-      input_schema: this.normalizeToolSchema(t.inputSchema)
+      input_schema: this.normalizeToolSchema(t.inputSchema),
+      ...(promptCacheEnabled && index === tools.length - 1
+        ? { cache_control: buildAnthropicCacheControl() }
+        : {})
     }))
   }
 

@@ -16,7 +16,9 @@ import {
   isStructuredToolErrorText
 } from '@renderer/lib/tools/tool-result-format'
 import {
+  buildModePrompt,
   buildSystemPrompt,
+  getLatestInjectedMode,
   resolvePromptEnvironmentContext
 } from '@renderer/lib/agent/system-prompt'
 import { subAgentEvents } from '@renderer/lib/agent/sub-agents/events'
@@ -1273,7 +1275,7 @@ export function useChatActions(): {
       if (source !== 'continue') {
         longRunningVerificationPasses.delete(sessionId)
       }
-      await chatStore.loadSessionMessages(sessionId)
+      await chatStore.loadRecentSessionMessages(sessionId)
 
       const existingAssistantMessage =
         source === 'continue' && reuseAssistantMessageId
@@ -1445,13 +1447,11 @@ export function useChatActions(): {
         chatStore.sanitizeToolErrorsForResend(sessionId)
       }
 
-      // Strip old system-reminder blocks from previous messages to prevent accumulation
-      chatStore.stripOldSystemReminders(sessionId)
-
       baseProviderConfig.sessionId = sessionId
 
       const sessionSnapshot = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       const sessionMode = sessionSnapshot?.mode ?? uiStore.mode
+      const latestInjectedMode = getLatestInjectedMode(sessionSnapshot?.messages ?? [])
 
       // Add user message (multi-modal when images attached)
       const isQueuedInsertion = source === 'queued'
@@ -1463,6 +1463,26 @@ export function useChatActions(): {
         const textForUserBlock =
           resolvedCommand.userText ||
           (isQueuedInsertion && hasImages && !resolvedCommand.command ? QUEUED_IMAGE_ONLY_TEXT : '')
+
+        if (sessionMode !== 'chat' && latestInjectedMode !== sessionMode) {
+          const sshConnection = sessionSnapshot?.sshConnectionId
+            ? useSshStore
+                .getState()
+                .connections.find((connection) => connection.id === sessionSnapshot.sshConnectionId)
+            : undefined
+          const environmentContext = resolvePromptEnvironmentContext({
+            sshConnectionId: sessionSnapshot?.sshConnectionId,
+            workingFolder: sessionSnapshot?.workingFolder,
+            sshConnection
+          })
+          textBlocks.push({
+            type: 'text',
+            text: buildModePrompt({
+              mode: sessionMode as 'clarify' | 'cowork' | 'code' | 'acp',
+              environmentContext
+            })
+          })
+        }
 
         if (isQueuedInsertion) {
           textBlocks.push({ type: 'text', text: QUEUED_MESSAGE_SYSTEM_REMIND })
@@ -1754,7 +1774,7 @@ export function useChatActions(): {
         const cachedPromptSnapshot = session?.promptSnapshot
         const canReusePromptSnapshot =
           !!cachedPromptSnapshot &&
-          cachedPromptSnapshot.mode === mode &&
+          cachedPromptSnapshot.mode !== 'chat' &&
           cachedPromptSnapshot.planMode === isPlanMode
 
         let effectiveToolDefs = finalEffectiveToolDefs
@@ -2555,7 +2575,7 @@ export function useChatActions(): {
     if (!sessionId) return
     if (hasActiveSessionRun(sessionId)) return
 
-    await chatStore.loadSessionMessages(sessionId)
+    await chatStore.loadRecentSessionMessages(sessionId)
     const messages = chatStore.getSessionMessages(sessionId)
     const tailToolExecution = getTailToolExecutionState(messages)
     if (!tailToolExecution) return
@@ -2735,7 +2755,7 @@ export function useChatActions(): {
     if (!sessionId) return
 
     clearPendingSessionMessages(sessionId)
-    await chatStore.loadSessionMessages(sessionId)
+    await chatStore.loadRecentSessionMessages(sessionId)
     const messages = chatStore.getSessionMessages(sessionId)
     const lastEditable = findLastEditableUserMessage(messages)
     if (!lastEditable) return
@@ -2763,7 +2783,7 @@ export function useChatActions(): {
       if (!sessionId) return
 
       clearPendingSessionMessages(sessionId)
-      await chatStore.loadSessionMessages(sessionId)
+      await chatStore.loadRecentSessionMessages(sessionId)
       const messages = chatStore.getSessionMessages(sessionId)
       const target = findEditableUserMessageById(messages, messageId)
       if (!target) return
@@ -2795,7 +2815,7 @@ export function useChatActions(): {
       if (!sessionId) return
 
       clearPendingSessionMessages(sessionId)
-      await chatStore.loadSessionMessages(sessionId)
+      await chatStore.loadRecentSessionMessages(sessionId)
       const messages = chatStore.getSessionMessages(sessionId)
       const nextMessages = buildDeletedMessages(messages, messageId)
       if (!nextMessages || nextMessages.length === messages.length) return

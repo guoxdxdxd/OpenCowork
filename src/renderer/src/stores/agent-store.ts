@@ -3,7 +3,7 @@ import { immer } from 'zustand/middleware/immer'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { ToolCallState } from '../lib/agent/types'
 import type { SubAgentEvent } from '../lib/agent/sub-agents/types'
-import type { ToolResultContent, UnifiedMessage, ContentBlock } from '../lib/api/types'
+import type { ToolResultContent, UnifiedMessage, ContentBlock, TokenUsage } from '../lib/api/types'
 import { ipcStorage } from '../lib/ipc/ipc-storage'
 import { ipcClient } from '../lib/ipc/ipc-client'
 import { IPC } from '../lib/ipc/channels'
@@ -12,23 +12,31 @@ import { IPC } from '../lib/ipc/channels'
 // callbacks and don't need to trigger React re-renders.
 const approvalResolvers = new Map<string, (approved: boolean) => void>()
 
-const MAX_TRACKED_TOOL_CALLS = 300
-const MAX_TRACKED_SUBAGENT_TOOL_CALLS = 120
-const MAX_COMPLETED_SUBAGENTS = 80
-const MAX_SUBAGENT_HISTORY = 200
-const MAX_STREAMING_TEXT_CHARS = 12_000
-const MAX_TOOL_INPUT_PREVIEW_CHARS = 8_000
-const MAX_TOOL_OUTPUT_TEXT_CHARS = 12_000
+const MAX_TRACKED_TOOL_CALLS = 200
+const MAX_TRACKED_SUBAGENT_TOOL_CALLS = 80
+const MAX_COMPLETED_SUBAGENTS = 30
+const MAX_SUBAGENT_HISTORY = 50
+const MAX_STREAMING_TEXT_CHARS = 8_000
+const MAX_TOOL_INPUT_PREVIEW_CHARS = 6_000
+const MAX_TOOL_OUTPUT_TEXT_CHARS = 8_000
 const MAX_TOOL_ERROR_CHARS = 2_000
 const MAX_IMAGE_BASE64_CHARS = 4_096
-const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 20_000
-const MAX_BACKGROUND_PROCESS_ENTRIES = 120
-const MAX_RUN_CHANGESETS = 120
+const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 12_000
+const MAX_BACKGROUND_PROCESS_ENTRIES = 60
+const MAX_RUN_CHANGESETS = 40
+const MAX_FILE_SNAPSHOT_TEXT_CHARS = 30_000
 const BACKGROUND_PROCESS_OUTPUT_FLUSH_MS = 80
+const MAX_SUBAGENT_TRANSCRIPT_MESSAGES = 120
 
 function truncateText(value: string, max: number): string {
   if (value.length <= max) return value
   return `${value.slice(0, max)}\n... [truncated, ${value.length} chars total]`
+}
+
+function trimSubAgentTranscript(sa: { transcript: UnifiedMessage[] }): void {
+  if (sa.transcript.length <= MAX_SUBAGENT_TRANSCRIPT_MESSAGES) return
+  const excess = sa.transcript.length - MAX_SUBAGENT_TRANSCRIPT_MESSAGES
+  sa.transcript.splice(0, excess)
 }
 
 function normalizeToolInput(input: Record<string, unknown>): Record<string, unknown> {
@@ -159,6 +167,7 @@ interface SubAgentState {
   /** Final result text resolved from the sub-agent's actual output. */
   report: string
   reportStatus: SubAgentReportStatus
+  usage?: TokenUsage
   startedAt: number
   completedAt: number | null
 }
@@ -236,14 +245,38 @@ function trimSubAgentHistory(history: SubAgentState[]): void {
   history.splice(0, history.length - MAX_SUBAGENT_HISTORY)
 }
 
+const MAX_HISTORY_TRANSCRIPT_MESSAGES = 20
+const MAX_HISTORY_TOOL_CALLS = 30
+const MAX_HISTORY_REPORT_CHARS = 4_000
+
+function compactSubAgentForHistory(sa: SubAgentState): SubAgentState {
+  return {
+    ...sa,
+    streamingText: '',
+    report:
+      sa.report.length > MAX_HISTORY_REPORT_CHARS
+        ? `${sa.report.slice(0, MAX_HISTORY_REPORT_CHARS)}\n[truncated]`
+        : sa.report,
+    toolCalls:
+      sa.toolCalls.length > MAX_HISTORY_TOOL_CALLS
+        ? sa.toolCalls.slice(-MAX_HISTORY_TOOL_CALLS)
+        : sa.toolCalls,
+    transcript:
+      sa.transcript.length > MAX_HISTORY_TRANSCRIPT_MESSAGES
+        ? sa.transcript.slice(-MAX_HISTORY_TRANSCRIPT_MESSAGES)
+        : sa.transcript
+  }
+}
+
 function cloneSubAgentStateSnapshot(sa: SubAgentState): SubAgentState {
+  const compacted = compactSubAgentForHistory(sa)
   try {
-    return JSON.parse(JSON.stringify(sa)) as SubAgentState
+    return JSON.parse(JSON.stringify(compacted)) as SubAgentState
   } catch {
     return {
-      ...sa,
-      toolCalls: sa.toolCalls.map((toolCall) => ({ ...toolCall })),
-      transcript: sa.transcript.map((message) => ({
+      ...compacted,
+      toolCalls: compacted.toolCalls.map((toolCall) => ({ ...toolCall })),
+      transcript: compacted.transcript.map((message) => ({
         ...message,
         content: Array.isArray(message.content)
           ? JSON.parse(JSON.stringify(message.content))
@@ -542,6 +575,25 @@ export interface AgentRunChangeSet {
   updatedAt: number
 }
 
+function truncateFileSnapshot(snapshot: AgentFileSnapshot): AgentFileSnapshot {
+  if (!snapshot.text || snapshot.text.length <= MAX_FILE_SNAPSHOT_TEXT_CHARS) return snapshot
+  return {
+    ...snapshot,
+    text: `${snapshot.text.slice(0, MAX_FILE_SNAPSHOT_TEXT_CHARS)}\n... [truncated, ${snapshot.text.length} chars total]`
+  }
+}
+
+function truncateChangeSet(changeset: AgentRunChangeSet): AgentRunChangeSet {
+  return {
+    ...changeset,
+    changes: changeset.changes.map((change) => ({
+      ...change,
+      before: truncateFileSnapshot(change.before),
+      after: truncateFileSnapshot(change.after)
+    }))
+  }
+}
+
 function isAgentChangeError(value: unknown): value is { error: string } {
   if (!value || typeof value !== 'object') return false
   return typeof (value as { error?: unknown }).error === 'string'
@@ -681,17 +733,24 @@ export const useAgentStore = create<AgentStore>()(
 
       switchToolCallSession: (prevSessionId, nextSessionId) => {
         set((state) => {
-          // Save current tool calls to cache for the previous session
           if (prevSessionId) {
             state.sessionToolCallsCache[prevSessionId] = {
               pending: [...state.pendingToolCalls],
               executed: [...state.executedToolCalls]
             }
           }
-          // Restore tool calls from cache for the next session (or clear)
           const cached = nextSessionId ? state.sessionToolCallsCache[nextSessionId] : undefined
           state.pendingToolCalls = cached?.pending ?? []
           state.executedToolCalls = cached?.executed ?? []
+
+          // Evict oldest cached sessions to cap memory (keep at most 10)
+          const cacheKeys = Object.keys(state.sessionToolCallsCache)
+          if (cacheKeys.length > 10) {
+            const toRemove = cacheKeys.slice(0, cacheKeys.length - 10)
+            for (const key of toRemove) {
+              delete state.sessionToolCallsCache[key]
+            }
+          }
         })
       },
 
@@ -976,6 +1035,7 @@ export const useAgentStore = create<AgentStore>()(
           state.runningSubAgentSessionIdsSig = ''
           state.approvedToolNames = []
           state.foregroundShellExecByToolUseId = {}
+          state.sessionToolCallsCache = {}
         })
       },
 
@@ -986,7 +1046,7 @@ export const useAgentStore = create<AgentStore>()(
           if (isAgentChangeError(result)) return
           set((state) => {
             if (result && typeof result === 'object' && 'runId' in result) {
-              state.runChangesByRunId[runId] = result as AgentRunChangeSet
+              state.runChangesByRunId[runId] = truncateChangeSet(result as AgentRunChangeSet)
               trimRunChangesMap(state.runChangesByRunId)
             } else {
               delete state.runChangesByRunId[runId]
@@ -1008,7 +1068,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1029,7 +1089,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1050,7 +1110,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1074,7 +1134,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1112,6 +1172,7 @@ export const useAgentStore = create<AgentStore>()(
                 currentAssistantMessageId: null,
                 report: '',
                 reportStatus: 'pending',
+                usage: undefined,
                 startedAt: Date.now(),
                 completedAt: null
               }
@@ -1192,6 +1253,9 @@ export const useAgentStore = create<AgentStore>()(
               const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 finalizeAssistantMessage(sa, event.usage, event.providerResponseId, false)
+                if (event.usage) {
+                  sa.usage = mergeMessageUsage(sa.usage, event.usage)
+                }
               }
               break
             }
@@ -1199,6 +1263,7 @@ export const useAgentStore = create<AgentStore>()(
               const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 sa.transcript.push(event.message)
+                trimSubAgentTranscript(sa)
                 upsertSubAgentHistory(state.subAgentHistory, sa)
               }
               break
@@ -1208,6 +1273,7 @@ export const useAgentStore = create<AgentStore>()(
               if (sa) {
                 finalizeAssistantMessage(sa)
                 sa.transcript.push(event.message)
+                trimSubAgentTranscript(sa)
                 upsertSubAgentHistory(state.subAgentHistory, sa)
               }
               break
@@ -1259,6 +1325,7 @@ export const useAgentStore = create<AgentStore>()(
                 if (!sa.report.trim() && event.result.output.trim()) {
                   sa.report = event.result.output
                 }
+                sa.usage = event.result.usage
                 sa.reportStatus = sa.report.trim() ? 'submitted' : 'missing'
                 state.completedSubAgents[id] = sa
                 upsertSubAgentHistory(state.subAgentHistory, sa)
@@ -1369,7 +1436,14 @@ export const useAgentStore = create<AgentStore>()(
       partialize: (state) => ({
         approvedToolNames: state.approvedToolNames,
         subAgentHistory: state.subAgentHistory
-      })
+      }),
+      onRehydrateStorage: () => (state) => {
+        if (!state) return
+        // Trim oversized persisted history from previous versions
+        if (state.subAgentHistory.length > MAX_SUBAGENT_HISTORY) {
+          state.subAgentHistory.splice(0, state.subAgentHistory.length - MAX_SUBAGENT_HISTORY)
+        }
+      }
     }
   )
 )

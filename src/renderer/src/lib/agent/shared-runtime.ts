@@ -6,6 +6,8 @@ import type { ToolContext } from '../tools/tool-types'
 
 export type SharedAgentRuntimeReason = LoopEndReason | 'shutdown'
 
+const MAX_AGGREGATED_TEXT_CHARS = 500_000
+
 export interface SharedAgentRuntimeState {
   iteration: number
   toolCallCount: number
@@ -119,7 +121,9 @@ export async function runSharedAgentRuntime(
           break
 
         case 'text_delta':
-          state.aggregatedText += event.text
+          if (state.aggregatedText.length < MAX_AGGREGATED_TEXT_CHARS) {
+            state.aggregatedText += event.text
+          }
           state.currentAssistantText += event.text
           break
 

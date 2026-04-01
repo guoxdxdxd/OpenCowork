@@ -435,7 +435,10 @@ class GeminiNativeProvider implements APIProvider {
           url,
           method: 'POST',
           headers: maskHeaders(headers),
-          body: bodyStr,
+          body:
+            bodyStr.length > 4_000
+              ? `${bodyStr.slice(0, 4_000)}\n... [truncated, ${bodyStr.length} chars total]`
+              : bodyStr,
           timestamp: Date.now()
         }
       }

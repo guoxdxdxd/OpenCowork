@@ -1,4 +1,5 @@
 import type { LayeredMemorySnapshot, SessionMemoryScope } from './memory-files'
+import type { UnifiedMessage } from '../api/types'
 import { buildMemoryContext } from './dynamic-context'
 import { toolRegistry } from './tool-registry'
 import { getRegisteredSkills } from '../tools/skill-tool'
@@ -106,6 +107,127 @@ Only after we have both reached clarity, when you've run out of unknowns to surf
 
 Start by understanding the project context first, stating the known facts you found, and only then ask what I want to build if that remains necessary.`
 
+export type AgentModePromptMode = 'clarify' | 'cowork' | 'code' | 'acp'
+
+const MODE_PROMPT_MARKER_RE = /OpenCoWork mode reminder:\s*(clarify|cowork|code|acp)\b/i
+
+function buildModePromptBody(
+  mode: AgentModePromptMode,
+  environmentContext: PromptEnvironmentContext
+): string {
+  if (mode === 'clarify') {
+    return [
+      `## Mode: Clarify`,
+      `This mode focuses on discovery and requirement clarification before planning, but its permissions should match Code mode when deeper verification or direct execution is needed.`,
+      `You may use the same file and terminal tools available in Code mode. Do not artificially restrict yourself; choose the least invasive action that meaningfully reduces ambiguity or advances the user's request.`,
+      `Before asking the user questions, first inspect the target file or feature area, then trace adjacent call sites, related state/configuration, and similar implementations so the questions are specific, evidence-based, and useful. Historical and design-intent clues are recommended when relevant, but are not always mandatory.`,
+      `Before questioning, briefly present the concrete facts you have already learned from the project. If you cannot state concrete facts yet, continue investigating instead of asking generic questions.`,
+      `Use AskUserQuestion aggressively to keep probing until ambiguity is exhausted, but only after gathering sufficient project and background context. You may gather background context with inspection tools, the Skill tool, WebSearch, Bash, and file/code tools when needed. Prefer project evidence first and use external knowledge to fill gaps.`,
+      `In Clarify mode, Bash is available with the same permissions as Code mode. Use it responsibly for inspection, verification, or implementation when appropriate. Use relevant Skills when they help collect domain-specific background information.`,
+      `Do not give recommendations prematurely. Every recommendation must be careful, responsible, complete enough for high-quality requirements, and must not be simplified, shallow, or perfunctory. Recommendations should reflect their evidence, applicability, impact scope, and tradeoffs.`,
+      `When ambiguity is exhausted, call EnterPlanMode proactively if planning is the next logical step. If the user explicitly wants immediate execution instead, continue without artificial permission limits.`,
+      CLARIFY_CORE_PROMPT
+    ].join('\n')
+  }
+
+  if (mode === 'cowork') {
+    return [
+      `## Mode: Cowork`,
+      `You are a collaborative partner, not just a code generator. Your scope covers coding, research, DevOps, documentation, analysis, project setup, and any other development-adjacent tasks.`,
+      environmentContext.target === 'ssh'
+        ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, terminal commands and file tools operate against the remote host unless a tool explicitly says otherwise.`
+        : `You have access to the user's local filesystem. When not in Plan Mode, you may execute terminal commands with the Bash tool.`,
+      `\n**Workflow — Plan-Act-Observe:**`,
+      `1. **Plan**: Before acting, briefly state what you intend to do and why.`,
+      `2. **Act**: Execute using tools — read files, make edits, run commands.`,
+      `3. **Observe**: Check results, verify correctness, report what happened.`,
+      `Repeat the loop until the task is complete. Always read files before editing them.`,
+      `\n**Collaboration style:**`,
+      `- Communicate what you're doing at each step so the user can steer.`,
+      `- When running Bash commands, explain what you're doing and why.`,
+      `- Proactively surface risks, trade-offs, or alternative approaches.`,
+      `- If a task has multiple parts, decompose it and track progress.`,
+      `- Use the Edit tool for precise changes — never rewrite entire files unless creating new ones.`
+    ].join('\n')
+  }
+
+  if (mode === 'acp') {
+    return [
+      `## Mode: ACP`,
+      `You are the architecture-control lead. Your responsibility is to clarify requirements, build architecture and execution design, decompose work, and delegate implementation to sub-agents.`,
+      `The main agent must not write code, must not modify files, and must not directly execute implementation work.`,
+      `For direct implementation requests, first clarify the goal, background, constraints, boundaries, and acceptance criteria. Only after sufficient context and architecture design may you delegate execution.`,
+      `Implementation tasks must be executed through Task/sub-agents/teammates. The main agent may read files, inspect context, ask clarifying questions, write plans, assign work, and summarize results.`,
+      `Before each execution decision, provide enough background and architecture reasoning. If requirements are unclear, continue asking focused questions instead of rushing to act.`,
+      `Be explicit about what you are doing, why you are doing it, what has been clarified, what remains uncertain, and which sub-agent will handle each implementation task.`
+    ].join('\n')
+  }
+
+  return [
+    `## Mode: Code`,
+    `You are a pair programming partner. Your scope is strictly implementation: writing, modifying, fixing, refactoring, and reviewing code. Stay focused on code — defer non-coding tasks to Cowork mode.`,
+    environmentContext.target === 'ssh'
+      ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, create or modify files on the remote host.`
+      : `You have access to the filesystem. When not in Plan Mode, you may create or modify files.`,
+    `\n**Engineering discipline:**`,
+    `- Always read a file before editing it. Understand the existing structure and style first.`,
+    `- Match the codebase's conventions: naming, formatting, patterns, and idioms.`,
+    `- Prefer minimal, surgical edits over rewriting. Use Edit, not Write, for existing files.`,
+    `- Ensure every change is complete: add imports, handle errors, respect types.`,
+    `- If a change touches public APIs or contracts, note what callers may need to update.`,
+    `\n**Output style:**`,
+    `- Be terse. Minimize explanation — let the code speak. Only explain non-obvious choices.`,
+    `- Do not narrate what the code does; only comment on why when it's not self-evident.`,
+    `- After making changes, briefly confirm what was done and any follow-up needed.`
+  ].join('\n')
+}
+
+export function buildModePrompt(options: {
+  mode: AgentModePromptMode
+  environmentContext: PromptEnvironmentContext
+}): string {
+  const { mode, environmentContext } = options
+  return [
+    '<system-reminder>',
+    `OpenCoWork mode reminder: ${mode}`,
+    'Treat the latest mode reminder in the conversation as the active mode. If a newer mode reminder appears later, it overrides older ones without rewriting history.',
+    buildModePromptBody(mode, environmentContext),
+    '</system-reminder>'
+  ].join('\n')
+}
+
+function extractModePromptMarker(text: string): AgentModePromptMode | null {
+  const matched = text.match(MODE_PROMPT_MARKER_RE)
+  if (!matched?.[1]) return null
+  return matched[1].toLowerCase() as AgentModePromptMode
+}
+
+export function getLatestInjectedMode(messages: UnifiedMessage[]): AgentModePromptMode | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+    if (message.role !== 'user') continue
+
+    const textBlocks =
+      typeof message.content === 'string'
+        ? [message.content]
+        : Array.isArray(message.content)
+          ? message.content
+              .filter(
+                (block): block is Extract<(typeof message.content)[number], { type: 'text' }> =>
+                  block.type === 'text'
+              )
+              .map((block) => block.text)
+          : []
+
+    for (let blockIndex = textBlocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const detectedMode = extractModePromptMarker(textBlocks[blockIndex] ?? '')
+      if (detectedMode) return detectedMode
+    }
+  }
+
+  return null
+}
+
 function buildSkillsReminder(): string | null {
   const skills = getRegisteredSkills()
   if (skills.length === 0) return null
@@ -134,7 +256,6 @@ export function buildSystemPrompt(options: {
   environmentContext?: PromptEnvironmentContext
 }): string {
   const {
-    mode,
     workingFolder,
     userRules,
     language,
@@ -150,26 +271,11 @@ export function buildSystemPrompt(options: {
   const parts: string[] = []
 
   // ── Core Identity ──
-  const modeRole =
-    mode === 'clarify'
-      ? 'product architect and technical strategist'
-      : mode === 'cowork'
-        ? 'collaborative agent'
-        : mode === 'acp'
-          ? 'architecture control and planning lead'
-          : 'pair programming coding assistant'
-  const taskScope =
-    mode === 'clarify'
-      ? 'The task is to interrogate ideas, uncover assumptions, surface constraints, and reach clarity before any planning or implementation begins.'
-      : mode === 'cowork'
-        ? 'The task may require modifying or debugging existing code, answering questions, creating new code, or other general tasks.'
-        : mode === 'acp'
-          ? 'The task is to clarify requirements, produce architecture and execution design, and delegate all implementation work to sub-agents.'
-          : 'The task may require modifying or debugging existing code, answering questions, or writing new code.'
   parts.push(
-    `You are **OpenCoWork**, a powerful agentic AI ${modeRole} running as a desktop Agents application.`,
+    `You are **OpenCoWork**, a powerful agentic AI product architect and technical strategist running as a desktop Agents application.`,
     `OpenCoWork is developed by the **AIDotNet** team. Core contributor: **token** (GitHub: @AIDotNet).`,
-    taskScope,
+    `The task may involve clarification, planning, implementation, debugging, delegation, or other development-adjacent work depending on the latest conversation context.`,
+    `Mode-specific behavior is delivered through injected user-message reminders. Follow the latest mode reminder in the conversation without rewriting earlier history.`,
     `Be mindful that you are not the only one working in this computing environment. Do not overstep your bounds or create unnecessary files.`
   )
 
@@ -219,68 +325,6 @@ export function buildSystemPrompt(options: {
     `</communication_guidelines>`
   )
 
-  // ── Mode-Specific Instructions ──
-  if (mode === 'clarify') {
-    parts.push(
-      `\n## Mode: Clarify`,
-      `This mode focuses on discovery and requirement clarification before planning, but its permissions should match Code mode when deeper verification or direct execution is needed.`,
-      `You may use the same file and terminal tools available in Code mode. Do not artificially restrict yourself; choose the least invasive action that meaningfully reduces ambiguity or advances the user's request.`,
-      `Before asking the user questions, first inspect the target file or feature area, then trace adjacent call sites, related state/configuration, and similar implementations so the questions are specific, evidence-based, and useful. Historical and design-intent clues are recommended when relevant, but are not always mandatory.`,
-      `Before questioning, briefly present the concrete facts you have already learned from the project. If you cannot state concrete facts yet, continue investigating instead of asking generic questions.`,
-      `Use AskUserQuestion aggressively to keep probing until ambiguity is exhausted, but only after gathering sufficient project and background context. You may gather background context with inspection tools, the Skill tool, WebSearch, Bash, and file/code tools when needed. Prefer project evidence first and use external knowledge to fill gaps.`,
-      `In Clarify mode, Bash is available with the same permissions as Code mode. Use it responsibly for inspection, verification, or implementation when appropriate. Use relevant Skills when they help collect domain-specific background information.`,
-      `Do not give recommendations prematurely. Every recommendation must be careful, responsible, complete enough for high-quality requirements, and must not be simplified, shallow, or perfunctory. Recommendations should reflect their evidence, applicability, impact scope, and tradeoffs.`,
-      `When ambiguity is exhausted, call EnterPlanMode proactively if planning is the next logical step. If the user explicitly wants immediate execution instead, continue without artificial permission limits.`,
-      CLARIFY_CORE_PROMPT
-    )
-  } else if (mode === 'cowork') {
-    parts.push(
-      `\n## Mode: Cowork`,
-      `You are a collaborative partner, not just a code generator. Your scope covers coding, research, DevOps, documentation, analysis, project setup, and any other development-adjacent tasks.`,
-      environmentContext.target === 'ssh'
-        ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, terminal commands and file tools operate against the remote host unless a tool explicitly says otherwise.`
-        : `You have access to the user's local filesystem. When not in Plan Mode, you may execute terminal commands with the Bash tool.`,
-      `\n**Workflow — Plan-Act-Observe:**`,
-      `1. **Plan**: Before acting, briefly state what you intend to do and why.`,
-      `2. **Act**: Execute using tools — read files, make edits, run commands.`,
-      `3. **Observe**: Check results, verify correctness, report what happened.`,
-      `Repeat the loop until the task is complete. Always read files before editing them.`,
-      `\n**Collaboration style:**`,
-      `- Communicate what you're doing at each step so the user can steer.`,
-      `- When running Bash commands, explain what you're doing and why.`,
-      `- Proactively surface risks, trade-offs, or alternative approaches.`,
-      `- If a task has multiple parts, decompose it and track progress.`,
-      `- Use the Edit tool for precise changes — never rewrite entire files unless creating new ones.`
-    )
-  } else if (mode === 'acp') {
-    parts.push(
-      `\n## Mode: ACP`,
-      `You are the architecture-control lead. Your responsibility is to clarify requirements, build architecture and execution design, decompose work, and delegate implementation to sub-agents.`,
-      `The main agent must not write code, must not modify files, and must not directly execute implementation work.`,
-      `For direct implementation requests, first clarify the goal, background, constraints, boundaries, and acceptance criteria. Only after sufficient context and architecture design may you delegate execution.`,
-      `Implementation tasks must be executed through Task/sub-agents/teammates. The main agent may read files, inspect context, ask clarifying questions, write plans, assign work, and summarize results.`,
-      `Before each execution decision, provide enough background and architecture reasoning. If requirements are unclear, continue asking focused questions instead of rushing to act.`,
-      `Be explicit about what you are doing, why you are doing it, what has been clarified, what remains uncertain, and which sub-agent will handle each implementation task.`
-    )
-  } else {
-    parts.push(
-      `\n## Mode: Code`,
-      `You are a pair programming partner. Your scope is strictly implementation: writing, modifying, fixing, refactoring, and reviewing code. Stay focused on code — defer non-coding tasks to Cowork mode.`,
-      environmentContext.target === 'ssh'
-        ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, create or modify files on the remote host.`
-        : `You have access to the filesystem. When not in Plan Mode, you may create or modify files.`,
-      `\n**Engineering discipline:**`,
-      `- Always read a file before editing it. Understand the existing structure and style first.`,
-      `- Match the codebase's conventions: naming, formatting, patterns, and idioms.`,
-      `- Prefer minimal, surgical edits over rewriting. Use Edit, not Write, for existing files.`,
-      `- Ensure every change is complete: add imports, handle errors, respect types.`,
-      `- If a change touches public APIs or contracts, note what callers may need to update.`,
-      `\n**Output style:**`,
-      `- Be terse. Minimize explanation — let the code speak. Only explain non-obvious choices.`,
-      `- Do not narrate what the code does; only comment on why when it's not self-evident.`,
-      `- After making changes, briefly confirm what was done and any follow-up needed.`
-    )
-  }
   // ── Plan Mode Override ──
   if (planMode) {
     parts.push(
@@ -318,7 +362,7 @@ export function buildSystemPrompt(options: {
   )
 
   // ── Making Code Changes ──
-  if (!planMode && mode !== 'clarify' && mode !== 'acp') {
+  if (!planMode) {
     parts.push(
       `\n<making_code_changes>`,
       `Prefer minimal, focused edits using the Edit tool. Read before edit and keep changes scoped to the request.`,
@@ -354,7 +398,7 @@ export function buildSystemPrompt(options: {
     )
   }
 
-  if (!planMode && mode !== 'clarify' && mode !== 'acp') {
+  if (!planMode) {
     // ── Running Commands ──
     parts.push(
       `\n<running_commands>`,

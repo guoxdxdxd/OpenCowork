@@ -155,14 +155,16 @@ class OpenAIChatProvider implements APIProvider {
 
     const bodyStr = JSON.stringify(body)
 
-    // Yield debug info for dev mode inspection
     yield {
       type: 'request_debug',
       debugInfo: {
         url,
         method: 'POST',
         headers: maskHeaders(headers),
-        body: bodyStr,
+        body:
+          bodyStr.length > 4_000
+            ? `${bodyStr.slice(0, 4_000)}\n... [truncated, ${bodyStr.length} chars total]`
+            : bodyStr,
         timestamp: Date.now()
       }
     }

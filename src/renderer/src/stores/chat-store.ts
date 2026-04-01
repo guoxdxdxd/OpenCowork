@@ -1059,6 +1059,18 @@ export const useChatStore = create<ChatStore>()(
           state.activeProjectId = activeSession.projectId
         }
         state.streamingMessageId = id ? (state.streamingMessages[id] ?? null) : null
+
+        // Release memory for the previous session: drop cached prompt snapshot
+        // and offload messages (they'll be reloaded from DB on next activation).
+        if (prevId && prevId !== id) {
+          const prevSession = state.sessions.find((session) => session.id === prevId)
+          if (prevSession) {
+            delete prevSession.promptSnapshot
+            if (!state.streamingMessages[prevId] && prevSession.messages.length > 0) {
+              prevSession.messagesLoaded = false
+            }
+          }
+        }
       })
       useUIStore.getState().syncSessionScopedState(id)
       // Switch per-session tool calls in agent-store
@@ -1117,8 +1129,11 @@ export const useChatStore = create<ChatStore>()(
       set((state) => {
         const session = state.sessions.find((s) => s.id === id)
         if (session) {
+          const shouldClearPromptSnapshot = (session.mode === 'chat') !== (mode === 'chat')
           session.mode = mode
-          delete session.promptSnapshot
+          if (shouldClearPromptSnapshot) {
+            delete session.promptSnapshot
+          }
           session.updatedAt = now
         }
       })

@@ -201,7 +201,10 @@ class OpenAIResponsesProvider implements APIProvider {
         url,
         method: 'POST',
         headers: maskHeaders(headers),
-        body: httpBodyStr,
+        body:
+          httpBodyStr.length > 4_000
+            ? `${httpBodyStr.slice(0, 4_000)}\n... [truncated, ${httpBodyStr.length} chars total]`
+            : httpBodyStr,
         timestamp: Date.now()
       }
     }
@@ -347,6 +350,7 @@ class OpenAIResponsesProvider implements APIProvider {
           }
 
           case 'response.function_call_arguments.done':
+            argBuffers.delete(data.item_id)
             try {
               yield {
                 type: 'tool_call_end',
@@ -466,20 +470,19 @@ class OpenAIResponsesProvider implements APIProvider {
       const blocks = m.content as ContentBlock[]
 
       if (m.role === 'user') {
-        const hasImages = blocks.some((b) => b.type === 'image')
-        if (hasImages) {
-          const parts: unknown[] = []
-          for (const b of blocks) {
-            if (b.type === 'image') {
-              const url =
-                b.source.type === 'base64'
-                  ? `data:${b.source.mediaType || 'image/png'};base64,${b.source.data}`
-                  : b.source.url || ''
-              parts.push({ type: 'input_image', image_url: url })
-            } else if (b.type === 'text') {
-              parts.push({ type: 'input_text', text: b.text })
-            }
+        const parts: unknown[] = []
+        for (const b of blocks) {
+          if (b.type === 'image') {
+            const url =
+              b.source.type === 'base64'
+                ? `data:${b.source.mediaType || 'image/png'};base64,${b.source.data}`
+                : b.source.url || ''
+            parts.push({ type: 'input_image', image_url: url })
+          } else if (b.type === 'text') {
+            parts.push({ type: 'input_text', text: b.text })
           }
+        }
+        if (parts.length > 0) {
           input.push({ type: 'message', role: 'user', content: parts })
           continue
         }

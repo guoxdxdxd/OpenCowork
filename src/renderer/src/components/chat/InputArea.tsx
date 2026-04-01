@@ -95,6 +95,7 @@ import {
 } from '@renderer/components/ui/dialog'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { cn } from '@renderer/lib/utils'
+import { resolveProjectMemoryTextFile } from '@renderer/lib/agent/memory-files'
 
 function ContextRing(): React.JSX.Element | null {
   const chatView = useUIStore((s) => s.chatView)
@@ -550,6 +551,12 @@ export function InputArea({
   const openFilePreview = useUIStore((s) => s.openFilePreview)
   const mode = useUIStore((s) => s.mode)
   const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const activeSshConnectionId = useChatStore((s) => {
+    const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
+    const projectId = activeSession?.projectId ?? s.activeProjectId
+    const activeProject = s.projects.find((project) => project.id === projectId)
+    return activeSession?.sshConnectionId ?? activeProject?.sshConnectionId ?? null
+  })
   const [homeLongRunningMode, setHomeLongRunningMode] = useLocalState(false)
   const {
     activeSessionId,
@@ -601,6 +608,7 @@ export function InputArea({
   const [isQueueExpanded, setIsQueueExpanded] = React.useState(false)
   const [queueClearConfirmOpen, setQueueClearConfirmOpen] = React.useState(false)
   const [autoAcceptCountdown, setAutoAcceptCountdown] = React.useState<number | null>(null)
+  const [isWorkspaceAgentsMissing, setIsWorkspaceAgentsMissing] = React.useState(false)
 
   React.useLayoutEffect(() => {
     if (inputHeight === null) return
@@ -868,7 +876,14 @@ export function InputArea({
     [editorSelection, workingFolder]
   )
 
-  const recommendationFallback = t(defaultRecommendationKeys[mode])
+  const shouldRecommendInit =
+    mode !== 'chat' &&
+    Boolean(workingFolder?.trim()) &&
+    !activeSshConnectionId &&
+    isWorkspaceAgentsMissing
+  const recommendationFallback = shouldRecommendInit
+    ? t('input.recommendationInitWorkspace')
+    : t(defaultRecommendationKeys[mode])
   const shouldAutoAcceptRecommendation =
     mode === 'clarify' && clarifyAutoAcceptRecommended && !disabled && !isOptimizing && !isStreaming
   const getCaretAtEnd = React.useCallback(() => {
@@ -1052,6 +1067,28 @@ export function InputArea({
   const planMode = useUIStore((s) => s.planMode)
 
   React.useEffect(() => {
+    let cancelled = false
+
+    if (mode === 'chat' || !workingFolder?.trim() || activeSshConnectionId) {
+      setIsWorkspaceAgentsMissing(false)
+      return
+    }
+
+    setIsWorkspaceAgentsMissing(false)
+
+    void resolveProjectMemoryTextFile(ipcClient, workingFolder, 'AGENTS.md').then(
+      ({ missingFile }) => {
+        if (cancelled) return
+        setIsWorkspaceAgentsMissing(missingFile)
+      }
+    )
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeSshConnectionId, mode, workingFolder])
+
+  React.useEffect(() => {
     if (!isStreaming && !disabled) {
       editorRef.current?.focus()
     }
@@ -1151,6 +1188,14 @@ export function InputArea({
         images: cloneImageAttachments(attachedImages),
         skill: selectedSkill,
         selectedFiles: selectedFiles.map((file) => ({ ...file }))
+      }
+      // Cap stored drafts to prevent unbounded memory growth
+      const draftKeys = Object.keys(draftBySessionRef.current)
+      if (draftKeys.length > 20) {
+        const toRemove = draftKeys.slice(0, draftKeys.length - 20)
+        for (const key of toRemove) {
+          delete draftBySessionRef.current[key]
+        }
       }
     }
 
@@ -2126,7 +2171,10 @@ export function InputArea({
                 files={selectedFiles}
                 disabled={disabled || isOptimizing}
                 placeholder={
-                  effectivePlaceholder ?? t(placeholderKeys[mode] ?? 'input.placeholder')
+                  effectivePlaceholder ??
+                  (shouldRecommendInit
+                    ? t('input.placeholderInitWorkspace')
+                    : t(placeholderKeys[mode] ?? 'input.placeholder'))
                 }
                 suggestionText={suggestionText}
                 showSuggestion={Boolean(

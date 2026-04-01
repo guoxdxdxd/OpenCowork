@@ -19,7 +19,7 @@ import { Button } from '@renderer/components/ui/button'
 import { TranscriptMessageList } from '@renderer/components/chat/TranscriptMessageList'
 import { useAgentStore, type SubAgentState } from '@renderer/stores/agent-store'
 import { useChatStore } from '@renderer/stores/chat-store'
-import type { ToolResultContent } from '@renderer/lib/api/types'
+import type { ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
 import { cn } from '@renderer/lib/utils'
 import { subAgentRegistry } from '@renderer/lib/agent/sub-agents/registry'
 import { parseSubAgentMeta } from '@renderer/lib/agent/sub-agents/create-tool'
@@ -138,6 +138,28 @@ function getFallbackReportFromToolOutput(content?: ToolResultContent): string {
   return payloadText
 }
 
+function getFallbackReportFromMessages(
+  toolUseId: string | null | undefined,
+  messages: UnifiedMessage[]
+): string {
+  if (!toolUseId) return ''
+
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+    if (!Array.isArray(message.content)) continue
+
+    for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = message.content[blockIndex]
+      if (block.type !== 'tool_result' || block.toolUseId !== toolUseId) continue
+
+      const report = getFallbackReportFromToolOutput(block.content)
+      if (report.trim()) return report.trim()
+    }
+  }
+
+  return ''
+}
+
 export function SubAgentExecutionDetail({
   toolUseId,
   inlineText,
@@ -151,6 +173,9 @@ export function SubAgentExecutionDetail({
 }): React.JSX.Element {
   const { t } = useTranslation('layout')
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const sessionMessages = useChatStore((s) =>
+    activeSessionId ? s.getSessionMessages(activeSessionId) : []
+  )
   const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
   const completedSubAgents = useAgentStore((s) => s.completedSubAgents)
   const subAgentHistory = useAgentStore((s) => s.subAgentHistory)
@@ -168,15 +193,16 @@ export function SubAgentExecutionDetail({
     [toolUseId, activeSessionId, activeSubAgents, completedSubAgents, subAgentHistory]
   )
 
-  const fallbackReportText = React.useMemo(
-    () =>
-      toolUseId
-        ? getFallbackReportFromToolOutput(
-            executedToolCalls.find((item) => item.id === toolUseId)?.output
-          )
-        : '',
-    [toolUseId, executedToolCalls]
-  )
+  const fallbackReportText = React.useMemo(() => {
+    const fromMessages = getFallbackReportFromMessages(toolUseId, sessionMessages)
+    if (fromMessages) return fromMessages
+
+    return toolUseId
+      ? getFallbackReportFromToolOutput(
+          executedToolCalls.find((item) => item.id === toolUseId)?.output
+        )
+      : ''
+  }, [toolUseId, sessionMessages, executedToolCalls])
 
   const [now, setNow] = React.useState(() => Date.now())
 

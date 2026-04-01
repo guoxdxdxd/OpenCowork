@@ -18,7 +18,7 @@ import type { TeamMember } from '../teams/types'
 /** Global concurrency limiter: at most 2 SubAgents run simultaneously. */
 const subAgentLimiter = new ConcurrencyLimiter(2)
 
-/** Metadata embedded in SubAgent output for historical rendering */
+/** Legacy metadata shape kept only for parsing older stored Task outputs. */
 export interface SubAgentMeta {
   iterations: number
   elapsed: number
@@ -38,7 +38,7 @@ export interface SubAgentMeta {
 const META_PREFIX = '<!--subagent-meta:'
 const META_SUFFIX = '-->\n'
 
-/** Extract embedded metadata from SubAgent output string */
+/** Parse legacy embedded metadata from older SubAgent output strings. */
 export function parseSubAgentMeta(output: string): { meta: SubAgentMeta | null; text: string } {
   if (!output.startsWith(META_PREFIX)) return { meta: null, text: output }
   const endIdx = output.indexOf(META_SUFFIX)
@@ -418,18 +418,8 @@ export function createTaskTool(providerGetter: () => ProviderConfig): ToolHandle
       await subAgentLimiter.acquire(ctx.signal)
 
       try {
-        // Collect inner tool calls for metadata embedding
-        const collectedToolCalls = new Map<string, ToolCallState>()
-        let startedAt = Date.now()
-
         const onEvent = (event: SubAgentEvent): void => {
           subAgentEvents.emit(event)
-          if (event.type === 'sub_agent_start') {
-            startedAt = Date.now()
-          }
-          if (event.type === 'sub_agent_tool_call') {
-            collectedToolCalls.set(event.toolCall.id, event.toolCall)
-          }
         }
 
         const result = await runSubAgent({
@@ -452,60 +442,14 @@ export function createTaskTool(providerGetter: () => ProviderConfig): ToolHandle
           }
         })
 
-        // Build metadata for historical rendering (truncate large outputs to prevent bloat)
-        const MAX_OUTPUT = 6000
-        const MAX_INPUT_VALUE = 2000
-        const truncStr = (s: string | undefined, max: number): string | undefined => {
-          if (!s || s.length <= max) return s
-          return s.slice(0, max) + `\n... [truncated, ${s.length} chars total]`
-        }
-        const truncInput = (inp: Record<string, unknown>): Record<string, unknown> => {
-          const out: Record<string, unknown> = {}
-          for (const [k, v] of Object.entries(inp)) {
-            out[k] =
-              typeof v === 'string' && v.length > MAX_INPUT_VALUE
-                ? v.slice(0, MAX_INPUT_VALUE) + `... [${v.length} chars]`
-                : v
-          }
-          return out
-        }
-        const meta: SubAgentMeta = {
-          iterations: result.iterations,
-          elapsed: Date.now() - startedAt,
-          usage: result.usage,
-          toolCalls: Array.from(collectedToolCalls.values()).map((tc) => ({
-            id: tc.id,
-            name: tc.name,
-            input: truncInput(tc.input),
-            status: tc.status,
-            output: truncStr(
-              typeof tc.output === 'string'
-                ? tc.output
-                : tc.output
-                  ? JSON.stringify(tc.output)
-                  : undefined,
-              MAX_OUTPUT
-            ),
-            error: tc.error,
-            startedAt: tc.startedAt,
-            completedAt: tc.completedAt
-          }))
-        }
-        const metaStr = `${META_PREFIX}${JSON.stringify(meta)}${META_SUFFIX}`
-
         if (!result.success) {
-          return (
-            metaStr +
-            encodeStructuredToolResult({
-              error: result.error ?? 'SubAgent failed',
-              toolCalls: result.toolCallCount,
-              iterations: result.iterations,
-              result: result.output || undefined
-            })
-          )
+          return encodeStructuredToolResult({
+            error: result.error ?? 'SubAgent failed',
+            result: result.output || undefined
+          })
         }
 
-        return metaStr + result.output
+        return result.output
       } finally {
         subAgentLimiter.release()
       }
