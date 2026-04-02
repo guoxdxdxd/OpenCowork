@@ -11,15 +11,264 @@ import type {
 } from '../lib/api/types'
 import { builtinProviderPresets } from './providers'
 import type { BuiltinProviderPreset } from './providers'
+import { resolveCopilotApiBaseUrl, resolveCopilotModelId } from '../lib/auth/copilot'
 import { configStorage } from '../lib/ipc/config-storage'
 import { useSettingsStore } from './settings-store'
 
 export { builtinProviderPresets }
 export type { BuiltinProviderPreset }
 
-// --- Helper: create AIProvider from preset ---
+const DEFAULT_FAST_PROVIDER_BUILTIN_ID = 'routin-ai'
+const DEFAULT_FAST_MODEL_ID = 'doubao-seed-2-0-mini-260215'
+
+export interface ManagedModelConfig extends AIModelConfig {
+  normalizedKey: string
+}
+
+export function normalizeModelKey(modelId: string): string {
+  return modelId.trim().toLowerCase()
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isMissingModelValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true
+  if (typeof value === 'string') return value.trim().length === 0
+  if (Array.isArray(value)) return value.length === 0
+  if (isPlainObject(value)) return Object.keys(value).length === 0
+  return false
+}
+
+function cloneValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneValue(item)) as T
+  }
+  if (isPlainObject(value)) {
+    const cloned: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      cloned[key] = cloneValue(item)
+    }
+    return cloned as T
+  }
+  return value
+}
+
+function cloneModelConfig(model: AIModelConfig): AIModelConfig {
+  return cloneValue(model)
+}
+
+function cloneManagedModelConfig(model: ManagedModelConfig): ManagedModelConfig {
+  return cloneValue(model)
+}
+
+function toManagedModelConfig(model: AIModelConfig): ManagedModelConfig {
+  const cloned = cloneModelConfig(model)
+  const id = cloned.id.trim()
+  return {
+    ...cloned,
+    id,
+    name: cloned.name.trim() || id,
+    normalizedKey: normalizeModelKey(id)
+  }
+}
+
+function toManagedModelBase(model: ManagedModelConfig): AIModelConfig {
+  const { normalizedKey: _normalizedKey, ...rest } = cloneManagedModelConfig(model)
+  return rest
+}
+
+function resolveModelIdByKey(models: AIModelConfig[], modelId: string): string | undefined {
+  const modelKey = normalizeModelKey(modelId)
+  return models.find((model) => normalizeModelKey(model.id) === modelKey)?.id
+}
+
+function getManagedModelFromCollection(
+  managedModels: ManagedModelConfig[],
+  modelId: string
+): ManagedModelConfig | undefined {
+  const modelKey = normalizeModelKey(modelId)
+  return managedModels.find((model) => model.normalizedKey === modelKey)
+}
+
+function scoreManagedModelRichness(model: AIModelConfig | ManagedModelConfig): number {
+  const candidate = model as AIModelConfig
+  const keys: Array<keyof AIModelConfig> = [
+    'type',
+    'category',
+    'icon',
+    'contextLength',
+    'enableExtendedContextCompression',
+    'contextCompressionThreshold',
+    'maxOutputTokens',
+    'inputPrice',
+    'outputPrice',
+    'cacheCreationPrice',
+    'cacheHitPrice',
+    'premiumRequestMultiplier',
+    'availablePlans',
+    'supportsVision',
+    'supportsFunctionCall',
+    'supportsThinking',
+    'supportsComputerUse',
+    'enableComputerUse',
+    'thinkingConfig',
+    'responseSummary',
+    'enablePromptCache',
+    'enableSystemPromptCache',
+    'requestOverrides',
+    'serviceTier'
+  ]
+
+  let score = 0
+  for (const key of keys) {
+    if (!isMissingModelValue(candidate[key])) {
+      score += 1
+    }
+  }
+
+  if (candidate.thinkingConfig?.bodyParams) {
+    score += Object.keys(candidate.thinkingConfig.bodyParams).length
+  }
+  if (candidate.thinkingConfig?.disabledBodyParams) {
+    score += Object.keys(candidate.thinkingConfig.disabledBodyParams).length
+  }
+  if (candidate.thinkingConfig?.reasoningEffortLevels?.length) {
+    score += candidate.thinkingConfig.reasoningEffortLevels.length
+  }
+  if (candidate.requestOverrides?.headers) {
+    score += Object.keys(candidate.requestOverrides.headers).length
+  }
+  if (candidate.requestOverrides?.body) {
+    score += Object.keys(candidate.requestOverrides.body).length
+  }
+  if (candidate.requestOverrides?.omitBodyKeys?.length) {
+    score += candidate.requestOverrides.omitBodyKeys.length
+  }
+
+  return score
+}
+
+function mergeMissingValue(target: unknown, source: unknown): { value: unknown; changed: boolean } {
+  if (source === undefined) {
+    return { value: cloneValue(target), changed: false }
+  }
+
+  if (isMissingModelValue(target)) {
+    if (isMissingModelValue(source)) {
+      return { value: cloneValue(target), changed: false }
+    }
+    return { value: cloneValue(source), changed: true }
+  }
+
+  if (Array.isArray(target) || Array.isArray(source)) {
+    return { value: cloneValue(target), changed: false }
+  }
+
+  if (isPlainObject(target) && isPlainObject(source)) {
+    const merged = cloneValue(target)
+    let changed = false
+
+    for (const [key, sourceValue] of Object.entries(source)) {
+      const result = mergeMissingValue(merged[key], sourceValue)
+      if (result.changed) {
+        merged[key] = result.value
+        changed = true
+      }
+    }
+
+    return { value: merged, changed }
+  }
+
+  return { value: cloneValue(target), changed: false }
+}
+
+function mergeManagedModelMissingFields(
+  target: ManagedModelConfig,
+  source: ManagedModelConfig
+): { model: ManagedModelConfig; changed: boolean } {
+  const merged = cloneManagedModelConfig(target)
+  const mergedRecord = merged as unknown as Record<string, unknown>
+  let changed = false
+
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'normalizedKey') continue
+    const result = mergeMissingValue(mergedRecord[key], value)
+    if (result.changed) {
+      mergedRecord[key] = result.value
+      changed = true
+    }
+  }
+
+  return { model: merged, changed }
+}
+
+function collectBuiltinManagedModels(): ManagedModelConfig[] {
+  const managedByKey = new Map<string, ManagedModelConfig>()
+
+  for (const preset of builtinProviderPresets) {
+    for (const model of preset.defaultModels) {
+      const candidate = toManagedModelConfig(model)
+      const existing = managedByKey.get(candidate.normalizedKey)
+      if (!existing || scoreManagedModelRichness(candidate) > scoreManagedModelRichness(existing)) {
+        managedByKey.set(candidate.normalizedKey, candidate)
+      }
+    }
+  }
+
+  return Array.from(managedByKey.values())
+}
+
+function sortManagedModels(models: ManagedModelConfig[]): ManagedModelConfig[] {
+  return [...models].sort((a, b) => {
+    const nameCompare = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    if (nameCompare !== 0) return nameCompare
+    return a.id.localeCompare(b.id, undefined, { sensitivity: 'base' })
+  })
+}
+
+export function buildProviderModelSnapshot(
+  model: AIModelConfig,
+  options: {
+    managedModel?: ManagedModelConfig | null
+    existingModel?: AIModelConfig | null
+  } = {}
+): AIModelConfig {
+  const baseModel = cloneModelConfig(model)
+  const managedModel = options.managedModel ? toManagedModelBase(options.managedModel) : null
+  const existingModel = options.existingModel ? cloneModelConfig(options.existingModel) : null
+
+  if (existingModel) {
+    return {
+      ...baseModel,
+      ...(managedModel ?? {}),
+      ...existingModel,
+      enabled: existingModel.enabled
+    }
+  }
+
+  if (managedModel) {
+    return {
+      ...baseModel,
+      ...managedModel
+    }
+  }
+
+  return baseModel
+}
 
 function createProviderFromPreset(preset: BuiltinProviderPreset): AIProvider {
+  const managedModels = useProviderStore.getState().managedModels
+  const models = preset.defaultModels.map((model) =>
+    buildProviderModelSnapshot(model, {
+      managedModel: getManagedModelFromCollection(managedModels, model.id) ?? null
+    })
+  )
+  const defaultModel = preset.defaultModel
+    ? resolveModelIdByKey(models, preset.defaultModel) ?? preset.defaultModel
+    : undefined
+
   return {
     id: nanoid(),
     name: preset.name.trim(),
@@ -27,13 +276,13 @@ function createProviderFromPreset(preset: BuiltinProviderPreset): AIProvider {
     apiKey: '',
     baseUrl: preset.defaultBaseUrl.trim(),
     enabled: preset.defaultEnabled ?? false,
-    models: [...preset.defaultModels],
+    models,
     builtinId: preset.builtinId,
     createdAt: Date.now(),
     requiresApiKey: preset.requiresApiKey ?? true,
     ...(preset.useSystemProxy !== undefined ? { useSystemProxy: preset.useSystemProxy } : {}),
     ...(preset.userAgent ? { userAgent: preset.userAgent } : {}),
-    ...(preset.defaultModel ? { defaultModel: preset.defaultModel } : {}),
+    ...(defaultModel ? { defaultModel } : {}),
     authMode: preset.authMode ?? 'apiKey',
     ...(preset.oauthConfig ? { oauthConfig: { ...preset.oauthConfig } } : {}),
     ...(preset.channelConfig ? { channelConfig: { ...preset.channelConfig } } : {}),
@@ -54,6 +303,53 @@ export function modelSupportsVision(
   )
 }
 
+export function modelSupportsComputerUse(
+  model: AIModelConfig | null | undefined,
+  providerType?: ProviderType
+): boolean {
+  if (!model) return false
+  const requestType = model.type ?? providerType
+  return requestType === 'openai-responses' && model.supportsComputerUse === true
+}
+
+export function isProviderAuthReady(provider: AIProvider | null | undefined): boolean {
+  if (!provider) return false
+
+  const authMode = provider.authMode ?? 'apiKey'
+  if (authMode === 'apiKey') {
+    return provider.requiresApiKey === false || provider.apiKey.trim().length > 0
+  }
+  if (authMode === 'oauth') {
+    return Boolean(provider.oauth?.accessToken)
+  }
+  if (authMode === 'channel') {
+    return Boolean(provider.channel?.accessToken)
+  }
+  return false
+}
+
+export function isProviderAvailableForModelSelection(
+  provider: AIProvider | null | undefined
+): boolean {
+  if (!provider?.enabled) return false
+  return isProviderAuthReady(provider)
+}
+
+export function getEnabledModelsByCategory(
+  provider: AIProvider | null | undefined,
+  category: ModelCategory
+): AIModelConfig[] {
+  if (!provider) return []
+  return provider.models.filter((model) => model.enabled && (model.category ?? 'chat') === category)
+}
+
+export function isModelComputerUseEnabled(
+  model: AIModelConfig | null | undefined,
+  providerType?: ProviderType
+): boolean {
+  return modelSupportsComputerUse(model, providerType) && model?.enableComputerUse === true
+}
+
 export function normalizeProviderBaseUrl(
   baseUrl: string,
   requestType: ProviderConfig['type']
@@ -62,6 +358,9 @@ export function normalizeProviderBaseUrl(
   if (requestType === 'anthropic') {
     // Anthropic provider will append `/v1/messages` itself.
     return trimmed.replace(/\/v1(?:\/messages)?$/i, '')
+  }
+  if (requestType === 'gemini' || requestType === 'vertex-ai') {
+    return trimmed.replace(/\/openai$/i, '')
   }
   return trimmed
 }
@@ -137,41 +436,38 @@ function buildRequestOverrides(
   return ensureTemperatureOmit(merged, modelId)
 }
 
-function supportsPriorityServiceTier(providerBuiltinId?: string, modelId?: string): boolean {
-  if (!providerBuiltinId || !modelId) return false
-  if (providerBuiltinId === 'openai') return true
-  return providerBuiltinId === 'routin-ai' && modelId === 'gpt-5.4'
-}
-
 function resolveServiceTier(
-  providerBuiltinId?: string,
-  modelId?: string
+  model: AIModelConfig | null | undefined,
+  providerBuiltinId?: string
 ): ProviderConfig['serviceTier'] | undefined {
+  if (providerBuiltinId === 'codex-oauth') return model?.serviceTier
   if (!useSettingsStore.getState().fastModeEnabled) return undefined
-  return supportsPriorityServiceTier(providerBuiltinId, modelId) ? 'priority' : undefined
+  return model?.serviceTier
 }
 
 function mergeBuiltinModels(
   existingModels: AIModelConfig[],
-  presetModels: AIModelConfig[]
+  presetModels: AIModelConfig[],
+  managedModels: ManagedModelConfig[],
+  deprecatedModelIds: string[] = []
 ): AIModelConfig[] {
-  const existingById = new Map(existingModels.map((model) => [model.id, model]))
-  const presetIds = new Set(presetModels.map((model) => model.id))
+  const existingByKey = new Map(
+    existingModels.map((model) => [normalizeModelKey(model.id), model] as const)
+  )
+  const presetKeys = new Set(presetModels.map((model) => normalizeModelKey(model.id)))
+  const deprecatedKeys = new Set(deprecatedModelIds.map((modelId) => normalizeModelKey(modelId)))
 
-  // Keep preset order for builtin models; preserve user's enabled state.
   const merged = presetModels.map((presetModel) => {
-    const existingModel = existingById.get(presetModel.id)
-    if (!existingModel) return { ...presetModel }
-    return {
-      ...existingModel,
-      ...presetModel,
-      enabled: existingModel.enabled
-    }
+    const modelKey = normalizeModelKey(presetModel.id)
+    return buildProviderModelSnapshot(presetModel, {
+      managedModel: getManagedModelFromCollection(managedModels, presetModel.id) ?? null,
+      existingModel: existingByKey.get(modelKey) ?? null
+    })
   })
 
-  // Keep user-added custom models that are not part of builtin preset.
   for (const existingModel of existingModels) {
-    if (!presetIds.has(existingModel.id)) {
+    const modelKey = normalizeModelKey(existingModel.id)
+    if (!presetKeys.has(modelKey) && !deprecatedKeys.has(modelKey)) {
       merged.push(existingModel)
     }
   }
@@ -180,40 +476,88 @@ function mergeBuiltinModels(
 }
 
 function resolveProviderDefaultModelId(provider: AIProvider): string {
-  // Try to use the configured default model first
-  if (provider.defaultModel) {
-    const defaultModel = provider.models.find((m) => m.id === provider.defaultModel)
-    if (defaultModel) return defaultModel.id
-  }
+  const defaultModelId = provider.defaultModel
+    ? resolveModelIdByKey(provider.models, provider.defaultModel)
+    : undefined
+  const defaultModel = defaultModelId
+    ? provider.models.find((model) => model.id === defaultModelId)
+    : null
+  if (defaultModel?.enabled) return defaultModel.id
 
-  // Fall back to first enabled model, then first model
-  const enabledModels = provider.models.filter((m) => m.enabled)
-  return enabledModels[0]?.id ?? provider.models[0]?.id ?? ''
+  const enabledModels = provider.models.filter((model) => model.enabled)
+  if (enabledModels[0]) return enabledModels[0].id
+
+  return defaultModel?.id ?? provider.models[0]?.id ?? ''
 }
 
 function resolveProviderDefaultModelIdByCategory(
   provider: AIProvider,
   category: ModelCategory
 ): string {
-  const categoryModels = provider.models.filter((m) => (m.category ?? 'chat') === category)
-  const enabledModels = categoryModels.filter((m) => m.enabled)
-  return enabledModels[0]?.id ?? categoryModels[0]?.id ?? ''
+  const defaultModelId = provider.defaultModel
+    ? resolveModelIdByKey(provider.models, provider.defaultModel)
+    : undefined
+  const defaultModel = defaultModelId
+    ? provider.models.find((model) => model.id === defaultModelId)
+    : null
+  if (defaultModel?.enabled && (defaultModel.category ?? 'chat') === category) {
+    return defaultModel.id
+  }
+
+  const categoryModels = provider.models.filter((model) => (model.category ?? 'chat') === category)
+  const enabledModels = categoryModels.filter((model) => model.enabled)
+  if (enabledModels[0]) return enabledModels[0].id
+
+  if (defaultModel && (defaultModel.category ?? 'chat') === category) {
+    return defaultModel.id
+  }
+
+  return categoryModels[0]?.id ?? ''
+}
+
+function resolveDefaultFastSelection(
+  providers: AIProvider[]
+): { providerId: string; modelId: string } | null {
+  const preferredProvider = providers.find(
+    (provider) =>
+      isProviderAvailableForModelSelection(provider) &&
+      provider.builtinId === DEFAULT_FAST_PROVIDER_BUILTIN_ID &&
+      provider.models.some((model) => model.enabled && (model.category ?? 'chat') === 'chat')
+  )
+
+  if (preferredProvider) {
+    const preferredModel = preferredProvider.models.find(
+      (model) => model.enabled && model.id === DEFAULT_FAST_MODEL_ID
+    )
+    const fallbackModelId =
+      resolveProviderDefaultModelIdByCategory(preferredProvider, 'chat') ||
+      resolveProviderDefaultModelId(preferredProvider)
+    const modelId = preferredModel?.id ?? fallbackModelId
+    if (modelId) {
+      return { providerId: preferredProvider.id, modelId }
+    }
+  }
+
+  const fallbackProviderId = resolveFirstProviderIdByCategory(providers, 'chat')
+  if (!fallbackProviderId) return null
+  const fallbackProvider = providers.find((provider) => provider.id === fallbackProviderId)
+  if (!fallbackProvider) return null
+  const modelId =
+    resolveProviderDefaultModelIdByCategory(fallbackProvider, 'chat') ||
+    resolveProviderDefaultModelId(fallbackProvider)
+  if (!modelId) return null
+  return { providerId: fallbackProvider.id, modelId }
 }
 
 function resolveFirstProviderIdByCategory(
   providers: AIProvider[],
   category: ModelCategory
 ): string | null {
-  const enabledProvider = providers.find(
-    (provider) =>
-      provider.enabled &&
-      provider.models.some((model) => model.enabled && (model.category ?? 'chat') === category)
-  )
-  if (enabledProvider) return enabledProvider.id
-
   return (
-    providers.find((provider) =>
-      provider.models.some((model) => (model.category ?? 'chat') === category)
+    providers.find(
+      (provider) =>
+        isProviderAvailableForModelSelection(provider) &&
+        provider.models.some((model) => model.enabled && (model.category ?? 'chat') === category)
     )?.id ?? null
   )
 }
@@ -223,7 +567,10 @@ function resolveValidModelIdByCategory(
   modelId: string,
   category: ModelCategory
 ): string {
-  const current = provider.models.find((model) => model.id === modelId)
+  const currentModelId = resolveModelIdByKey(provider.models, modelId)
+  const current = currentModelId
+    ? provider.models.find((model) => model.id === currentModelId)
+    : null
   if (current && current.enabled && (current.category ?? 'chat') === category) {
     return current.id
   }
@@ -234,6 +581,8 @@ function resolveValidModelIdByCategory(
 
 interface ProviderStore {
   providers: AIProvider[]
+  managedModels: ManagedModelConfig[]
+  managedModelTombstones: string[]
   activeProviderId: string | null
   activeModelId: string
   activeFastProviderId: string | null
@@ -253,6 +602,10 @@ interface ProviderStore {
   toggleProviderEnabled: (id: string) => void
 
   // Model management
+  addManagedModel: (model: AIModelConfig) => void
+  updateManagedModel: (modelId: string, model: AIModelConfig) => void
+  removeManagedModel: (modelId: string) => void
+  getManagedModelById: (modelId: string) => ManagedModelConfig | null
   addModel: (providerId: string, model: AIModelConfig) => void
   updateModel: (providerId: string, modelId: string, patch: Partial<AIModelConfig>) => void
   removeModel: (providerId: string, modelId: string) => void
@@ -295,10 +648,136 @@ interface ProviderStore {
   _markMigrated: () => void
 }
 
+type ProviderSelectionState = Pick<
+  ProviderStore,
+  | 'activeProviderId'
+  | 'activeModelId'
+  | 'activeFastProviderId'
+  | 'activeFastModelId'
+  | 'activeTranslationProviderId'
+  | 'activeTranslationModelId'
+  | 'activeSpeechProviderId'
+  | 'activeSpeechModelId'
+  | 'activeImageProviderId'
+  | 'activeImageModelId'
+>
+
+function resolveProviderSelectionByCategory(
+  providers: AIProvider[],
+  providerId: string | null,
+  modelId: string,
+  category: ModelCategory
+): { providerId: string | null; modelId: string } {
+  const currentProvider = providerId
+    ? providers.find((provider) => provider.id === providerId)
+    : null
+  const hasEnabledCategoryModel = currentProvider?.models.some(
+    (model) => model.enabled && (model.category ?? 'chat') === category
+  )
+
+  if (
+    currentProvider &&
+    hasEnabledCategoryModel &&
+    isProviderAvailableForModelSelection(currentProvider)
+  ) {
+    const nextModelId = resolveValidModelIdByCategory(currentProvider, modelId, category)
+    if (nextModelId) {
+      return { providerId: currentProvider.id, modelId: nextModelId }
+    }
+  }
+
+  const fallbackProviderId = resolveFirstProviderIdByCategory(providers, category)
+  if (!fallbackProviderId) {
+    return { providerId: null, modelId: '' }
+  }
+
+  const fallbackProvider = providers.find((provider) => provider.id === fallbackProviderId)
+  if (!fallbackProvider) {
+    return { providerId: null, modelId: '' }
+  }
+
+  const fallbackModelId = resolveValidModelIdByCategory(fallbackProvider, '', category)
+  if (!fallbackModelId) {
+    return { providerId: null, modelId: '' }
+  }
+
+  return { providerId: fallbackProvider.id, modelId: fallbackModelId }
+}
+
+function buildNormalizedProviderState(
+  state: ProviderSelectionState,
+  providers: AIProvider[]
+): Partial<ProviderStore> {
+  const mainSelection = resolveProviderSelectionByCategory(
+    providers,
+    state.activeProviderId,
+    state.activeModelId,
+    'chat'
+  )
+
+  const hasExplicitFastSelection = Boolean(state.activeFastProviderId || state.activeFastModelId)
+  const explicitFastSelection = hasExplicitFastSelection
+    ? resolveProviderSelectionByCategory(
+        providers,
+        state.activeFastProviderId ?? mainSelection.providerId,
+        state.activeFastModelId,
+        'chat'
+      )
+    : { providerId: null, modelId: '' }
+  const fastSelection =
+    explicitFastSelection.providerId && explicitFastSelection.modelId
+      ? explicitFastSelection
+      : (resolveDefaultFastSelection(providers) ??
+        resolveProviderSelectionByCategory(
+          providers,
+          mainSelection.providerId,
+          mainSelection.modelId,
+          'chat'
+        ))
+
+  const translationSelection = resolveProviderSelectionByCategory(
+    providers,
+    state.activeTranslationProviderId ?? mainSelection.providerId,
+    state.activeTranslationModelId,
+    'chat'
+  )
+
+  const imageSelection = resolveProviderSelectionByCategory(
+    providers,
+    state.activeImageProviderId,
+    state.activeImageModelId,
+    'image'
+  )
+
+  const speechSelection = state.activeSpeechProviderId
+    ? resolveProviderSelectionByCategory(
+        providers,
+        state.activeSpeechProviderId,
+        state.activeSpeechModelId,
+        'speech'
+      )
+    : { providerId: null, modelId: '' }
+
+  return {
+    activeProviderId: mainSelection.providerId,
+    activeModelId: mainSelection.modelId,
+    activeFastProviderId: fastSelection.providerId,
+    activeFastModelId: fastSelection.modelId,
+    activeTranslationProviderId: translationSelection.providerId,
+    activeTranslationModelId: translationSelection.modelId,
+    activeSpeechProviderId: speechSelection.providerId,
+    activeSpeechModelId: speechSelection.modelId,
+    activeImageProviderId: imageSelection.providerId,
+    activeImageModelId: imageSelection.modelId
+  }
+}
+
 export const useProviderStore = create<ProviderStore>()(
   persist(
     (set, get) => ({
       providers: [],
+      managedModels: [],
+      managedModelTombstones: [],
       activeProviderId: null,
       activeModelId: '',
       activeFastProviderId: null,
@@ -311,7 +790,14 @@ export const useProviderStore = create<ProviderStore>()(
       activeImageModelId: '',
       _migrated: false,
 
-      addProvider: (provider) => set((s) => ({ providers: [...s.providers, provider] })),
+      addProvider: (provider) =>
+        set((state) => {
+          const providers = [...state.providers, provider]
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
 
       addProviderFromPreset: (builtinId) => {
         const preset = builtinProviderPresets.find((p) => p.builtinId === builtinId)
@@ -319,162 +805,315 @@ export const useProviderStore = create<ProviderStore>()(
         const existing = get().providers.find((p) => p.builtinId === builtinId)
         if (existing) return existing.id
         const provider = createProviderFromPreset(preset)
-        set((s) => ({ providers: [...s.providers, provider] }))
+        set((state) => {
+          const providers = [...state.providers, provider]
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        })
         return provider.id
       },
 
       updateProvider: (id, patch) =>
-        set((s) => ({
-          providers: s.providers.map((p) => (p.id === id ? { ...p, ...patch } : p))
-        })),
-
-      removeProvider: (id) =>
-        set((s) => ({
-          providers: s.providers.filter((p) => p.id !== id),
-          activeProviderId: s.activeProviderId === id ? null : s.activeProviderId,
-          activeTranslationProviderId:
-            s.activeTranslationProviderId === id ? null : s.activeTranslationProviderId,
-          activeTranslationModelId:
-            s.activeTranslationProviderId === id ? '' : s.activeTranslationModelId,
-          activeSpeechProviderId: s.activeSpeechProviderId === id ? null : s.activeSpeechProviderId,
-          activeSpeechModelId: s.activeSpeechProviderId === id ? '' : s.activeSpeechModelId,
-          activeImageProviderId: s.activeImageProviderId === id ? null : s.activeImageProviderId,
-          activeImageModelId: s.activeImageProviderId === id ? '' : s.activeImageModelId,
-          activeFastProviderId: s.activeFastProviderId === id ? null : s.activeFastProviderId,
-          activeFastModelId: s.activeFastProviderId === id ? '' : s.activeFastModelId
-        })),
-
-      toggleProviderEnabled: (id) =>
-        set((s) => ({
-          providers: s.providers.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
-        })),
-
-      addModel: (providerId, model) =>
-        set((s) => ({
-          providers: s.providers.map((p) =>
-            p.id === providerId ? { ...p, models: [...p.models, model] } : p
-          )
-        })),
-
-      updateModel: (providerId, modelId, patch) =>
-        set((s) => ({
-          providers: s.providers.map((p) =>
-            p.id === providerId
-              ? {
-                  ...p,
-                  models: p.models.map((m) => (m.id === modelId ? { ...m, ...patch } : m))
-                }
-              : p
-          )
-        })),
-
-      removeModel: (providerId, modelId) =>
-        set((s) => ({
-          providers: s.providers.map((p) =>
-            p.id === providerId ? { ...p, models: p.models.filter((m) => m.id !== modelId) } : p
-          )
-        })),
-
-      toggleModelEnabled: (providerId, modelId) =>
-        set((s) => ({
-          providers: s.providers.map((p) =>
-            p.id === providerId
-              ? {
-                  ...p,
-                  models: p.models.map((m) =>
-                    m.id === modelId ? { ...m, enabled: !m.enabled } : m
-                  )
-                }
-              : p
-          )
-        })),
-
-      setProviderModels: (providerId, models) =>
-        set((s) => ({
-          providers: s.providers.map((p) => (p.id === providerId ? { ...p, models } : p))
-        })),
-
-      setActiveProvider: (providerId) => {
-        const provider = get().providers.find((p) => p.id === providerId)
-        if (!provider) return
-
-        const defaultModelId =
-          resolveProviderDefaultModelIdByCategory(provider, 'chat') ||
-          resolveProviderDefaultModelId(provider)
-
         set((state) => {
-          const nextState: Partial<ProviderStore> = {
-            activeProviderId: providerId,
-            activeModelId: defaultModelId
+          const providers = state.providers.map((provider) =>
+            provider.id === id ? { ...provider, ...patch } : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
           }
-
-          if (!state.activeFastProviderId) {
-            nextState.activeFastProviderId = providerId
-            nextState.activeFastModelId = defaultModelId
-          }
-
-          return nextState as ProviderStore
-        })
-      },
-
-      setActiveModel: (modelId) => set({ activeModelId: modelId }),
-
-      setActiveFastProvider: (providerId) => {
-        const provider = get().providers.find((p) => p.id === providerId)
-        if (!provider) return
-        const defaultModelId =
-          resolveProviderDefaultModelIdByCategory(provider, 'chat') ||
-          resolveProviderDefaultModelId(provider)
-        set({ activeFastProviderId: providerId, activeFastModelId: defaultModelId })
-      },
-
-      setActiveFastModel: (modelId) =>
-        set((state) => {
-          const providerId = state.activeFastProviderId ?? state.activeProviderId
-          if (!providerId) return {}
-          const provider = state.providers.find((p) => p.id === providerId)
-          if (!provider) return {}
-          const modelExists = provider.models.some((m) => m.id === modelId)
-          return modelExists ? { activeFastModelId: modelId } : {}
         }),
 
-      setActiveTranslationProvider: (providerId) => {
-        const provider = get().providers.find((p) => p.id === providerId)
-        if (!provider) return
-        const defaultModelId =
-          resolveProviderDefaultModelIdByCategory(provider, 'chat') ||
-          resolveProviderDefaultModelId(provider)
-        set({
-          activeTranslationProviderId: providerId,
-          activeTranslationModelId: defaultModelId
-        })
+      removeProvider: (id) =>
+        set((state) => {
+          const providers = state.providers.filter((provider) => provider.id !== id)
+          return {
+            providers,
+            ...buildNormalizedProviderState(
+              {
+                ...state,
+                activeProviderId: state.activeProviderId === id ? null : state.activeProviderId,
+                activeModelId: state.activeProviderId === id ? '' : state.activeModelId,
+                activeTranslationProviderId:
+                  state.activeTranslationProviderId === id
+                    ? null
+                    : state.activeTranslationProviderId,
+                activeTranslationModelId:
+                  state.activeTranslationProviderId === id ? '' : state.activeTranslationModelId,
+                activeSpeechProviderId:
+                  state.activeSpeechProviderId === id ? null : state.activeSpeechProviderId,
+                activeSpeechModelId:
+                  state.activeSpeechProviderId === id ? '' : state.activeSpeechModelId,
+                activeImageProviderId:
+                  state.activeImageProviderId === id ? null : state.activeImageProviderId,
+                activeImageModelId:
+                  state.activeImageProviderId === id ? '' : state.activeImageModelId,
+                activeFastProviderId:
+                  state.activeFastProviderId === id ? null : state.activeFastProviderId,
+                activeFastModelId: state.activeFastProviderId === id ? '' : state.activeFastModelId
+              },
+              providers
+            )
+          }
+        }),
+
+      toggleProviderEnabled: (id) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === id ? { ...provider, enabled: !provider.enabled } : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
+
+      addManagedModel: (model) =>
+        set((state) => {
+          const nextModel = toManagedModelConfig(model)
+          const managedModels = sortManagedModels([
+            ...state.managedModels.filter((item) => item.normalizedKey !== nextModel.normalizedKey),
+            nextModel
+          ])
+          return {
+            managedModels,
+            managedModelTombstones: state.managedModelTombstones.filter(
+              (item) => item !== nextModel.normalizedKey
+            )
+          }
+        }),
+
+      updateManagedModel: (modelId, model) =>
+        set((state) => {
+          const previousKey = normalizeModelKey(modelId)
+          const nextModel = toManagedModelConfig(model)
+          const managedModels = sortManagedModels([
+            ...state.managedModels.filter(
+              (item) =>
+                item.normalizedKey !== previousKey && item.normalizedKey !== nextModel.normalizedKey
+            ),
+            nextModel
+          ])
+          const tombstones = new Set(state.managedModelTombstones)
+          tombstones.delete(nextModel.normalizedKey)
+          if (previousKey !== nextModel.normalizedKey) {
+            tombstones.add(previousKey)
+          }
+          return {
+            managedModels,
+            managedModelTombstones: Array.from(tombstones)
+          }
+        }),
+
+      removeManagedModel: (modelId) =>
+        set((state) => {
+          const modelKey = normalizeModelKey(modelId)
+          const managedModels = state.managedModels.filter((model) => model.normalizedKey !== modelKey)
+          if (managedModels.length === state.managedModels.length) {
+            return state
+          }
+          const tombstones = new Set(state.managedModelTombstones)
+          tombstones.add(modelKey)
+          return {
+            managedModels,
+            managedModelTombstones: Array.from(tombstones)
+          }
+        }),
+
+      getManagedModelById: (modelId) => {
+        const modelKey = normalizeModelKey(modelId)
+        return get().managedModels.find((model) => model.normalizedKey === modelKey) ?? null
       },
 
-      setActiveTranslationModel: (modelId) => set({ activeTranslationModelId: modelId }),
+      addModel: (providerId, model) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === providerId
+              ? { ...provider, models: [...provider.models, model] }
+              : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
 
-      setActiveSpeechProvider: (providerId) => {
-        const provider = get().providers.find((p) => p.id === providerId)
-        if (!provider) return
-        const defaultModelId = resolveProviderDefaultModelIdByCategory(provider, 'speech')
-        set({
-          activeSpeechProviderId: providerId,
-          activeSpeechModelId: defaultModelId
-        })
-      },
+      updateModel: (providerId, modelId, patch) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === providerId
+              ? {
+                  ...provider,
+                  models: provider.models.map((model) =>
+                    model.id === modelId ? { ...model, ...patch } : model
+                  )
+                }
+              : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
 
-      setActiveSpeechModel: (modelId) => set({ activeSpeechModelId: modelId }),
+      removeModel: (providerId, modelId) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === providerId
+              ? { ...provider, models: provider.models.filter((model) => model.id !== modelId) }
+              : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
 
-      setActiveImageProvider: (providerId) => {
-        const provider = get().providers.find((p) => p.id === providerId)
-        if (!provider) return
-        const defaultModelId = resolveProviderDefaultModelIdByCategory(provider, 'image')
-        set({
-          activeImageProviderId: providerId,
-          activeImageModelId: defaultModelId
-        })
-      },
+      toggleModelEnabled: (providerId, modelId) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === providerId
+              ? {
+                  ...provider,
+                  models: provider.models.map((model) =>
+                    model.id === modelId ? { ...model, enabled: !model.enabled } : model
+                  )
+                }
+              : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
 
-      setActiveImageModel: (modelId) => set({ activeImageModelId: modelId }),
+      setProviderModels: (providerId, models) =>
+        set((state) => {
+          const providers = state.providers.map((provider) =>
+            provider.id === providerId ? { ...provider, models } : provider
+          )
+          return {
+            providers,
+            ...buildNormalizedProviderState(state, providers)
+          }
+        }),
+
+      setActiveProvider: (providerId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeProviderId: providerId,
+              activeModelId: ''
+            },
+            state.providers
+          )
+        ),
+
+      setActiveModel: (modelId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeModelId: modelId
+            },
+            state.providers
+          )
+        ),
+
+      setActiveFastProvider: (providerId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeFastProviderId: providerId,
+              activeFastModelId: ''
+            },
+            state.providers
+          )
+        ),
+
+      setActiveFastModel: (modelId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeFastModelId: modelId
+            },
+            state.providers
+          )
+        ),
+
+      setActiveTranslationProvider: (providerId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeTranslationProviderId: providerId,
+              activeTranslationModelId: ''
+            },
+            state.providers
+          )
+        ),
+
+      setActiveTranslationModel: (modelId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeTranslationModelId: modelId
+            },
+            state.providers
+          )
+        ),
+
+      setActiveSpeechProvider: (providerId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeSpeechProviderId: providerId,
+              activeSpeechModelId: ''
+            },
+            state.providers
+          )
+        ),
+
+      setActiveSpeechModel: (modelId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeSpeechModelId: modelId
+            },
+            state.providers
+          )
+        ),
+
+      setActiveImageProvider: (providerId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeImageProviderId: providerId,
+              activeImageModelId: ''
+            },
+            state.providers
+          )
+        ),
+
+      setActiveImageModel: (modelId) =>
+        set((state) =>
+          buildNormalizedProviderState(
+            {
+              ...state,
+              activeImageModelId: modelId
+            },
+            state.providers
+          )
+        ),
 
       getActiveProvider: () => {
         const { providers, activeProviderId } = get()
@@ -497,34 +1136,43 @@ export const useProviderStore = create<ProviderStore>()(
         if (!provider) return null
         const activeModel = provider.models.find((m) => m.id === activeModelId)
 
-        // Override provider type for image category models
+        // Image models should respect explicit protocol overrides (e.g. Gemini).
+        // Fall back to OpenAI Images only when an image model has no explicit type.
         let requestType = activeModel?.type ?? provider.type
-        if (activeModel?.category === 'image') {
+        if (activeModel?.category === 'image' && !activeModel?.type) {
           requestType = 'openai-images'
-          console.log('[Provider Store] Image model detected, routing to openai-images provider', {
-            modelId: activeModelId,
-            originalType: activeModel?.type,
-            providerType: provider.type,
-            finalType: requestType
-          })
+          console.log(
+            '[Provider Store] Image model without explicit type, routing to openai-images provider',
+            {
+              modelId: activeModelId,
+              providerType: provider.type,
+              finalType: requestType
+            }
+          )
         }
 
-        const normalizedBaseUrl = provider.baseUrl
-          ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
+        const resolvedBaseUrl =
+          provider.builtinId === 'copilot-oauth'
+            ? resolveCopilotApiBaseUrl(provider, provider.oauth)
+            : provider.baseUrl
+        const normalizedBaseUrl = resolvedBaseUrl
+          ? normalizeProviderBaseUrl(resolvedBaseUrl, requestType)
           : undefined
         const requestOverrides = buildRequestOverrides(
           provider.requestOverrides,
           activeModel?.requestOverrides,
           activeModel?.id ?? activeModelId
         )
-        const serviceTier = resolveServiceTier(provider.builtinId, activeModel?.id ?? activeModelId)
+        const serviceTier = resolveServiceTier(activeModel, provider.builtinId)
         return {
           type: requestType,
           apiKey: provider.apiKey,
           baseUrl: normalizedBaseUrl,
           model: activeModelId,
+          category: activeModel?.category,
           providerId: provider.id,
           providerBuiltinId: provider.builtinId,
+          computerUseEnabled: isModelComputerUseEnabled(activeModel, requestType),
           ...(serviceTier ? { serviceTier } : {}),
           requiresApiKey: provider.requiresApiKey,
           ...(provider.useSystemProxy !== undefined
@@ -588,39 +1236,46 @@ export const useProviderStore = create<ProviderStore>()(
       getProviderConfigById: (providerId, modelId) => {
         const provider = get().providers.find((p) => p.id === providerId)
         if (!provider) return null
-        const model = provider.models.find((m) => m.id === modelId)
+        const resolvedModelId =
+          provider.builtinId === 'copilot-oauth' ? resolveCopilotModelId(modelId) : modelId
+        const model = provider.models.find((m) => m.id === resolvedModelId)
 
-        // Override provider type for image category models
+        // Image models should respect explicit protocol overrides (e.g. Gemini).
+        // Fall back to OpenAI Images only when an image model has no explicit type.
         let requestType = model?.type ?? provider.type
-        if (model?.category === 'image') {
+        if (model?.category === 'image' && !model?.type) {
           requestType = 'openai-images'
           console.log(
-            '[Provider Store] Image model detected in getProviderConfigById, routing to openai-images provider',
+            '[Provider Store] Image model without explicit type in getProviderConfigById, routing to openai-images provider',
             {
-              modelId,
-              originalType: model?.type,
+              modelId: resolvedModelId,
               providerType: provider.type,
               finalType: requestType
             }
           )
         }
 
-        const normalizedBaseUrl = provider.baseUrl
-          ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
+        const resolvedBaseUrl =
+          provider.builtinId === 'copilot-oauth'
+            ? resolveCopilotApiBaseUrl(provider, provider.oauth)
+            : provider.baseUrl
+        const normalizedBaseUrl = resolvedBaseUrl
+          ? normalizeProviderBaseUrl(resolvedBaseUrl, requestType)
           : undefined
         const requestOverrides = buildRequestOverrides(
           provider.requestOverrides,
           model?.requestOverrides,
-          model?.id ?? modelId
+          model?.id ?? resolvedModelId
         )
-        const serviceTier = resolveServiceTier(provider.builtinId, model?.id ?? modelId)
+        const serviceTier = resolveServiceTier(model, provider.builtinId)
         return {
           type: requestType,
           apiKey: provider.apiKey,
           baseUrl: normalizedBaseUrl,
-          model: modelId,
+          model: resolvedModelId,
           providerId: provider.id,
           providerBuiltinId: provider.builtinId,
+          computerUseEnabled: isModelComputerUseEnabled(model, requestType),
           ...(serviceTier ? { serviceTier } : {}),
           requiresApiKey: provider.requiresApiKey,
           ...(provider.useSystemProxy !== undefined
@@ -638,42 +1293,66 @@ export const useProviderStore = create<ProviderStore>()(
       },
 
       getFastProviderConfig: () => {
-        const { providers, activeProviderId, activeFastProviderId, activeFastModelId } = get()
-        const providerId = activeFastProviderId ?? activeProviderId
-        if (!providerId) return null
-        const provider = providers.find((p) => p.id === providerId)
+        const {
+          providers,
+          activeProviderId,
+          activeModelId,
+          activeFastProviderId,
+          activeFastModelId
+        } = get()
+        const hasExplicitFastSelection = Boolean(activeFastProviderId || activeFastModelId)
+        const explicitFastSelection = hasExplicitFastSelection
+          ? resolveProviderSelectionByCategory(
+              providers,
+              activeFastProviderId ?? activeProviderId,
+              activeFastModelId,
+              'chat'
+            )
+          : { providerId: null, modelId: '' }
+        const resolvedFastSelection =
+          explicitFastSelection.providerId && explicitFastSelection.modelId
+            ? explicitFastSelection
+            : (resolveDefaultFastSelection(providers) ??
+              resolveProviderSelectionByCategory(
+                providers,
+                activeProviderId,
+                activeModelId,
+                'chat'
+              ))
+        if (!resolvedFastSelection.providerId || !resolvedFastSelection.modelId) return null
+        const provider = providers.find((p) => p.id === resolvedFastSelection.providerId)
         if (!provider) return null
-        const model =
-          (activeFastModelId && provider.models.some((m) => m.id === activeFastModelId)
-            ? activeFastModelId
-            : resolveProviderDefaultModelIdByCategory(provider, 'chat') ||
-              resolveProviderDefaultModelId(provider)) || ''
+        const model = resolvedFastSelection.modelId
         const fastModel = provider.models.find((m) => m.id === model)
 
-        // Override provider type for image category models
+        // Image models should respect explicit protocol overrides (e.g. Gemini).
+        // Fall back to OpenAI Images only when an image model has no explicit type.
         let requestType = fastModel?.type ?? provider.type
-        if (fastModel?.category === 'image') {
+        if (fastModel?.category === 'image' && !fastModel?.type) {
           requestType = 'openai-images'
           console.log(
-            '[Provider Store] Image model detected in getFastProviderConfig, routing to openai-images provider',
+            '[Provider Store] Image model without explicit type in getFastProviderConfig, routing to openai-images provider',
             {
               modelId: model,
-              originalType: fastModel?.type,
               providerType: provider.type,
               finalType: requestType
             }
           )
         }
 
-        const normalizedBaseUrl = provider.baseUrl
-          ? normalizeProviderBaseUrl(provider.baseUrl, requestType)
+        const resolvedBaseUrl =
+          provider.builtinId === 'copilot-oauth'
+            ? resolveCopilotApiBaseUrl(provider, provider.oauth)
+            : provider.baseUrl
+        const normalizedBaseUrl = resolvedBaseUrl
+          ? normalizeProviderBaseUrl(resolvedBaseUrl, requestType)
           : undefined
         const requestOverrides = buildRequestOverrides(
           provider.requestOverrides,
           fastModel?.requestOverrides,
           fastModel?.id ?? model
         )
-        const serviceTier = resolveServiceTier(provider.builtinId, fastModel?.id ?? model)
+        const serviceTier = resolveServiceTier(fastModel, provider.builtinId)
         return {
           type: requestType,
           apiKey: provider.apiKey,
@@ -681,6 +1360,7 @@ export const useProviderStore = create<ProviderStore>()(
           model,
           providerId: provider.id,
           providerBuiltinId: provider.builtinId,
+          computerUseEnabled: isModelComputerUseEnabled(fastModel, requestType),
           ...(serviceTier ? { serviceTier } : {}),
           requiresApiKey: provider.requiresApiKey,
           ...(provider.useSystemProxy !== undefined
@@ -725,6 +1405,8 @@ export const useProviderStore = create<ProviderStore>()(
       storage: createJSONStorage(() => configStorage),
       partialize: (state) => ({
         providers: state.providers,
+        managedModels: state.managedModels,
+        managedModelTombstones: state.managedModelTombstones,
         activeProviderId: state.activeProviderId,
         activeModelId: state.activeModelId,
         activeFastProviderId: state.activeFastProviderId,
@@ -741,11 +1423,49 @@ export const useProviderStore = create<ProviderStore>()(
   )
 )
 
+function syncManagedModelsWithBuiltins(): void {
+  const state = useProviderStore.getState()
+  const builtinModels = collectBuiltinManagedModels()
+  if (builtinModels.length === 0) return
+
+  const tombstones = new Set(state.managedModelTombstones)
+  const managedModels = state.managedModels.map((model) => cloneManagedModelConfig(model))
+  const managedIndexes = new Map(
+    managedModels.map((model, index) => [model.normalizedKey, index] as const)
+  )
+  let changed = false
+
+  for (const builtinModel of builtinModels) {
+    if (tombstones.has(builtinModel.normalizedKey)) {
+      continue
+    }
+
+    const existingIndex = managedIndexes.get(builtinModel.normalizedKey)
+    if (existingIndex === undefined) {
+      managedIndexes.set(builtinModel.normalizedKey, managedModels.length)
+      managedModels.push(cloneManagedModelConfig(builtinModel))
+      changed = true
+      continue
+    }
+
+    const result = mergeManagedModelMissingFields(managedModels[existingIndex], builtinModel)
+    if (result.changed) {
+      managedModels[existingIndex] = result.model
+      changed = true
+    }
+  }
+
+  if (changed) {
+    useProviderStore.setState({ managedModels: sortManagedModels(managedModels) })
+  }
+}
+
 /**
  * Ensure built-in presets exist and pick a default active provider.
  * Safe to call multiple times — idempotent.
  */
 function ensureBuiltinPresets(): void {
+  syncManagedModelsWithBuiltins()
   for (const preset of builtinProviderPresets) {
     const existing = useProviderStore
       .getState()
@@ -766,16 +1486,15 @@ function ensureBuiltinPresets(): void {
       if (existing.userAgent !== preset.userAgent) {
         patch.userAgent = preset.userAgent
       }
-      if (existing.defaultModel !== preset.defaultModel) {
-        patch.defaultModel = preset.defaultModel
-      }
       if (preset.instructionsPrompt && existing.instructionsPrompt !== preset.instructionsPrompt) {
         patch.instructionsPrompt = preset.instructionsPrompt
+      } else if (preset.builtinId === 'codex-oauth' && existing.instructionsPrompt !== undefined) {
+        patch.instructionsPrompt = undefined
       }
       if (!existing.authMode) {
         patch.authMode = preset.authMode ?? 'apiKey'
       }
-      if (preset.builtinId === 'codex-oauth') {
+      if (preset.builtinId === 'codex-oauth' || preset.builtinId === 'copilot-oauth') {
         const trimmedBaseUrl = existing.baseUrl.trim().replace(/\/+$/, '')
         if (
           !trimmedBaseUrl ||
@@ -817,6 +1536,40 @@ function ensureBuiltinPresets(): void {
             merged.scope = preset.oauthConfig.scope
             changed = true
           }
+          if (merged.flowType === undefined && preset.oauthConfig.flowType !== undefined) {
+            merged.flowType = preset.oauthConfig.flowType
+            changed = true
+          }
+          if (!merged.host && preset.oauthConfig.host) {
+            merged.host = preset.oauthConfig.host
+            changed = true
+          }
+          if (!merged.apiHost && preset.oauthConfig.apiHost) {
+            merged.apiHost = preset.oauthConfig.apiHost
+            changed = true
+          }
+          if (!merged.deviceCodeUrl && preset.oauthConfig.deviceCodeUrl) {
+            merged.deviceCodeUrl = preset.oauthConfig.deviceCodeUrl
+            changed = true
+          }
+          if (!merged.tokenExchangeUrl && preset.oauthConfig.tokenExchangeUrl) {
+            merged.tokenExchangeUrl = preset.oauthConfig.tokenExchangeUrl
+            changed = true
+          }
+          if (
+            merged.deviceCodeRequestMode === undefined &&
+            preset.oauthConfig.deviceCodeRequestMode !== undefined
+          ) {
+            merged.deviceCodeRequestMode = preset.oauthConfig.deviceCodeRequestMode
+            changed = true
+          }
+          if (
+            merged.useSystemProxy === undefined &&
+            preset.oauthConfig.useSystemProxy !== undefined
+          ) {
+            merged.useSystemProxy = preset.oauthConfig.useSystemProxy
+            changed = true
+          }
           if (!merged.redirectPath && preset.oauthConfig.redirectPath) {
             merged.redirectPath = preset.oauthConfig.redirectPath
             changed = true
@@ -828,6 +1581,89 @@ function ensureBuiltinPresets(): void {
           if (merged.usePkce === undefined && preset.oauthConfig.usePkce !== undefined) {
             merged.usePkce = preset.oauthConfig.usePkce
             changed = true
+          }
+          if (merged.flowType === undefined && preset.oauthConfig.flowType !== undefined) {
+            merged.flowType = preset.oauthConfig.flowType
+            changed = true
+          }
+          if (!merged.host && preset.oauthConfig.host) {
+            merged.host = preset.oauthConfig.host
+            changed = true
+          }
+          if (!merged.apiHost && preset.oauthConfig.apiHost) {
+            merged.apiHost = preset.oauthConfig.apiHost
+            changed = true
+          }
+          if (!merged.deviceCodeUrl && preset.oauthConfig.deviceCodeUrl) {
+            merged.deviceCodeUrl = preset.oauthConfig.deviceCodeUrl
+            changed = true
+          }
+          if (!merged.tokenExchangeUrl && preset.oauthConfig.tokenExchangeUrl) {
+            merged.tokenExchangeUrl = preset.oauthConfig.tokenExchangeUrl
+            changed = true
+          }
+          if (
+            merged.deviceCodeRequestMode === undefined &&
+            preset.oauthConfig.deviceCodeRequestMode !== undefined
+          ) {
+            merged.deviceCodeRequestMode = preset.oauthConfig.deviceCodeRequestMode
+            changed = true
+          }
+          if (!merged.tokenRequestHeaders && preset.oauthConfig.tokenRequestHeaders) {
+            merged.tokenRequestHeaders = { ...preset.oauthConfig.tokenRequestHeaders }
+            changed = true
+          }
+          if (!merged.refreshRequestHeaders && preset.oauthConfig.refreshRequestHeaders) {
+            merged.refreshRequestHeaders = { ...preset.oauthConfig.refreshRequestHeaders }
+            changed = true
+          }
+          if (!merged.deviceCodeRequestHeaders && preset.oauthConfig.deviceCodeRequestHeaders) {
+            merged.deviceCodeRequestHeaders = { ...preset.oauthConfig.deviceCodeRequestHeaders }
+            changed = true
+          }
+
+          if (preset.oauthConfig.tokenRequestHeaders) {
+            if (!merged.tokenRequestHeaders) {
+              merged.tokenRequestHeaders = { ...preset.oauthConfig.tokenRequestHeaders }
+              changed = true
+            } else {
+              for (const [key, value] of Object.entries(preset.oauthConfig.tokenRequestHeaders)) {
+                if (!merged.tokenRequestHeaders[key]) {
+                  merged.tokenRequestHeaders[key] = value
+                  changed = true
+                }
+              }
+            }
+          }
+
+          if (preset.oauthConfig.refreshRequestHeaders) {
+            if (!merged.refreshRequestHeaders) {
+              merged.refreshRequestHeaders = { ...preset.oauthConfig.refreshRequestHeaders }
+              changed = true
+            } else {
+              for (const [key, value] of Object.entries(preset.oauthConfig.refreshRequestHeaders)) {
+                if (!merged.refreshRequestHeaders[key]) {
+                  merged.refreshRequestHeaders[key] = value
+                  changed = true
+                }
+              }
+            }
+          }
+
+          if (preset.oauthConfig.deviceCodeRequestHeaders) {
+            if (!merged.deviceCodeRequestHeaders) {
+              merged.deviceCodeRequestHeaders = { ...preset.oauthConfig.deviceCodeRequestHeaders }
+              changed = true
+            } else {
+              for (const [key, value] of Object.entries(
+                preset.oauthConfig.deviceCodeRequestHeaders
+              )) {
+                if (!merged.deviceCodeRequestHeaders[key]) {
+                  merged.deviceCodeRequestHeaders[key] = value
+                  changed = true
+                }
+              }
+            }
           }
 
           if (preset.oauthConfig.extraParams) {
@@ -861,6 +1697,21 @@ function ensureBuiltinPresets(): void {
           patch.requestOverrides = { ...preset.requestOverrides }
         } else if (!existing.requestOverrides) {
           patch.requestOverrides = { ...preset.requestOverrides }
+        } else if (preset.builtinId === 'copilot-oauth') {
+          const merged = { ...(existing.requestOverrides ?? {}) }
+          let changed = false
+          if (preset.requestOverrides.headers) {
+            merged.headers = { ...(merged.headers ?? {}) }
+            for (const [key, value] of Object.entries(preset.requestOverrides.headers)) {
+              if (!merged.headers[key]) {
+                merged.headers[key] = value
+                changed = true
+              }
+            }
+          }
+          if (changed) {
+            patch.requestOverrides = merged
+          }
         }
       }
       if (preset.ui) {
@@ -880,11 +1731,22 @@ function ensureBuiltinPresets(): void {
           }
         }
       }
+      const updatedModels = mergeBuiltinModels(
+        existing.models,
+        preset.defaultModels,
+        useProviderStore.getState().managedModels,
+        preset.deprecatedModelIds
+      )
+      const resolvedDefaultModel = preset.defaultModel
+        ? resolveModelIdByKey(updatedModels, preset.defaultModel) ?? preset.defaultModel
+        : undefined
+      if (existing.defaultModel !== resolvedDefaultModel) {
+        patch.defaultModel = resolvedDefaultModel
+      }
       if (Object.keys(patch).length > 0) {
         useProviderStore.getState().updateProvider(existing.id, patch)
       }
 
-      const updatedModels = mergeBuiltinModels(existing.models, preset.defaultModels)
       if (JSON.stringify(updatedModels) !== JSON.stringify(existing.models)) {
         useProviderStore.getState().setProviderModels(existing.id, updatedModels)
       }
@@ -893,13 +1755,16 @@ function ensureBuiltinPresets(): void {
 
   if (!useProviderStore.getState().activeProviderId) {
     const providers = useProviderStore.getState().providers
-    const firstEnabled = providers.find((p) => p.enabled)
-    if (firstEnabled) {
-      useProviderStore.getState().setActiveProvider(firstEnabled.id)
+    const firstAvailableProviderId = resolveFirstProviderIdByCategory(providers, 'chat')
+    if (firstAvailableProviderId) {
+      useProviderStore.getState().setActiveProvider(firstAvailableProviderId)
     }
   }
 
   const state = useProviderStore.getState()
+  const defaultFastSelection = resolveDefaultFastSelection(state.providers)
+  const shouldAdoptDefaultFastSelection =
+    Boolean(defaultFastSelection) && !state.activeFastProviderId && !state.activeFastModelId
   const activeProvider = state.activeProviderId
     ? state.providers.find((provider) => provider.id === state.activeProviderId)
     : null
@@ -935,13 +1800,27 @@ function ensureBuiltinPresets(): void {
     }
   }
 
-  const fastProviderId = state.activeFastProviderId ?? state.activeProviderId
+  const fastProviderId = shouldAdoptDefaultFastSelection
+    ? (defaultFastSelection?.providerId ?? state.activeFastProviderId ?? state.activeProviderId)
+    : (state.activeFastProviderId ?? state.activeProviderId)
   if (fastProviderId) {
     const fastProvider = state.providers.find((provider) => provider.id === fastProviderId)
     if (fastProvider) {
-      if (!state.activeFastProviderId) {
-        state.setActiveFastProvider(fastProvider.id)
+      if (shouldAdoptDefaultFastSelection) {
+        if (state.activeFastProviderId !== fastProvider.id) {
+          state.setActiveFastProvider(fastProvider.id)
+        }
+        const preferredFastModelId =
+          defaultFastSelection?.providerId === fastProvider.id
+            ? defaultFastSelection.modelId
+            : resolveValidModelIdByCategory(fastProvider, '', 'chat')
+        if (preferredFastModelId && preferredFastModelId !== state.activeFastModelId) {
+          state.setActiveFastModel(preferredFastModelId)
+        }
       } else {
+        if (!state.activeFastProviderId && state.activeFastModelId) {
+          useProviderStore.setState({ activeFastProviderId: fastProvider.id })
+        }
         const nextFastModelId = resolveValidModelIdByCategory(
           fastProvider,
           state.activeFastModelId,

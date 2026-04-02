@@ -39,13 +39,13 @@ git push origin feature/your-feature-name
 
 使用 [Conventional Commits](https://www.conventionalcommits.org/) 规范：
 
-| 类型 | 说明 |
-|------|------|
-| `feat` | 新功能 |
-| `fix` | Bug 修复 |
-| `docs` | 文档更新 |
-| `refactor` | 代码重构 |
-| `chore` | 构建/工具链变更 |
+| 类型       | 说明            |
+| ---------- | --------------- |
+| `feat`     | 新功能          |
+| `fix`      | Bug 修复        |
+| `docs`     | 文档更新        |
+| `refactor` | 代码重构        |
+| `chore`    | 构建/工具链变更 |
 
 ## 添加新工具 / Adding a New Tool
 
@@ -68,18 +68,18 @@ export const myTool: ToolHandler = {
     }
   },
   async execute(input, ctx) {
-    const { param } = input as { param: string };
+    const { param } = input as { param: string }
     // 实现逻辑
-    return { type: 'text', text: `结果: ${param}` };
+    return { type: 'text', text: `结果: ${param}` }
   }
-};
+}
 ```
 
 ## 添加新插件 / Adding a New Plugin
 
-1. 在 `src/main/plugins/providers/` 创建插件目录
-2. 实现 `MessagingPluginService` 接口
-3. 在 `PluginManager` 中注册工厂
+1. 在 `src/main/channels/providers/` 创建平台目录
+2. 实现 `MessagingChannelService` 接口
+3. 在 `ChannelManager` 中注册工厂
 
 ## 问题反馈 / Reporting Issues
 

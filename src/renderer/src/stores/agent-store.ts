@@ -3,7 +3,7 @@ import { immer } from 'zustand/middleware/immer'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { ToolCallState } from '../lib/agent/types'
 import type { SubAgentEvent } from '../lib/agent/sub-agents/types'
-import type { ToolResultContent } from '../lib/api/types'
+import type { ToolResultContent, UnifiedMessage, ContentBlock, TokenUsage } from '../lib/api/types'
 import { ipcStorage } from '../lib/ipc/ipc-storage'
 import { ipcClient } from '../lib/ipc/ipc-client'
 import { IPC } from '../lib/ipc/channels'
@@ -12,23 +12,31 @@ import { IPC } from '../lib/ipc/channels'
 // callbacks and don't need to trigger React re-renders.
 const approvalResolvers = new Map<string, (approved: boolean) => void>()
 
-const MAX_TRACKED_TOOL_CALLS = 300
-const MAX_TRACKED_SUBAGENT_TOOL_CALLS = 120
-const MAX_COMPLETED_SUBAGENTS = 80
-const MAX_SUBAGENT_HISTORY = 200
-const MAX_STREAMING_TEXT_CHARS = 12_000
-const MAX_TOOL_INPUT_PREVIEW_CHARS = 8_000
-const MAX_TOOL_OUTPUT_TEXT_CHARS = 12_000
+const MAX_TRACKED_TOOL_CALLS = 200
+const MAX_TRACKED_SUBAGENT_TOOL_CALLS = 80
+const MAX_COMPLETED_SUBAGENTS = 30
+const MAX_SUBAGENT_HISTORY = 50
+const MAX_STREAMING_TEXT_CHARS = 8_000
+const MAX_TOOL_INPUT_PREVIEW_CHARS = 6_000
+const MAX_TOOL_OUTPUT_TEXT_CHARS = 8_000
 const MAX_TOOL_ERROR_CHARS = 2_000
 const MAX_IMAGE_BASE64_CHARS = 4_096
-const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 20_000
-const MAX_BACKGROUND_PROCESS_ENTRIES = 120
-const MAX_RUN_CHANGESETS = 120
+const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 12_000
+const MAX_BACKGROUND_PROCESS_ENTRIES = 60
+const MAX_RUN_CHANGESETS = 40
+const MAX_FILE_SNAPSHOT_TEXT_CHARS = 30_000
 const BACKGROUND_PROCESS_OUTPUT_FLUSH_MS = 80
+const MAX_SUBAGENT_TRANSCRIPT_MESSAGES = 120
 
 function truncateText(value: string, max: number): string {
   if (value.length <= max) return value
   return `${value.slice(0, max)}\n... [truncated, ${value.length} chars total]`
+}
+
+function trimSubAgentTranscript(sa: { transcript: UnifiedMessage[] }): void {
+  if (sa.transcript.length <= MAX_SUBAGENT_TRANSCRIPT_MESSAGES) return
+  const excess = sa.transcript.length - MAX_SUBAGENT_TRANSCRIPT_MESSAGES
+  sa.transcript.splice(0, excess)
 }
 
 function normalizeToolInput(input: Record<string, unknown>): Record<string, unknown> {
@@ -139,16 +147,88 @@ function trimToolCallArray(toolCalls: ToolCallState[]): void {
   toolCalls.splice(0, toolCalls.length - MAX_TRACKED_TOOL_CALLS)
 }
 
+type SubAgentReportStatus = 'pending' | 'submitted' | 'retrying' | 'fallback' | 'missing'
+
 interface SubAgentState {
   name: string
+  displayName?: string
   toolUseId: string
   sessionId?: string
+  description: string
+  prompt: string
   isRunning: boolean
+  success: boolean | null
+  errorMessage: string | null
   iteration: number
   toolCalls: ToolCallState[]
   streamingText: string
+  transcript: UnifiedMessage[]
+  currentAssistantMessageId: string | null
+  /** Final result text resolved from the sub-agent's actual output. */
+  report: string
+  reportStatus: SubAgentReportStatus
+  usage?: TokenUsage
   startedAt: number
   completedAt: number | null
+}
+
+function sumOptionalUsageValue(current?: number, incoming?: number): number | undefined {
+  const total = (current ?? 0) + (incoming ?? 0)
+  return total || undefined
+}
+
+function mergeMessageUsage(
+  current: UnifiedMessage['usage'],
+  incoming: UnifiedMessage['usage']
+): UnifiedMessage['usage'] {
+  if (!incoming) return current
+  if (!current) {
+    return {
+      ...incoming,
+      requestTimings: incoming.requestTimings ? [...incoming.requestTimings] : undefined
+    }
+  }
+
+  return {
+    inputTokens: current.inputTokens + incoming.inputTokens,
+    outputTokens: current.outputTokens + incoming.outputTokens,
+    billableInputTokens: sumOptionalUsageValue(
+      current.billableInputTokens,
+      incoming.billableInputTokens
+    ),
+    cacheCreationTokens: sumOptionalUsageValue(
+      current.cacheCreationTokens,
+      incoming.cacheCreationTokens
+    ),
+    cacheReadTokens: sumOptionalUsageValue(current.cacheReadTokens, incoming.cacheReadTokens),
+    reasoningTokens: sumOptionalUsageValue(current.reasoningTokens, incoming.reasoningTokens),
+    contextTokens: incoming.contextTokens ?? current.contextTokens,
+    totalDurationMs: sumOptionalUsageValue(current.totalDurationMs, incoming.totalDurationMs),
+    requestTimings: [...(current.requestTimings ?? []), ...(incoming.requestTimings ?? [])]
+  }
+}
+
+function finalizeAssistantMessage(
+  sa: SubAgentState,
+  usage?: UnifiedMessage['usage'],
+  providerResponseId?: string,
+  clearCurrentMessage = true
+): void {
+  if (!sa.currentAssistantMessageId) return
+  const message = sa.transcript.find((item) => item.id === sa.currentAssistantMessageId)
+  if (!message || message.role !== 'assistant') {
+    sa.currentAssistantMessageId = null
+    return
+  }
+  if (usage) {
+    message.usage = mergeMessageUsage(message.usage, usage)
+  }
+  if (providerResponseId) {
+    message.providerResponseId = providerResponseId
+  }
+  if (clearCurrentMessage) {
+    sa.currentAssistantMessageId = null
+  }
 }
 
 function trimCompletedSubAgentsMap(map: Record<string, SubAgentState>): void {
@@ -163,6 +243,187 @@ function trimCompletedSubAgentsMap(map: Record<string, SubAgentState>): void {
 function trimSubAgentHistory(history: SubAgentState[]): void {
   if (history.length <= MAX_SUBAGENT_HISTORY) return
   history.splice(0, history.length - MAX_SUBAGENT_HISTORY)
+}
+
+const MAX_HISTORY_TRANSCRIPT_MESSAGES = 20
+const MAX_HISTORY_TOOL_CALLS = 30
+const MAX_HISTORY_REPORT_CHARS = 4_000
+
+function compactSubAgentForHistory(sa: SubAgentState): SubAgentState {
+  return {
+    ...sa,
+    streamingText: '',
+    report:
+      sa.report.length > MAX_HISTORY_REPORT_CHARS
+        ? `${sa.report.slice(0, MAX_HISTORY_REPORT_CHARS)}\n[truncated]`
+        : sa.report,
+    toolCalls:
+      sa.toolCalls.length > MAX_HISTORY_TOOL_CALLS
+        ? sa.toolCalls.slice(-MAX_HISTORY_TOOL_CALLS)
+        : sa.toolCalls,
+    transcript:
+      sa.transcript.length > MAX_HISTORY_TRANSCRIPT_MESSAGES
+        ? sa.transcript.slice(-MAX_HISTORY_TRANSCRIPT_MESSAGES)
+        : sa.transcript
+  }
+}
+
+function cloneSubAgentStateSnapshot(sa: SubAgentState): SubAgentState {
+  const compacted = compactSubAgentForHistory(sa)
+  try {
+    return JSON.parse(JSON.stringify(compacted)) as SubAgentState
+  } catch {
+    return {
+      ...compacted,
+      toolCalls: compacted.toolCalls.map((toolCall) => ({ ...toolCall })),
+      transcript: compacted.transcript.map((message) => ({
+        ...message,
+        content: Array.isArray(message.content)
+          ? JSON.parse(JSON.stringify(message.content))
+          : message.content
+      }))
+    }
+  }
+}
+
+function upsertSubAgentHistory(history: SubAgentState[], sa: SubAgentState): void {
+  const snapshot = cloneSubAgentStateSnapshot(sa)
+  const existingIndex = history.findIndex((item) => item.toolUseId === snapshot.toolUseId)
+  if (existingIndex !== -1) {
+    const existing = history[existingIndex]
+    if (
+      existing.status === snapshot.status &&
+      existing.isRunning === snapshot.isRunning &&
+      existing.success === snapshot.success &&
+      existing.startedAt === snapshot.startedAt &&
+      existing.completedAt === snapshot.completedAt &&
+      existing.error === snapshot.error &&
+      existing.reportStatus === snapshot.reportStatus &&
+      existing.title === snapshot.title &&
+      existing.summary === snapshot.summary &&
+      existing.model === snapshot.model &&
+      existing.provider === snapshot.provider &&
+      existing.toolUseId === snapshot.toolUseId &&
+      existing.sessionId === snapshot.sessionId &&
+      existing.sessionTitle === snapshot.sessionTitle &&
+      existing.inputText === snapshot.inputText &&
+      existing.thinking === snapshot.thinking &&
+      existing.outputText === snapshot.outputText &&
+      existing.transcript.length === snapshot.transcript.length &&
+      existing.toolCalls.length === snapshot.toolCalls.length
+    ) {
+      return
+    }
+    history[existingIndex] = snapshot
+  } else {
+    history.push(snapshot)
+  }
+  trimSubAgentHistory(history)
+}
+
+function getCurrentAssistantBlocks(sa: SubAgentState): ContentBlock[] | null {
+  if (!sa.currentAssistantMessageId) return null
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
+  if (!assistant) return null
+  if (!Array.isArray(assistant.content)) {
+    assistant.content = []
+  }
+  return assistant.content
+}
+
+function appendThinkingToSubAgent(sa: SubAgentState, thinking: string): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks) return
+  const last = blocks[blocks.length - 1]
+  if (last?.type === 'thinking') {
+    last.thinking += thinking
+    return
+  }
+  blocks.push({ type: 'thinking', thinking })
+}
+
+function appendThinkingEncryptedToSubAgent(
+  sa: SubAgentState,
+  encryptedContent: string,
+  provider: 'anthropic' | 'openai-responses' | 'google'
+): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks || !encryptedContent) return
+
+  let target: Extract<ContentBlock, { type: 'thinking' }> | null = null
+  let providerMatchedTarget: Extract<ContentBlock, { type: 'thinking' }> | null = null
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index]
+    if (block.type !== 'thinking') continue
+    if (!block.encryptedContent) {
+      target = block
+      break
+    }
+    if (!providerMatchedTarget && block.encryptedContentProvider === provider) {
+      providerMatchedTarget = block
+    }
+  }
+
+  target = target ?? providerMatchedTarget
+  if (target) {
+    target.encryptedContent = encryptedContent
+    target.encryptedContentProvider = provider
+    return
+  }
+
+  blocks.push({
+    type: 'thinking',
+    thinking: '',
+    encryptedContent,
+    encryptedContentProvider: provider
+  })
+}
+
+function appendTextToSubAgent(sa: SubAgentState, text: string): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks) return
+  const last = blocks[blocks.length - 1]
+  if (last?.type === 'text') {
+    last.text += text
+    return
+  }
+  blocks.push({ type: 'text', text })
+}
+
+function appendBlockToSubAgent(sa: SubAgentState, block: ContentBlock): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks) return
+  blocks.push(block)
+}
+
+function upsertToolUseBlockInSubAgent(
+  sa: SubAgentState,
+  block: Extract<ContentBlock, { type: 'tool_use' }>
+): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks) return
+  const existing = blocks.findIndex((item) => item.type === 'tool_use' && item.id === block.id)
+  if (existing !== -1) {
+    blocks[existing] = block
+    return
+  }
+  blocks.push(block)
+}
+
+function updateToolUseInputInSubAgent(
+  sa: SubAgentState,
+  toolCallId: string,
+  partialInput: Record<string, unknown>
+): void {
+  const blocks = getCurrentAssistantBlocks(sa)
+  if (!blocks) return
+  const toolUseBlock = blocks.find(
+    (item): item is Extract<ContentBlock, { type: 'tool_use' }> =>
+      item.type === 'tool_use' && item.id === toolCallId
+  )
+  if (toolUseBlock) {
+    toolUseBlock.input = partialInput
+  }
 }
 
 function rebuildRunningSubAgentDerived(state: {
@@ -338,6 +599,25 @@ export interface AgentRunChangeSet {
   updatedAt: number
 }
 
+function truncateFileSnapshot(snapshot: AgentFileSnapshot): AgentFileSnapshot {
+  if (!snapshot.text || snapshot.text.length <= MAX_FILE_SNAPSHOT_TEXT_CHARS) return snapshot
+  return {
+    ...snapshot,
+    text: `${snapshot.text.slice(0, MAX_FILE_SNAPSHOT_TEXT_CHARS)}\n... [truncated, ${snapshot.text.length} chars total]`
+  }
+}
+
+function truncateChangeSet(changeset: AgentRunChangeSet): AgentRunChangeSet {
+  return {
+    ...changeset,
+    changes: changeset.changes.map((change) => ({
+      ...change,
+      before: truncateFileSnapshot(change.before),
+      after: truncateFileSnapshot(change.after)
+    }))
+  }
+}
+
 function isAgentChangeError(value: unknown): value is { error: string } {
   if (!value || typeof value !== 'object') return false
   return typeof (value as { error?: unknown }).error === 'string'
@@ -477,17 +757,24 @@ export const useAgentStore = create<AgentStore>()(
 
       switchToolCallSession: (prevSessionId, nextSessionId) => {
         set((state) => {
-          // Save current tool calls to cache for the previous session
           if (prevSessionId) {
             state.sessionToolCallsCache[prevSessionId] = {
               pending: [...state.pendingToolCalls],
               executed: [...state.executedToolCalls]
             }
           }
-          // Restore tool calls from cache for the next session (or clear)
           const cached = nextSessionId ? state.sessionToolCallsCache[nextSessionId] : undefined
           state.pendingToolCalls = cached?.pending ?? []
           state.executedToolCalls = cached?.executed ?? []
+
+          // Evict oldest cached sessions to cap memory (keep at most 10)
+          const cacheKeys = Object.keys(state.sessionToolCallsCache)
+          if (cacheKeys.length > 10) {
+            const toRemove = cacheKeys.slice(0, cacheKeys.length - 10)
+            for (const key of toRemove) {
+              delete state.sessionToolCallsCache[key]
+            }
+          }
         })
       },
 
@@ -765,20 +1052,14 @@ export const useAgentStore = create<AgentStore>()(
 
       clearToolCalls: () => {
         set((state) => {
-          // Move completed SubAgents to history before clearing
-          const completed = Object.values(state.completedSubAgents)
-          if (completed.length > 0) {
-            state.subAgentHistory.push(...completed)
-            trimSubAgentHistory(state.subAgentHistory)
-          }
           state.pendingToolCalls = []
           state.executedToolCalls = []
           state.activeSubAgents = {}
-          state.completedSubAgents = {}
           state.runningSubAgentNamesSig = ''
           state.runningSubAgentSessionIdsSig = ''
           state.approvedToolNames = []
           state.foregroundShellExecByToolUseId = {}
+          state.sessionToolCallsCache = {}
         })
       },
 
@@ -789,7 +1070,7 @@ export const useAgentStore = create<AgentStore>()(
           if (isAgentChangeError(result)) return
           set((state) => {
             if (result && typeof result === 'object' && 'runId' in result) {
-              state.runChangesByRunId[runId] = result as AgentRunChangeSet
+              state.runChangesByRunId[runId] = truncateChangeSet(result as AgentRunChangeSet)
               trimRunChangesMap(state.runChangesByRunId)
             } else {
               delete state.runChangesByRunId[runId]
@@ -811,7 +1092,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -832,7 +1113,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -853,7 +1134,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -877,7 +1158,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = changeset
+              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -890,28 +1171,151 @@ export const useAgentStore = create<AgentStore>()(
       handleSubAgentEvent: (event, sessionId) => {
         set((state) => {
           const id = event.toolUseId
+          const existing = state.activeSubAgents[id] ?? state.completedSubAgents[id]
           switch (event.type) {
-            case 'sub_agent_start':
+            case 'sub_agent_start': {
+              if (existing?.isRunning) return
               state.activeSubAgents[id] = {
                 name: event.subAgentName,
+                displayName: String(event.input.subagent_type ?? event.subAgentName),
                 toolUseId: id,
                 sessionId,
+                description: String(event.input.description ?? ''),
+                prompt: String(
+                  event.input.prompt ??
+                    event.input.query ??
+                    event.input.task ??
+                    event.input.target ??
+                    ''
+                ),
                 isRunning: true,
+                success: null,
+                errorMessage: null,
                 iteration: 0,
                 toolCalls: [],
                 streamingText: '',
+                transcript: [event.promptMessage],
+                currentAssistantMessageId: null,
+                report: '',
+                reportStatus: 'pending',
+                usage: undefined,
                 startedAt: Date.now(),
                 completedAt: null
               }
               rebuildRunningSubAgentDerived(state)
               break
+            }
             case 'sub_agent_iteration': {
-              const sa = state.activeSubAgents[id]
-              if (sa) sa.iteration = event.iteration
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                sa.iteration = event.iteration
+                const currentAssistant = sa.currentAssistantMessageId
+                  ? sa.transcript.find((item) => item.id === sa.currentAssistantMessageId)
+                  : null
+                if (!currentAssistant || currentAssistant.role !== 'assistant') {
+                  sa.currentAssistantMessageId = event.assistantMessage.id
+                  sa.transcript.push(event.assistantMessage)
+                }
+              }
+              break
+            }
+            case 'sub_agent_thinking_delta': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) appendThinkingToSubAgent(sa, event.thinking)
+              break
+            }
+            case 'sub_agent_thinking_encrypted': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                appendThinkingEncryptedToSubAgent(
+                  sa,
+                  event.thinkingEncryptedContent,
+                  event.thinkingEncryptedProvider
+                )
+              }
+              break
+            }
+            case 'sub_agent_tool_use_streaming_start': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                upsertToolUseBlockInSubAgent(sa, {
+                  type: 'tool_use',
+                  id: event.toolCallId,
+                  name: event.toolName,
+                  input: {},
+                  ...(event.toolCallExtraContent
+                    ? { extraContent: event.toolCallExtraContent }
+                    : {})
+                })
+              }
+              break
+            }
+            case 'sub_agent_tool_use_args_delta': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) updateToolUseInputInSubAgent(sa, event.toolCallId, event.partialInput)
+              break
+            }
+            case 'sub_agent_tool_use_generated': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) upsertToolUseBlockInSubAgent(sa, event.toolUseBlock)
+              break
+            }
+            case 'sub_agent_image_generated': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) appendBlockToSubAgent(sa, event.imageBlock)
+              break
+            }
+            case 'sub_agent_image_error': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                appendBlockToSubAgent(sa, {
+                  type: 'image_error',
+                  code: event.imageError.code,
+                  message: event.imageError.message
+                })
+              }
+              break
+            }
+            case 'sub_agent_message_end': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                finalizeAssistantMessage(sa, event.usage, event.providerResponseId, false)
+                if (event.usage) {
+                  sa.usage = mergeMessageUsage(sa.usage, event.usage)
+                }
+              }
+              break
+            }
+            case 'sub_agent_tool_result_message': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                sa.transcript.push(event.message)
+                trimSubAgentTranscript(sa)
+                upsertSubAgentHistory(state.subAgentHistory, sa)
+              }
+              break
+            }
+            case 'sub_agent_user_message': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                finalizeAssistantMessage(sa)
+                sa.transcript.push(event.message)
+                trimSubAgentTranscript(sa)
+                upsertSubAgentHistory(state.subAgentHistory, sa)
+              }
+              break
+            }
+            case 'sub_agent_report_update': {
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              if (sa) {
+                sa.report = event.report
+                sa.reportStatus = event.status
+                upsertSubAgentHistory(state.subAgentHistory, sa)
+              }
               break
             }
             case 'sub_agent_tool_call': {
-              const sa = state.activeSubAgents[id]
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 const normalizedToolCall = normalizeToolCall(event.toolCall)
                 const existing = sa.toolCalls.find((t) => t.id === normalizedToolCall.id)
@@ -927,21 +1331,31 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_text_delta': {
-              const sa = state.activeSubAgents[id]
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 sa.streamingText = truncateText(
                   sa.streamingText + event.text,
                   MAX_STREAMING_TEXT_CHARS
                 )
+                appendTextToSubAgent(sa, event.text)
               }
               break
             }
             case 'sub_agent_end': {
-              const sa = state.activeSubAgents[id]
+              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 sa.isRunning = false
+                sa.success = event.result.success
+                sa.errorMessage = event.result.error ?? null
                 sa.completedAt = Date.now()
+                finalizeAssistantMessage(sa)
+                if (!sa.report.trim() && event.result.output.trim()) {
+                  sa.report = event.result.output
+                }
+                sa.usage = event.result.usage
+                sa.reportStatus = sa.report.trim() ? 'submitted' : 'missing'
                 state.completedSubAgents[id] = sa
+                upsertSubAgentHistory(state.subAgentHistory, sa)
                 trimCompletedSubAgentsMap(state.completedSubAgents)
                 delete state.activeSubAgents[id]
                 rebuildRunningSubAgentDerived(state)
@@ -1047,10 +1461,16 @@ export const useAgentStore = create<AgentStore>()(
       name: 'opencowork-agent',
       storage: createJSONStorage(() => ipcStorage),
       partialize: (state) => ({
-        completedSubAgents: state.completedSubAgents,
-        subAgentHistory: state.subAgentHistory,
-        approvedToolNames: state.approvedToolNames
-      })
+        approvedToolNames: state.approvedToolNames,
+        subAgentHistory: state.subAgentHistory
+      }),
+      onRehydrateStorage: () => (state) => {
+        if (!state) return
+        // Trim oversized persisted history from previous versions
+        if (state.subAgentHistory.length > MAX_SUBAGENT_HISTORY) {
+          state.subAgentHistory.splice(0, state.subAgentHistory.length - MAX_SUBAGENT_HISTORY)
+        }
+      }
     }
   )
 )

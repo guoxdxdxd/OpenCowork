@@ -7,7 +7,8 @@ import type {
   TextBlock,
   ThinkingBlock,
   ToolUseBlock,
-  ToolResultContent
+  ToolResultContent,
+  ToolDefinition
 } from '../lib/api/types'
 import { ipcClient } from '../lib/ipc/ipc-client'
 import { useAgentStore } from './agent-store'
@@ -16,8 +17,20 @@ import { useTaskStore } from './task-store'
 import { usePlanStore } from './plan-store'
 import { useUIStore } from './ui-store'
 import { useProviderStore } from './provider-store'
+import { useSettingsStore } from './settings-store'
+import { isStructuredToolErrorText } from '@renderer/lib/tools/tool-result-format'
 
-export type SessionMode = 'chat' | 'cowork' | 'code'
+export type SessionMode = 'chat' | 'clarify' | 'cowork' | 'code' | 'acp'
+
+export interface SessionPromptSnapshot {
+  mode: SessionMode
+  planMode: boolean
+  systemPrompt: string
+  toolDefs: ToolDefinition[]
+  projectId?: string
+  workingFolder?: string
+  sshConnectionId?: string | null
+}
 
 export interface Project {
   id: string
@@ -27,6 +40,9 @@ export interface Project {
   workingFolder?: string
   sshConnectionId?: string
   pluginId?: string
+  pinned?: boolean
+  providerId?: string
+  modelId?: string
 }
 
 export interface Session {
@@ -56,6 +72,9 @@ export interface Session {
   providerId?: string
   /** Bound model ID (null = use global active model) */
   modelId?: string
+  /** In-memory prompt snapshot reused within the current app session */
+  promptSnapshot?: SessionPromptSnapshot
+  longRunningMode?: boolean
 }
 
 // --- DB persistence helpers (fire-and-forget) ---
@@ -74,7 +93,8 @@ function dbCreateSession(s: Session): void {
       sshConnectionId: s.sshConnectionId,
       pinned: s.pinned,
       providerId: s.providerId,
-      modelId: s.modelId
+      modelId: s.modelId,
+      longRunningMode: s.longRunningMode
     })
     .catch(() => {})
 }
@@ -99,6 +119,7 @@ function dbCreateProject(project: Project): void {
       workingFolder: project.workingFolder,
       sshConnectionId: project.sshConnectionId,
       pluginId: project.pluginId,
+      pinned: project.pinned,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt
     })
@@ -171,6 +192,15 @@ function dbFlushMessageImmediate(msg: UnifiedMessage): void {
   dbUpdateMessage(msg.id, msg.content, msg.usage)
 }
 
+function clearPendingMessageFlushes(messageIds: string[]): void {
+  for (const messageId of messageIds) {
+    const pending = _pendingFlush.get(messageId)
+    if (!pending) continue
+    clearTimeout(pending)
+    _pendingFlush.delete(messageId)
+  }
+}
+
 // --- Store ---
 
 interface ChatStore {
@@ -194,6 +224,7 @@ interface ChatStore {
   ) => Promise<string>
   renameProject: (projectId: string, name: string) => void
   deleteProject: (projectId: string) => Promise<void>
+  togglePinProject: (projectId: string) => void
   updateProjectDirectory: (
     projectId: string,
     patch: Partial<{
@@ -203,7 +234,11 @@ interface ChatStore {
   ) => void
 
   // Session CRUD
-  createSession: (mode: SessionMode, projectId?: string | null) => string
+  createSession: (
+    mode: SessionMode,
+    projectId?: string | null,
+    options?: { longRunningMode?: boolean }
+  ) => string
   deleteSession: (id: string) => void
   setActiveSession: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
@@ -212,6 +247,10 @@ interface ChatStore {
   setWorkingFolder: (sessionId: string, folder: string) => void
   setSshConnectionId: (sessionId: string, connectionId: string | null) => void
   updateSessionModel: (sessionId: string, providerId: string, modelId: string) => void
+  clearSessionModelBinding: (sessionId: string) => void
+  setSessionLongRunningMode: (sessionId: string, enabled: boolean) => void
+  setSessionPromptSnapshot: (sessionId: string, snapshot: SessionPromptSnapshot) => void
+  clearSessionPromptSnapshot: (sessionId: string) => void
   clearSessionMessages: (sessionId: string) => void
   duplicateSession: (sessionId: string) => Promise<string | null>
   togglePinSession: (sessionId: string) => void
@@ -233,7 +272,7 @@ interface ChatStore {
     sessionId: string,
     msgId: string,
     encryptedContent: string,
-    provider: 'anthropic' | 'openai-responses'
+    provider: 'anthropic' | 'openai-responses' | 'google'
   ) => void
   completeThinking: (sessionId: string, msgId: string) => void
   appendToolUse: (sessionId: string, msgId: string, toolUse: ToolUseBlock) => void
@@ -267,6 +306,7 @@ interface ProjectRow {
   working_folder: string | null
   ssh_connection_id: string | null
   plugin_id?: string | null
+  pinned: number
 }
 
 interface SessionRow {
@@ -285,6 +325,7 @@ interface SessionRow {
   external_chat_id?: string | null
   provider_id?: string | null
   model_id?: string | null
+  long_running_mode?: number | null
 }
 
 interface MessageRow {
@@ -307,7 +348,8 @@ function rowToProject(row: ProjectRow): Project {
     updatedAt: row.updated_at,
     workingFolder: row.working_folder ?? undefined,
     sshConnectionId: row.ssh_connection_id ?? undefined,
-    pluginId: row.plugin_id ?? undefined
+    pluginId: row.plugin_id ?? undefined,
+    pinned: row.pinned === 1
   }
 }
 
@@ -330,14 +372,22 @@ function rowToSession(row: SessionRow, messages: UnifiedMessage[] = []): Session
     pluginId: row.plugin_id ?? undefined,
     externalChatId: row.external_chat_id ?? undefined,
     providerId: row.provider_id ?? undefined,
-    modelId: row.model_id ?? undefined
+    modelId: row.model_id ?? undefined,
+    longRunningMode: row.long_running_mode === 1
   }
 }
 
 function rowToMessage(row: MessageRow): UnifiedMessage {
   let content: string | ContentBlock[]
   try {
-    content = JSON.parse(row.content)
+    const parsed = JSON.parse(row.content)
+    if (typeof parsed === 'string' || Array.isArray(parsed)) {
+      content = parsed
+    } else if (parsed == null) {
+      content = ''
+    } else {
+      content = row.content
+    }
   } catch {
     content = row.content
   }
@@ -352,14 +402,7 @@ function rowToMessage(row: MessageRow): UnifiedMessage {
 
 function isLikelyToolErrorContent(content: ToolResultContent): boolean {
   if (typeof content !== 'string') return false
-  try {
-    const parsed = JSON.parse(content) as { error?: unknown } | null
-    if (!parsed || typeof parsed !== 'object') return false
-    const keys = Object.keys(parsed)
-    return keys.length === 1 && keys[0] === 'error' && typeof parsed.error === 'string'
-  } catch {
-    return false
-  }
+  return isStructuredToolErrorText(content)
 }
 
 function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
@@ -371,7 +414,7 @@ function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
   const erroredToolIds = new Set<string>()
 
   for (const msg of messages) {
-    if (typeof msg.content === 'string') continue
+    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) continue
     for (const block of msg.content as ContentBlock[]) {
       if (block.type === 'tool_use') {
         toolUseIds.add(block.id)
@@ -400,7 +443,7 @@ function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
 
   let changed = false
   const sanitized = messages.flatMap((msg) => {
-    if (typeof msg.content === 'string') return [msg]
+    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return [msg]
 
     const blocks = msg.content as ContentBlock[]
     const filtered = blocks.filter((block) => {
@@ -459,20 +502,22 @@ export const useChatStore = create<ChatStore>()(
       let nextSessionId: string | null = null
       set((state) => {
         state.activeProjectId = id
-        if (!id) return
+        if (!id) {
+          state.activeSessionId = null
+          return
+        }
         const currentSession = state.sessions.find((s) => s.id === state.activeSessionId)
         if (currentSession?.projectId === id) return
         const sessionsInProject = state.sessions
           .filter((s) => s.projectId === id)
           .sort((a, b) => b.updatedAt - a.updatedAt)
         nextSessionId = sessionsInProject[0]?.id ?? null
-        if (nextSessionId) {
-          state.activeSessionId = nextSessionId
-        }
+        state.activeSessionId = nextSessionId
       })
       if (nextSessionId) {
         void get().loadRecentSessionMessages(nextSessionId)
       }
+      useUIStore.getState().syncSessionScopedState(nextSessionId)
     },
 
     createProject: async (input) => {
@@ -483,6 +528,7 @@ export const useChatStore = create<ChatStore>()(
         workingFolder: input?.workingFolder ?? null,
         sshConnectionId: input?.sshConnectionId ?? null,
         pluginId: input?.pluginId ?? null,
+        pinned: false,
         createdAt: now,
         updatedAt: now
       }
@@ -504,7 +550,8 @@ export const useChatStore = create<ChatStore>()(
           updatedAt: now,
           workingFolder: payload.workingFolder ?? undefined,
           sshConnectionId: payload.sshConnectionId ?? undefined,
-          pluginId: payload.pluginId ?? undefined
+          pluginId: payload.pluginId ?? undefined,
+          pinned: false
         }
         set((state) => {
           state.projects.unshift(fallbackProject)
@@ -534,9 +581,11 @@ export const useChatStore = create<ChatStore>()(
     },
 
     deleteProject: async (projectId) => {
-      const localSessionIds = get()
-        .sessions.filter((session) => session.projectId === projectId)
-        .map((session) => session.id)
+      const localSessions = get().sessions.filter((session) => session.projectId === projectId)
+      const localSessionIds = localSessions.map((session) => session.id)
+      const deletedMessageIds = localSessions.flatMap((session) =>
+        session.messages.map((message) => message.id)
+      )
 
       let deletedSessionIds = localSessionIds
       try {
@@ -608,6 +657,7 @@ export const useChatStore = create<ChatStore>()(
         }
         taskState.deleteSessionTasks(sessionId)
       }
+      clearPendingMessageFlushes(deletedMessageIds)
       agentState.clearToolCalls()
 
       if (nextActiveSessionId) {
@@ -619,10 +669,29 @@ export const useChatStore = create<ChatStore>()(
         useTaskStore.getState().clearTasks()
         usePlanStore.getState().setActivePlan(null)
       }
+      useUIStore.getState().syncSessionScopedState(nextActiveSessionId)
 
       if (shouldEnsureDefaultProject) {
         await get().ensureDefaultProject()
       }
+    },
+
+    togglePinProject: (projectId) => {
+      const now = Date.now()
+      let pinned = false
+
+      set((state) => {
+        const project = state.projects.find((item) => item.id === projectId)
+        if (!project) return
+        project.pinned = !project.pinned
+        project.updatedAt = now
+        pinned = !!project.pinned
+      })
+
+      dbUpdateProject(projectId, {
+        pinned,
+        updatedAt: now
+      })
     },
 
     updateProjectDirectory: (projectId, patch) => {
@@ -662,6 +731,7 @@ export const useChatStore = create<ChatStore>()(
           if (session.projectId !== projectId) continue
           session.workingFolder = nextWorkingFolder
           session.sshConnectionId = nextSshConnectionId
+          delete session.promptSnapshot
           session.updatedAt = now
         }
       })
@@ -847,16 +917,18 @@ export const useChatStore = create<ChatStore>()(
           useTaskStore.getState().clearTasks()
           usePlanStore.getState().setActivePlan(null)
         }
+        useUIStore.getState().syncSessionScopedState(nextActiveSessionId)
       } catch (err) {
         console.error('[ChatStore] Failed to load from DB:', err)
         set({ _loaded: true })
       }
     },
 
-    createSession: (mode, projectId) => {
+    createSession: (mode, projectId, options) => {
       const id = nanoid()
       const now = Date.now()
       const { activeProviderId, activeModelId } = useProviderStore.getState()
+      const { newSessionDefaultModel } = useSettingsStore.getState()
 
       let targetProjectId =
         projectId ??
@@ -871,6 +943,19 @@ export const useChatStore = create<ChatStore>()(
         targetProjectId = targetProject.id
       }
 
+      const followGlobalModel =
+        !targetProject?.providerId && newSessionDefaultModel?.useGlobalActiveModel !== false
+      const sessionProviderId = targetProject?.providerId
+        ? targetProject.providerId
+        : followGlobalModel
+          ? undefined
+          : (newSessionDefaultModel?.providerId ?? activeProviderId ?? undefined)
+      const sessionModelId = targetProject?.providerId
+        ? targetProject.modelId
+        : followGlobalModel
+          ? undefined
+          : newSessionDefaultModel?.modelId || activeModelId || undefined
+
       const newSession: Session = {
         id,
         title: 'New Conversation',
@@ -883,8 +968,9 @@ export const useChatStore = create<ChatStore>()(
         projectId: targetProjectId ?? undefined,
         workingFolder: targetProject?.workingFolder,
         sshConnectionId: targetProject?.sshConnectionId,
-        providerId: activeProviderId ?? undefined,
-        modelId: activeModelId || undefined
+        providerId: sessionProviderId,
+        modelId: sessionModelId,
+        longRunningMode: options?.longRunningMode ?? false
       }
       set((state) => {
         state.sessions.push(newSession)
@@ -916,13 +1002,12 @@ export const useChatStore = create<ChatStore>()(
       }
       useTaskStore.getState().clearTasks()
       usePlanStore.getState().setActivePlan(null)
-      if (useUIStore.getState().planMode) {
-        useUIStore.getState().exitPlanMode()
-      }
+      useUIStore.getState().syncSessionScopedState(id)
       return id
     },
 
     deleteSession: (id) => {
+      const deletedSession = get().sessions.find((session) => session.id === id)
       let nextActiveId: string | null = null
       set((state) => {
         const idx = state.sessions.findIndex((s) => s.id === id)
@@ -952,6 +1037,7 @@ export const useChatStore = create<ChatStore>()(
         useTaskStore.getState().clearTasks()
         usePlanStore.getState().setActivePlan(null)
       }
+      useUIStore.getState().syncSessionScopedState(nextActiveId)
       const agentState = useAgentStore.getState()
       agentState.setSessionStatus(id, null)
       agentState.clearSessionData(id)
@@ -960,6 +1046,7 @@ export const useChatStore = create<ChatStore>()(
       const plan = usePlanStore.getState().getPlanBySession(id)
       if (plan) usePlanStore.getState().deletePlan(plan.id)
       useTaskStore.getState().deleteSessionTasks(id)
+      clearPendingMessageFlushes(deletedSession?.messages.map((message) => message.id) ?? [])
       dbDeleteSession(id)
     },
 
@@ -972,10 +1059,20 @@ export const useChatStore = create<ChatStore>()(
           state.activeProjectId = activeSession.projectId
         }
         state.streamingMessageId = id ? (state.streamingMessages[id] ?? null) : null
+
+        // Release memory for the previous session: drop cached prompt snapshot
+        // and offload messages (they'll be reloaded from DB on next activation).
+        if (prevId && prevId !== id) {
+          const prevSession = state.sessions.find((session) => session.id === prevId)
+          if (prevSession) {
+            delete prevSession.promptSnapshot
+            if (!state.streamingMessages[prevId] && prevSession.messages.length > 0) {
+              prevSession.messagesLoaded = false
+            }
+          }
+        }
       })
-      if (prevId !== id && useUIStore.getState().planMode) {
-        useUIStore.getState().exitPlanMode()
-      }
+      useUIStore.getState().syncSessionScopedState(id)
       // Switch per-session tool calls in agent-store
       useAgentStore.getState().switchToolCallSession(prevId, id)
       // Restore per-session model selection to global provider store
@@ -1032,7 +1129,11 @@ export const useChatStore = create<ChatStore>()(
       set((state) => {
         const session = state.sessions.find((s) => s.id === id)
         if (session) {
+          const shouldClearPromptSnapshot = (session.mode === 'chat') !== (mode === 'chat')
           session.mode = mode
+          if (shouldClearPromptSnapshot) {
+            delete session.promptSnapshot
+          }
           session.updatedAt = now
         }
       })
@@ -1044,12 +1145,16 @@ export const useChatStore = create<ChatStore>()(
       if (!session) return
       if (session.projectId) {
         get().updateProjectDirectory(session.projectId, { workingFolder: folder })
+        get().clearSessionPromptSnapshot(sessionId)
         return
       }
 
       set((state) => {
         const target = state.sessions.find((item) => item.id === sessionId)
-        if (target) target.workingFolder = folder
+        if (target) {
+          target.workingFolder = folder
+          delete target.promptSnapshot
+        }
       })
       dbUpdateSession(sessionId, { workingFolder: folder })
     },
@@ -1061,12 +1166,16 @@ export const useChatStore = create<ChatStore>()(
         get().updateProjectDirectory(session.projectId, {
           sshConnectionId: connectionId
         })
+        get().clearSessionPromptSnapshot(sessionId)
         return
       }
 
       set((state) => {
         const target = state.sessions.find((item) => item.id === sessionId)
-        if (target) target.sshConnectionId = connectionId ?? undefined
+        if (target) {
+          target.sshConnectionId = connectionId ?? undefined
+          delete target.promptSnapshot
+        }
       })
       dbUpdateSession(sessionId, { sshConnectionId: connectionId })
     },
@@ -1078,10 +1187,59 @@ export const useChatStore = create<ChatStore>()(
         if (session) {
           session.providerId = providerId
           session.modelId = modelId
+          delete session.promptSnapshot
           session.updatedAt = now
         }
       })
       dbUpdateSession(sessionId, { providerId, modelId, updatedAt: now })
+    },
+
+    clearSessionModelBinding: (sessionId) => {
+      const now = Date.now()
+      set((state) => {
+        const session = state.sessions.find((s) => s.id === sessionId)
+        if (session) {
+          delete session.providerId
+          delete session.modelId
+          delete session.promptSnapshot
+          session.updatedAt = now
+        }
+      })
+      dbUpdateSession(sessionId, { providerId: null, modelId: null, updatedAt: now })
+    },
+
+    setSessionLongRunningMode: (sessionId, enabled) => {
+      const now = Date.now()
+      set((state) => {
+        const session = state.sessions.find((s) => s.id === sessionId)
+        if (session) {
+          session.longRunningMode = enabled
+          delete session.promptSnapshot
+          session.updatedAt = now
+        }
+      })
+      dbUpdateSession(sessionId, { longRunningMode: enabled, updatedAt: now })
+    },
+
+    setSessionPromptSnapshot: (sessionId, snapshot) => {
+      set((state) => {
+        const session = state.sessions.find((s) => s.id === sessionId)
+        if (!session) return
+        session.promptSnapshot = {
+          mode: snapshot.mode,
+          planMode: snapshot.planMode,
+          systemPrompt: snapshot.systemPrompt,
+          toolDefs: snapshot.toolDefs.slice()
+        }
+      })
+    },
+
+    clearSessionPromptSnapshot: (sessionId) => {
+      set((state) => {
+        const session = state.sessions.find((s) => s.id === sessionId)
+        if (!session?.promptSnapshot) return
+        delete session.promptSnapshot
+      })
     },
 
     togglePinSession: (sessionId) => {
@@ -1111,6 +1269,7 @@ export const useChatStore = create<ChatStore>()(
 
       const normalizedSession: Session = {
         ...session,
+        promptSnapshot: undefined,
         projectId: targetProjectId ?? undefined,
         workingFolder: session.workingFolder ?? project?.workingFolder,
         sshConnectionId: session.sshConnectionId ?? project?.sshConnectionId,
@@ -1149,6 +1308,7 @@ export const useChatStore = create<ChatStore>()(
       useTaskStore.getState().clearTasks()
       const activePlan = usePlanStore.getState().getPlanBySession(normalizedSession.id)
       usePlanStore.getState().setActivePlan(activePlan?.id ?? null)
+      useUIStore.getState().syncSessionScopedState(normalizedSession.id)
     },
 
     clearAllSessions: () => {
@@ -1171,6 +1331,7 @@ export const useChatStore = create<ChatStore>()(
         taskState.deleteSessionTasks(id)
       }
       agentState.clearToolCalls()
+      useUIStore.getState().syncSessionScopedState(null)
       dbClearAllSessions()
     },
 
@@ -1182,12 +1343,12 @@ export const useChatStore = create<ChatStore>()(
           session.messages = []
           session.messageCount = 0
           session.messagesLoaded = true
-          session.title = 'New Conversation'
+          delete session.promptSnapshot
           session.updatedAt = now
         }
       })
       dbClearMessages(sessionId)
-      dbUpdateSession(sessionId, { title: 'New Conversation', updatedAt: now })
+      dbUpdateSession(sessionId, { updatedAt: now })
       useAgentStore.getState().setSessionStatus(sessionId, null)
       useAgentStore.getState().clearSessionData(sessionId)
       useAgentStore.getState().clearToolCalls()
@@ -1218,7 +1379,8 @@ export const useChatStore = create<ChatStore>()(
         workingFolder: source.workingFolder,
         sshConnectionId: source.sshConnectionId,
         providerId: source.providerId,
-        modelId: source.modelId
+        modelId: source.modelId,
+        longRunningMode: source.longRunningMode ?? false
       }
       set((state) => {
         state.sessions.push(newSession)
@@ -1231,6 +1393,7 @@ export const useChatStore = create<ChatStore>()(
       clonedMessages.forEach((msg, i) => dbAddMessage(newId, msg, i))
       useTaskStore.getState().clearTasks()
       usePlanStore.getState().setActivePlan(null)
+      useUIStore.getState().syncSessionScopedState(newId)
       return newId
     },
 
@@ -1364,19 +1527,21 @@ export const useChatStore = create<ChatStore>()(
 
     addMessage: (sessionId, msg) => {
       let sortOrder = 0
+      let shouldPersist = false
       set((state) => {
         const session = state.sessions.find((s) => s.id === sessionId)
-        if (session) {
-          sortOrder = session.messageCount
-          if (!session.messagesLoaded) {
-            session.messagesLoaded = true
-            session.messages = []
-          }
-          session.messages.push(msg)
-          session.messageCount += 1
-          session.updatedAt = Date.now()
+        if (!session) return
+        shouldPersist = true
+        sortOrder = session.messageCount
+        if (!session.messagesLoaded) {
+          session.messagesLoaded = true
+          session.messages = []
         }
+        session.messages.push(msg)
+        session.messageCount += 1
+        session.updatedAt = Date.now()
       })
+      if (!shouldPersist) return
       dbAddMessage(sessionId, msg, sortOrder)
       dbUpdateSession(sessionId, { updatedAt: Date.now() })
     },

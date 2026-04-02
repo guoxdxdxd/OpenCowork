@@ -6,13 +6,40 @@ import type { SubAgentDefinition } from './types'
  */
 class SubAgentRegistry {
   private agents = new Map<string, SubAgentDefinition>()
+  private listeners = new Set<() => void>()
+  private allCache: SubAgentDefinition[] | null = []
+  private namesCache: string[] | null = []
+
+  private invalidate(): void {
+    this.allCache = null
+    this.namesCache = null
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) {
+      listener()
+    }
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
 
   register(def: SubAgentDefinition): void {
+    const prev = this.agents.get(def.name)
     this.agents.set(def.name, def)
+    if (prev !== def) {
+      this.invalidate()
+      this.emit()
+    }
   }
 
   unregister(name: string): void {
-    this.agents.delete(name)
+    if (this.agents.delete(name)) {
+      this.invalidate()
+      this.emit()
+    }
   }
 
   get(name: string): SubAgentDefinition | undefined {
@@ -24,11 +51,17 @@ class SubAgentRegistry {
   }
 
   getAll(): SubAgentDefinition[] {
-    return Array.from(this.agents.values())
+    if (!this.allCache) {
+      this.allCache = Array.from(this.agents.values())
+    }
+    return this.allCache
   }
 
   getNames(): string[] {
-    return Array.from(this.agents.keys())
+    if (!this.namesCache) {
+      this.namesCache = Array.from(this.agents.keys())
+    }
+    return this.namesCache
   }
 }
 

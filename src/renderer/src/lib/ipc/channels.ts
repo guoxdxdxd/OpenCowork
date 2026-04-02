@@ -36,6 +36,8 @@ export const IPC = {
   // Shell
   SHELL_EXEC: 'shell:exec',
   SHELL_ABORT: 'shell:abort',
+  SHELL_OPEN_PATH: 'shell:openPath',
+  SHELL_OPEN_EXTERNAL: 'shell:openExternal',
 
   // Agent Changes
   AGENT_CHANGES_LIST: 'agent:changes:list',
@@ -55,6 +57,19 @@ export const IPC = {
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
+
+  // Migration
+  MIGRATION_PREVIEW: 'migration:preview',
+  MIGRATION_APPLY: 'migration:apply',
+
+  // Usage Analytics
+  USAGE_EVENTS_ADD: 'usage-events:add',
+  USAGE_EVENTS_OVERVIEW: 'usage-events:overview',
+  USAGE_EVENTS_DAILY: 'usage-events:daily',
+  USAGE_EVENTS_TIMELINE: 'usage-events:timeline',
+  USAGE_EVENTS_BY_MODEL: 'usage-events:by-model',
+  USAGE_EVENTS_BY_PROVIDER: 'usage-events:by-provider',
+  USAGE_EVENTS_LIST: 'usage-events:list',
 
   // Plugins
   PLUGIN_LIST_PROVIDERS: 'plugin:list-providers',
@@ -79,6 +94,12 @@ export const IPC = {
   PLUGIN_STREAM_START: 'plugin:stream:start',
   PLUGIN_STREAM_UPDATE: 'plugin:stream:update',
   PLUGIN_STREAM_FINISH: 'plugin:stream:finish',
+
+  // Weixin-specific
+  PLUGIN_WEIXIN_LOGIN_START: 'plugin:weixin:login-start',
+  PLUGIN_WEIXIN_LOGIN_WAIT: 'plugin:weixin:login-wait',
+  PLUGIN_WEIXIN_SEND_IMAGE: 'plugin:weixin:send-image',
+  PLUGIN_WEIXIN_SEND_FILE: 'plugin:weixin:send-file',
 
   // Feishu-specific
   PLUGIN_FEISHU_SEND_IMAGE: 'plugin:feishu:send-image',
@@ -121,9 +142,18 @@ export const IPC = {
   CRON_TOGGLE: 'cron:toggle',
   CRON_RUN_NOW: 'cron:run-now',
   CRON_RUNS: 'cron:runs',
+  CRON_RUN_CREATE: 'cron:run:create',
+  CRON_RUN_UPDATE: 'cron:run:update',
+  CRON_RUN_DETAIL: 'cron:run-detail',
+  CRON_RUN_MESSAGES_REPLACE: 'cron:run-messages:replace',
+  CRON_RUN_LOG_APPEND: 'cron:run-log:append',
   CRON_FIRED: 'cron:fired',
   CRON_JOB_REMOVED: 'cron:job-removed',
   CRON_RUN_FINISHED: 'cron:run-finished',
+  CRON_ABORT_RUN: 'cron:abort-run',
+  CRON_RUN_STARTED: 'cron:run-started',
+  CRON_RUN_PROGRESS: 'cron:run-progress',
+  CRON_RUN_LOG_APPENDED: 'cron:run-log-appended',
 
   // Notify
   NOTIFY_DESKTOP: 'notify:desktop',
@@ -131,6 +161,33 @@ export const IPC = {
 
   // App Updates
   UPDATE_AVAILABLE: 'update:available',
+
+  // Wiki
+  DB_WIKI_LIST_DOCUMENTS: 'db:wiki:list-documents',
+  DB_WIKI_GET_DOCUMENT: 'db:wiki:get-document',
+  DB_WIKI_GET_DOCUMENT_BY_NAME: 'db:wiki:get-document-by-name',
+  DB_WIKI_SAVE_DOCUMENT: 'db:wiki:save-document',
+  DB_WIKI_LIST_SECTIONS: 'db:wiki:list-sections',
+  DB_WIKI_SAVE_SECTIONS: 'db:wiki:save-sections',
+  DB_WIKI_LIST_SECTION_SOURCES: 'db:wiki:list-section-sources',
+  DB_WIKI_SAVE_SECTION_SOURCES: 'db:wiki:save-section-sources',
+  DB_WIKI_GET_PROJECT_STATE: 'db:wiki:get-project-state',
+  DB_WIKI_SAVE_PROJECT_STATE: 'db:wiki:save-project-state',
+  DB_WIKI_CLEAR_PROJECT: 'db:wiki:clear-project',
+  DB_WIKI_GET_DOCUMENT_DETAIL: 'db:wiki:get-document-detail',
+  DB_WIKI_LIST_RUNS: 'db:wiki:list-runs',
+  DB_WIKI_CREATE_RUN: 'db:wiki:create-run',
+  DB_WIKI_UPDATE_RUN: 'db:wiki:update-run',
+  GIT_GET_HEAD: 'git:get-head',
+  GIT_GET_RANGE_COMMITS: 'git:get-range-commits',
+  GIT_GET_CHANGED_FILES: 'git:get-changed-files',
+  GIT_GET_STATUS: 'git:get-status',
+  WIKI_GENERATE_FULL: 'wiki:generate-full',
+  WIKI_REGENERATE: 'wiki:regenerate',
+  WIKI_GENERATE_INCREMENTAL: 'wiki:generate-incremental',
+  WIKI_GET_HEAD_COMMIT: 'wiki:get-head-commit',
+  WIKI_GET_CHANGED_FILES: 'wiki:get-changed-files',
+  WIKI_EXPORT_PROJECT: 'wiki:export-project',
   UPDATE_CHECK: 'update:check',
   UPDATE_DOWNLOAD: 'update:download',
   UPDATE_DOWNLOAD_PROGRESS: 'update:download-progress',
@@ -155,8 +212,31 @@ export const IPC = {
   PROMPTS_LIST: 'prompts:list',
   PROMPTS_LOAD: 'prompts:load',
 
+  // Agents
+  AGENTS_MANAGE_LIST: 'agents:manage-list',
+  AGENTS_MANAGE_READ: 'agents:manage-read',
+  AGENTS_MANAGE_SAVE: 'agents:manage-save',
+
+  // Commands
+  COMMANDS_LIST: 'commands:list',
+  COMMANDS_LOAD: 'commands:load',
+  COMMANDS_MANAGE_LIST: 'commands:manage-list',
+  COMMANDS_MANAGE_READ: 'commands:manage-read',
+  COMMANDS_MANAGE_CREATE: 'commands:manage-create',
+  COMMANDS_MANAGE_SAVE: 'commands:manage-save',
+
   // Clipboard
   CLIPBOARD_WRITE_IMAGE: 'clipboard:write-image',
+
+  // Images
+  IMAGE_PERSIST_GENERATED: 'image:persist-generated',
+  IMAGE_CREATE_GIF_FROM_GRID: 'image:create-gif-from-grid',
+
+  // Desktop Control
+  DESKTOP_SCREENSHOT_CAPTURE: 'desktop:screenshot:capture',
+  DESKTOP_INPUT_CLICK: 'desktop:input:click',
+  DESKTOP_INPUT_TYPE: 'desktop:input:type',
+  DESKTOP_INPUT_SCROLL: 'desktop:input:scroll',
 
   // Web Search
   WEB_SEARCH: 'web:search',
@@ -210,6 +290,11 @@ export const IPC = {
 
   // SSH Auth
   SSH_AUTH_INSTALL_PUBLIC_KEY: 'ssh:auth:install-public-key',
+
+  // SSH Import / Export
+  SSH_EXPORT: 'ssh:export',
+  SSH_IMPORT_PREVIEW: 'ssh:import:preview',
+  SSH_IMPORT_APPLY: 'ssh:import:apply',
 
   // SSH Remote Exec
   SSH_EXEC: 'ssh:exec'

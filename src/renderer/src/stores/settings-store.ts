@@ -1,11 +1,66 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import type { ProviderType, ReasoningEffortLevel } from '../lib/api/types'
+import type { ProviderType, ReasoningEffortLevel, ThinkingConfig } from '../lib/api/types'
 import { ipcStorage } from '../lib/ipc/ipc-storage'
+import {
+  LEFT_SIDEBAR_DEFAULT_WIDTH,
+  clampLeftSidebarWidth
+} from '@renderer/components/layout/right-panel-defs'
+
+export interface ModelBinding {
+  providerId: string
+  modelId: string
+}
+
+export interface SessionDefaultModelBinding extends ModelBinding {
+  useGlobalActiveModel: boolean
+}
+
+export type PromptRecommendationModelBinding = ModelBinding | 'disabled' | null
+
+export type PromptRecommendationModelBindings = Record<
+  'chat' | 'clarify' | 'cowork' | 'code',
+  PromptRecommendationModelBinding
+>
+
+export type MainModelSelectionMode = 'auto' | 'manual'
+export type ClarifyPlanModeAutoSwitchTarget = 'off' | 'code' | 'acp'
 
 function getSystemLanguage(): 'en' | 'zh' {
   const lang = navigator.language || navigator.languages?.[0] || 'en'
   return lang.startsWith('zh') ? 'zh' : 'en'
+}
+
+export function getReasoningEffortKey(
+  providerId?: string | null,
+  modelId?: string | null
+): string | null {
+  if (!providerId || !modelId) return null
+  return `${providerId}:${modelId}`
+}
+
+export function resolveReasoningEffortForModel({
+  reasoningEffort,
+  reasoningEffortByModel,
+  providerId,
+  modelId,
+  thinkingConfig
+}: {
+  reasoningEffort: ReasoningEffortLevel
+  reasoningEffortByModel?: Record<string, ReasoningEffortLevel>
+  providerId?: string | null
+  modelId?: string | null
+  thinkingConfig?: ThinkingConfig
+}): ReasoningEffortLevel {
+  const key = getReasoningEffortKey(providerId, modelId)
+  const levels = thinkingConfig?.reasoningEffortLevels
+  const savedEffort = key ? reasoningEffortByModel?.[key] : undefined
+
+  if (savedEffort && (!levels || levels.includes(savedEffort))) {
+    return savedEffort
+  }
+
+  return thinkingConfig?.defaultReasoningEffort ?? reasoningEffort
 }
 
 interface SettingsStore {
@@ -20,19 +75,30 @@ interface SettingsStore {
   theme: 'light' | 'dark' | 'system'
   language: 'en' | 'zh'
   autoApprove: boolean
+  autoUpdateEnabled: boolean
+  clarifyAutoAcceptRecommended: boolean
+  clarifyPlanModeAutoSwitchTarget: ClarifyPlanModeAutoSwitchTarget
   devMode: boolean
   thinkingEnabled: boolean
   fastModeEnabled: boolean
   reasoningEffort: ReasoningEffortLevel
+  reasoningEffortByModel: Record<string, ReasoningEffortLevel>
   teamToolsEnabled: boolean
   contextCompressionEnabled: boolean
+  editorWorkspaceEnabled: boolean
+  editorRemoteLanguageServiceEnabled: boolean
+  toolResultFormat: 'toon' | 'json'
   userName: string
   userAvatar: string
+  conversationGuideSeen: boolean
 
   // Appearance Settings
   backgroundColor: string
   fontFamily: string
   fontSize: number
+  animationsEnabled: boolean
+  toolbarCollapsedByDefault: boolean
+  leftSidebarWidth: number
 
   // Web Search Settings
   webSearchEnabled: boolean
@@ -51,9 +117,17 @@ interface SettingsStore {
   webSearchMaxResults: number
   webSearchTimeout: number
 
+  // Network Settings
+  systemProxyUrl: string
+
   // Skills Market Settings
   skillsMarketProvider: 'skillsmp'
   skillsMarketApiKey: string
+
+  // Prompt Recommendation Settings
+  promptRecommendationModels: PromptRecommendationModelBindings
+  newSessionDefaultModel: SessionDefaultModelBinding | null
+  mainModelSelectionMode: MainModelSelectionMode
 
   updateSettings: (patch: Partial<Omit<SettingsStore, 'updateSettings'>>) => void
 }
@@ -72,19 +146,30 @@ export const useSettingsStore = create<SettingsStore>()(
       theme: 'system',
       language: getSystemLanguage(),
       autoApprove: false,
+      autoUpdateEnabled: true,
+      clarifyAutoAcceptRecommended: false,
+      clarifyPlanModeAutoSwitchTarget: 'off',
       devMode: false,
       thinkingEnabled: false,
       fastModeEnabled: false,
       reasoningEffort: 'medium',
+      reasoningEffortByModel: {},
       teamToolsEnabled: false,
       contextCompressionEnabled: true,
+      editorWorkspaceEnabled: false,
+      editorRemoteLanguageServiceEnabled: false,
+      toolResultFormat: 'toon',
       userName: '',
       userAvatar: '',
+      conversationGuideSeen: false,
 
       // Appearance Settings
       backgroundColor: '',
       fontFamily: '',
       fontSize: 16,
+      animationsEnabled: true,
+      toolbarCollapsedByDefault: false,
+      leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH,
 
       // Web Search Settings
       webSearchEnabled: false,
@@ -94,15 +179,28 @@ export const useSettingsStore = create<SettingsStore>()(
       webSearchMaxResults: 5,
       webSearchTimeout: 30000,
 
+      // Network Settings
+      systemProxyUrl: '',
+
       // Skills Market Settings
       skillsMarketProvider: 'skillsmp',
       skillsMarketApiKey: '',
+
+      // Prompt Recommendation Settings
+      promptRecommendationModels: {
+        chat: null,
+        clarify: null,
+        cowork: null,
+        code: null
+      },
+      newSessionDefaultModel: null,
+      mainModelSelectionMode: 'auto',
 
       updateSettings: (patch) => set(patch)
     }),
     {
       name: 'opencowork-settings',
-      version: 2,
+      version: 10,
       storage: createJSONStorage(() => ipcStorage),
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
@@ -118,10 +216,27 @@ export const useSettingsStore = create<SettingsStore>()(
           state.webSearchMaxResults = 5
           state.webSearchTimeout = 30000
         }
+        if (state.systemProxyUrl === undefined) {
+          state.systemProxyUrl = ''
+        }
         // Add skills market settings if missing
         if (state.skillsMarketProvider === undefined || state.skillsMarketProvider !== 'skillsmp') {
           state.skillsMarketProvider = 'skillsmp'
           state.skillsMarketApiKey = state.skillsMarketApiKey ?? ''
+        }
+        if (state.promptRecommendationModels === undefined) {
+          state.promptRecommendationModels = {
+            chat: null,
+            clarify: null,
+            cowork: null,
+            code: null
+          }
+        }
+        if (state.newSessionDefaultModel === undefined) {
+          state.newSessionDefaultModel = null
+        }
+        if (state.mainModelSelectionMode === undefined) {
+          state.mainModelSelectionMode = 'auto'
         }
         // Add appearance settings if missing
         if (state.backgroundColor === undefined) {
@@ -132,6 +247,41 @@ export const useSettingsStore = create<SettingsStore>()(
         }
         if (state.fontSize === undefined || typeof state.fontSize !== 'number') {
           state.fontSize = 16
+        }
+        if (state.animationsEnabled === undefined) {
+          state.animationsEnabled = true
+        }
+        if (state.toolbarCollapsedByDefault === undefined) {
+          state.toolbarCollapsedByDefault = false
+        }
+        if (state.leftSidebarWidth === undefined || typeof state.leftSidebarWidth !== 'number') {
+          state.leftSidebarWidth = LEFT_SIDEBAR_DEFAULT_WIDTH
+        } else {
+          state.leftSidebarWidth = clampLeftSidebarWidth(state.leftSidebarWidth)
+        }
+        if (state.autoUpdateEnabled === undefined) {
+          state.autoUpdateEnabled = true
+        }
+        if (state.clarifyAutoAcceptRecommended === undefined) {
+          state.clarifyAutoAcceptRecommended = false
+        }
+        if (state.clarifyPlanModeAutoSwitchTarget === undefined) {
+          state.clarifyPlanModeAutoSwitchTarget = 'off'
+        }
+        if (state.editorWorkspaceEnabled === undefined) {
+          state.editorWorkspaceEnabled = false
+        }
+        if (state.editorRemoteLanguageServiceEnabled === undefined) {
+          state.editorRemoteLanguageServiceEnabled = false
+        }
+        if (state.reasoningEffortByModel === undefined) {
+          state.reasoningEffortByModel = {}
+        }
+        if (state.toolResultFormat === undefined) {
+          state.toolResultFormat = 'toon'
+        }
+        if (state.conversationGuideSeen === undefined) {
+          state.conversationGuideSeen = false
         }
         return state as unknown as SettingsStore
       },
@@ -146,18 +296,29 @@ export const useSettingsStore = create<SettingsStore>()(
         theme: state.theme,
         language: state.language,
         autoApprove: state.autoApprove,
+        autoUpdateEnabled: state.autoUpdateEnabled,
+        clarifyAutoAcceptRecommended: state.clarifyAutoAcceptRecommended,
+        clarifyPlanModeAutoSwitchTarget: state.clarifyPlanModeAutoSwitchTarget,
         devMode: state.devMode,
         thinkingEnabled: state.thinkingEnabled,
         fastModeEnabled: state.fastModeEnabled,
         reasoningEffort: state.reasoningEffort,
+        reasoningEffortByModel: state.reasoningEffortByModel,
         teamToolsEnabled: state.teamToolsEnabled,
         contextCompressionEnabled: state.contextCompressionEnabled,
+        editorWorkspaceEnabled: state.editorWorkspaceEnabled,
+        editorRemoteLanguageServiceEnabled: state.editorRemoteLanguageServiceEnabled,
+        toolResultFormat: state.toolResultFormat,
         userName: state.userName,
         userAvatar: state.userAvatar,
+        conversationGuideSeen: state.conversationGuideSeen,
         // Appearance Settings
         backgroundColor: state.backgroundColor,
         fontFamily: state.fontFamily,
         fontSize: state.fontSize,
+        animationsEnabled: state.animationsEnabled,
+        toolbarCollapsedByDefault: state.toolbarCollapsedByDefault,
+        leftSidebarWidth: clampLeftSidebarWidth(state.leftSidebarWidth),
         // Web Search Settings
         webSearchEnabled: state.webSearchEnabled,
         webSearchProvider: state.webSearchProvider,
@@ -165,9 +326,15 @@ export const useSettingsStore = create<SettingsStore>()(
         webSearchEngine: state.webSearchEngine,
         webSearchMaxResults: state.webSearchMaxResults,
         webSearchTimeout: state.webSearchTimeout,
+        // Network Settings
+        systemProxyUrl: state.systemProxyUrl,
         // Skills Market Settings
         skillsMarketProvider: state.skillsMarketProvider,
-        skillsMarketApiKey: state.skillsMarketApiKey
+        skillsMarketApiKey: state.skillsMarketApiKey,
+        // Prompt Recommendation Settings
+        promptRecommendationModels: state.promptRecommendationModels,
+        newSessionDefaultModel: state.newSessionDefaultModel,
+        mainModelSelectionMode: state.mainModelSelectionMode
         // NOTE: apiKey is intentionally excluded from localStorage persistence.
         // In production, it should be stored securely in the main process.
       })

@@ -1,8 +1,11 @@
 import * as React from 'react'
 import { useState, useCallback } from 'react'
-import { Check, ChevronRight, ChevronLeft } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { Check, CheckCircle2, ChevronRight, ChevronLeft, MessageSquare } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { Button } from '@renderer/components/ui/button'
+import { useChatStore } from '@renderer/stores/chat-store'
+import { useSettingsStore } from '@renderer/stores/settings-store'
 import { resolveAskUserAnswers } from '@renderer/lib/tools/ask-user-tool'
 import type { AskUserQuestionItem, AskUserAnswers } from '@renderer/lib/tools/ask-user-tool'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
@@ -16,6 +19,41 @@ interface AskUserQuestionCardProps {
   isLive: boolean
 }
 
+interface AnsweredPair {
+  question: string
+  answer: string
+}
+
+const RECOMMENDED_OPTION_RE = /(?:\(|（)\s*(recommended|推荐)\s*(?:\)|）)/i
+
+function isRecommendedOptionLabel(label: string): boolean {
+  return RECOMMENDED_OPTION_RE.test(label)
+}
+
+function buildRecommendedAnswers(
+  questions: AskUserQuestionItem[]
+): { answers: AskUserAnswers; selections: Map<number, Set<string>> } | null {
+  const answers: AskUserAnswers = {}
+  const selections = new Map<number, Set<string>>()
+
+  for (let index = 0; index < questions.length; index += 1) {
+    const item = questions[index]
+    const recommended = (item.options ?? [])
+      .map((opt) => opt.label)
+      .filter((label) => isRecommendedOptionLabel(label))
+
+    if (recommended.length === 0) {
+      return null
+    }
+
+    const chosen = item.multiSelect ? recommended : [recommended[0]]
+    selections.set(index, new Set(chosen))
+    answers[String(index)] = item.multiSelect ? chosen : chosen[0]
+  }
+
+  return { answers, selections }
+}
+
 function QuestionBlock({
   index,
   item,
@@ -23,7 +61,7 @@ function QuestionBlock({
   customText,
   onToggle,
   onCustomTextChange,
-  disabled,
+  disabled
 }: {
   index: number
   item: AskUserQuestionItem
@@ -33,6 +71,7 @@ function QuestionBlock({
   onCustomTextChange: (index: number, text: string) => void
   disabled: boolean
 }): React.JSX.Element {
+  const { t } = useTranslation('chat')
   const isOtherSelected = selected.has('__other__')
 
   return (
@@ -49,11 +88,11 @@ function QuestionBlock({
                 disabled={disabled}
                 onClick={() => onToggle(index, value)}
                 className={cn(
-                  'flex items-start gap-2.5 w-full rounded-lg border px-3 py-2 text-left text-[13px] leading-tight transition-all',
+                  'flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left text-[13px] leading-tight transition-all',
                   isSelected
                     ? 'border-primary bg-primary/10 text-foreground shadow-sm'
                     : 'border-border/80 bg-background/80 hover:border-primary/50 hover:bg-muted/40 hover:shadow-sm',
-                  disabled && 'opacity-50 cursor-not-allowed'
+                  disabled && 'cursor-not-allowed opacity-50'
                 )}
               >
                 <span
@@ -61,7 +100,7 @@ function QuestionBlock({
                     'mt-0.5 flex size-4 shrink-0 items-center justify-center border transition-all',
                     item.multiSelect ? 'rounded-md' : 'rounded-full',
                     isSelected
-                      ? 'border-primary bg-primary text-primary-foreground scale-105'
+                      ? 'scale-105 border-primary bg-primary text-primary-foreground'
                       : 'border-muted-foreground/40 bg-background'
                   )}
                 >
@@ -77,22 +116,23 @@ function QuestionBlock({
                     {opt.label}
                   </div>
                   {opt.description && (
-                    <p className="mt-0.5 text-[11px] text-muted-foreground/80 leading-snug">{opt.description}</p>
+                    <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground/80">
+                      {opt.description}
+                    </p>
                   )}
                 </div>
               </button>
             )
           })}
-          {/* "Other" option — always available */}
           <button
             disabled={disabled}
             onClick={() => onToggle(index, '__other__')}
             className={cn(
-              'flex items-start gap-2.5 w-full rounded-lg border px-3 py-2 text-left text-[13px] leading-tight transition-all',
+              'flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left text-[13px] leading-tight transition-all',
               isOtherSelected
                 ? 'border-primary bg-primary/10 text-foreground shadow-sm'
                 : 'border-border/80 bg-background/80 hover:border-primary/50 hover:bg-muted/40 hover:shadow-sm',
-              disabled && 'opacity-50 cursor-not-allowed'
+              disabled && 'cursor-not-allowed opacity-50'
             )}
           >
             <span
@@ -100,36 +140,37 @@ function QuestionBlock({
                 'mt-0.5 flex size-4 shrink-0 items-center justify-center border transition-all',
                 item.multiSelect ? 'rounded-md' : 'rounded-full',
                 isOtherSelected
-                  ? 'border-primary bg-primary text-primary-foreground scale-105'
+                  ? 'scale-105 border-primary bg-primary text-primary-foreground'
                   : 'border-muted-foreground/40 bg-background'
               )}
             >
               {isOtherSelected && <Check className="size-3 stroke-[2.5]" />}
             </span>
-            <span className={cn(
-              'font-medium transition-colors',
-              isOtherSelected ? 'text-foreground' : 'text-muted-foreground'
-            )}>
-              Other
+            <span
+              className={cn(
+                'font-medium transition-colors',
+                isOtherSelected ? 'text-foreground' : 'text-muted-foreground'
+              )}
+            >
+              {t('askUser.other', { defaultValue: '其他' })}
             </span>
           </button>
         </div>
       )}
-      {/* Text input: shown when no options or "Other" is selected */}
       {(!item.options || item.options.length === 0 || isOtherSelected) && (
         <textarea
           disabled={disabled}
           value={customText}
           onChange={(e) => onCustomTextChange(index, e.target.value)}
-          placeholder="Type your answer..."
+          placeholder={t('askUser.answerPlaceholder', { defaultValue: '输入你的回答…' })}
           rows={2}
           className={cn(
             'w-full rounded-lg border bg-background/70 px-3 py-2 text-sm',
-            'placeholder:text-muted-foreground/50 resize-none',
+            'resize-none placeholder:text-muted-foreground/50',
             'transition-all duration-200',
-            'focus:outline-none focus:ring-1 focus:ring-primary/30 focus:border-primary',
+            'focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30',
             'hover:border-primary/50',
-            disabled && 'opacity-50 cursor-not-allowed bg-muted/20'
+            disabled && 'cursor-not-allowed bg-muted/20 opacity-50'
           )}
         />
       )}
@@ -137,15 +178,73 @@ function QuestionBlock({
   )
 }
 
-/** Parse output string to extract answered questions for display */
-function parseAnsweredOutput(output: ToolResultContent | undefined): string | null {
+function outputAsText(output: ToolResultContent | undefined): string | null {
   if (!output) return null
-  const text = typeof output === 'string' ? output : output
-    .filter((b) => b.type === 'text')
-    .map((b) => (b.type === 'text' ? b.text : ''))
-    .join('\n')
-  if (!text || text.startsWith('{')) return null // JSON error
+  const text =
+    typeof output === 'string'
+      ? output
+      : output
+          .filter((block) => block.type === 'text')
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join('\n')
+  if (!text || text.startsWith('{')) return null
   return text
+}
+
+function parseAnsweredPairs(output: ToolResultContent | undefined): AnsweredPair[] {
+  const text = outputAsText(output)
+  if (!text) return []
+
+  const body = text.replace(/^User answered:\s*/i, '').trim()
+  if (!body) return []
+
+  const pairs: AnsweredPair[] = []
+  const lines = body.split(/\r?\n/)
+  let currentQuestion = ''
+  let currentAnswerLines: string[] = []
+  let collectingAnswer = false
+
+  const flush = (): void => {
+    const question = currentQuestion.trim()
+    const answer = currentAnswerLines.join('\n').trim()
+    if (question && answer) {
+      pairs.push({ question, answer })
+    }
+    currentQuestion = ''
+    currentAnswerLines = []
+    collectingAnswer = false
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    if (!line) {
+      if (collectingAnswer && currentAnswerLines.length > 0) {
+        currentAnswerLines.push('')
+      }
+      continue
+    }
+
+    if (line.startsWith('Q: ')) {
+      flush()
+      currentQuestion = line.slice(3).trim()
+      continue
+    }
+
+    if (line.startsWith('A: ')) {
+      collectingAnswer = true
+      currentAnswerLines = [line.slice(3).trim()]
+      continue
+    }
+
+    if (collectingAnswer) {
+      currentAnswerLines.push(line)
+    } else if (currentQuestion) {
+      currentQuestion = `${currentQuestion} ${line}`.trim()
+    }
+  }
+
+  flush()
+  return pairs
 }
 
 export function AskUserQuestionCard({
@@ -153,16 +252,53 @@ export function AskUserQuestionCard({
   input,
   output,
   status,
-  isLive,
+  isLive
 }: AskUserQuestionCardProps): React.JSX.Element {
-  const questions = (input.questions as AskUserQuestionItem[]) ?? []
+  const { t } = useTranslation('chat')
+  const questions = React.useMemo(
+    () => (input.questions as AskUserQuestionItem[]) ?? [],
+    [input.questions]
+  )
+  const activeSessionMode = useChatStore(
+    (s) => s.sessions.find((session) => session.id === s.activeSessionId)?.mode
+  )
+  const clarifyAutoAcceptRecommended = useSettingsStore((s) => s.clarifyAutoAcceptRecommended)
   const isAnswered = status === 'completed' && !!output
   const isPending = !isAnswered && (status === 'running' || isLive)
+  const answeredPairs = React.useMemo(() => parseAnsweredPairs(output), [output])
+  const answeredText = React.useMemo(() => outputAsText(output), [output])
 
-  // Per-question selection state
   const [selections, setSelections] = useState<Map<number, Set<string>>>(() => new Map())
   const [customTexts, setCustomTexts] = useState<Map<number, string>>(() => new Map())
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const autoSubmittedRef = React.useRef(false)
+
+  const recommendedAnswers = React.useMemo(() => buildRecommendedAnswers(questions), [questions])
+
+  React.useEffect(() => {
+    autoSubmittedRef.current = false
+  }, [toolUseId])
+
+  React.useEffect(() => {
+    if (autoSubmittedRef.current) return
+    if (!isPending || isAnswered) return
+    if (activeSessionMode !== 'clarify') return
+    if (!clarifyAutoAcceptRecommended) return
+    if (!recommendedAnswers) return
+
+    autoSubmittedRef.current = true
+    setSelections(recommendedAnswers.selections)
+    setCurrentQuestionIndex(Math.max(questions.length - 1, 0))
+    resolveAskUserAnswers(toolUseId, recommendedAnswers.answers)
+  }, [
+    activeSessionMode,
+    clarifyAutoAcceptRecommended,
+    isAnswered,
+    isPending,
+    questions.length,
+    recommendedAnswers,
+    toolUseId
+  ])
 
   const handleToggle = useCallback(
     (qIdx: number, value: string) => {
@@ -177,16 +313,13 @@ export function AskUserQuestionCard({
             if (!q?.multiSelect) current.clear()
             current.add('__other__')
           }
+        } else if (current.has(value)) {
+          current.delete(value)
         } else {
-          if (current.has(value)) {
-            current.delete(value)
-          } else {
-            if (!q?.multiSelect) {
-              current.clear()
-            }
-            current.add(value)
+          if (!q?.multiSelect) {
+            current.clear()
           }
-          // Deselect "Other" when a regular option is picked in single-select
+          current.add(value)
           if (!q?.multiSelect) current.delete('__other__')
         }
         next.set(qIdx, current)
@@ -210,18 +343,11 @@ export function AskUserQuestionCard({
       const sel = selections.get(i) ?? new Set()
       const custom = customTexts.get(i) ?? ''
       const q = questions[i]
+      const picked = [...sel].filter((value) => value !== '__other__')
 
-      // Collect selected option labels (excluding __other__)
-      const picked = [...sel].filter((v) => v !== '__other__')
-
-      // If "Other" is selected or no options exist, use custom text
-      if (sel.has('__other__') || (!q.options || q.options.length === 0)) {
+      if (sel.has('__other__') || !q.options || q.options.length === 0) {
         if (custom.trim()) {
-          if (q.multiSelect) {
-            answers[String(i)] = [...picked, custom.trim()]
-          } else {
-            answers[String(i)] = custom.trim()
-          }
+          answers[String(i)] = q.multiSelect ? [...picked, custom.trim()] : custom.trim()
         } else if (picked.length > 0) {
           answers[String(i)] = q.multiSelect ? picked : picked[0]
         }
@@ -232,7 +358,6 @@ export function AskUserQuestionCard({
     resolveAskUserAnswers(toolUseId, answers)
   }, [toolUseId, questions, selections, customTexts])
 
-  // Check if current question has an answer
   const hasCurrentAnswer = React.useMemo(() => {
     const sel = selections.get(currentQuestionIndex) ?? new Set()
     const custom = customTexts.get(currentQuestionIndex) ?? ''
@@ -244,13 +369,12 @@ export function AskUserQuestionCard({
     return false
   }, [currentQuestionIndex, questions, selections, customTexts])
 
-  // Check if all questions have answers
   const hasAllAnswers = React.useMemo(() => {
     for (let i = 0; i < questions.length; i++) {
       const sel = selections.get(i) ?? new Set()
       const custom = customTexts.get(i) ?? ''
       const q = questions[i]
-      const hasAnswer = 
+      const hasAnswer =
         (sel.size > 0 && !sel.has('__other__')) ||
         (sel.has('__other__') && custom.trim()) ||
         ((!q.options || q.options.length === 0) && custom.trim())
@@ -274,18 +398,50 @@ export function AskUserQuestionCard({
     }
   }, [currentQuestionIndex])
 
-  // Already answered — show summary
   if (isAnswered) {
-    const answeredText = parseAnsweredOutput(output)
     return (
-      <div className="my-2.5 rounded-lg border border-green-500/25 bg-green-500/10 p-3.5 space-y-2 shadow-sm">
-        <div className="flex items-center gap-2 text-sm font-semibold text-green-600 dark:text-green-500">
-          <Check className="size-4.5 stroke-[2.5]" />
-          <span>Questions answered</span>
+      <div className="my-2.5 rounded-lg border border-border/70 bg-background/70 p-4 shadow-sm">
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <span className="flex size-7 items-center justify-center rounded-full border border-border/60 bg-muted/40">
+            <CheckCircle2 className="size-3.5 text-primary" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div>{t('askUser.answeredTitle', { defaultValue: '问题已回答' })}</div>
+            <div className="text-[11px] text-muted-foreground">
+              {t('askUser.answeredSubtitle', { defaultValue: '已记录你的选择与补充说明' })}
+            </div>
+          </div>
         </div>
-        {answeredText && (
-          <pre className="text-xs text-muted-foreground/90 whitespace-pre-wrap leading-relaxed">{answeredText}</pre>
-        )}
+
+        {answeredPairs.length > 0 ? (
+          <div className="mt-3 space-y-2.5">
+            {answeredPairs.map((pair, index) => (
+              <div
+                key={`${pair.question}-${index}`}
+                className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2"
+              >
+                <div className="flex items-start gap-2 text-xs leading-5">
+                  <span className="mt-0.5 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    Q
+                  </span>
+                  <span className="text-foreground/90">{pair.question}</span>
+                </div>
+                <div className="mt-1.5 flex items-start gap-2 text-xs leading-5">
+                  <span className="mt-0.5 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    A
+                  </span>
+                  <span className="whitespace-pre-wrap break-words text-muted-foreground">
+                    {pair.answer}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : answeredText ? (
+          <div className="mt-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+            {answeredText}
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -294,39 +450,48 @@ export function AskUserQuestionCard({
   if (!currentQuestion) return <></>
 
   return (
-    <div className="my-2.5 rounded-lg border border-border/70 bg-background/70 p-4 space-y-3 shadow-sm">
-      {/* Header */}
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground/80">
+    <div className="my-2.5 rounded-lg border border-border/70 bg-background/70 p-4 shadow-sm">
+      <div className="flex items-center gap-2">
+        <span className="flex size-7 items-center justify-center rounded-full border border-border/60 bg-muted/40">
+          <MessageSquare className="size-3.5 text-primary" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-foreground">
+            {t('askUser.title', { defaultValue: '需要你的回答' })}
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            {t('askUser.subtitle', { defaultValue: '回答这些问题后，我再继续处理。' })}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/80">
           {questions.length > 1 && (
             <span className="font-mono text-xs">
               {currentQuestionIndex + 1}/{questions.length}
             </span>
           )}
           {isPending && (
-            <span className="flex items-center gap-1 text-primary/70">
+            <span className="flex items-center gap-1 text-primary/80">
               <span className="size-1.5 rounded-full bg-primary animate-pulse" />
-              Waiting
+              {t('askUser.waiting', { defaultValue: '等待回答' })}
             </span>
           )}
         </div>
       </div>
 
-      {/* Current Question */}
-      <QuestionBlock
-        index={currentQuestionIndex}
-        item={currentQuestion}
-        selected={selections.get(currentQuestionIndex) ?? new Set()}
-        customText={customTexts.get(currentQuestionIndex) ?? ''}
-        onToggle={handleToggle}
-        onCustomTextChange={handleCustomTextChange}
-        disabled={!isPending}
-      />
+      <div className="mt-3">
+        <QuestionBlock
+          index={currentQuestionIndex}
+          item={currentQuestion}
+          selected={selections.get(currentQuestionIndex) ?? new Set()}
+          customText={customTexts.get(currentQuestionIndex) ?? ''}
+          onToggle={handleToggle}
+          onCustomTextChange={handleCustomTextChange}
+          disabled={!isPending}
+        />
+      </div>
 
-      {/* Navigation and Submit */}
       {isPending && (
-        <div className="flex items-center gap-1.5 pt-0.5">
-          {/* Previous button */}
+        <div className="mt-3 flex items-center gap-1.5 border-t border-border/50 pt-3">
           {questions.length > 1 && !isFirstQuestion && (
             <Button
               onClick={handlePrevious}
@@ -335,13 +500,12 @@ export function AskUserQuestionCard({
               className="gap-1 text-[12px]"
             >
               <ChevronLeft className="size-3.5" />
-              Previous
+              {t('askUser.previous', { defaultValue: '上一步' })}
             </Button>
           )}
 
           <div className="flex-1" />
 
-          {/* Next button (if not last question) */}
           {questions.length > 1 && !isLastQuestion && (
             <Button
               onClick={handleNext}
@@ -349,12 +513,11 @@ export function AskUserQuestionCard({
               size="xs"
               className="gap-1 text-[12px]"
             >
-              Next
+              {t('askUser.next', { defaultValue: '下一步' })}
               <ChevronRight className="size-3.5" />
             </Button>
           )}
 
-          {/* Submit button (only on last question and all answered) */}
           {isLastQuestion && (
             <Button
               onClick={handleSubmit}
@@ -362,7 +525,7 @@ export function AskUserQuestionCard({
               size="xs"
               className="gap-1 text-[12px]"
             >
-              Submit
+              {t('askUser.submit', { defaultValue: '提交' })}
               <ChevronRight className="size-3.5" />
             </Button>
           )}

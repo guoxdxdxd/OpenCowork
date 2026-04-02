@@ -17,11 +17,15 @@
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
+import { app } from 'electron'
 import { getDb } from '../db/database'
 import type { ChannelManager } from './channel-manager'
 import type { ChannelIncomingMessageData, ChannelInstance } from './channel-types'
 
 const PLUGINS_FILE = path.join(os.homedir(), '.open-cowork', 'plugins.json')
+const WORKSPACE_MEMORY_TEMPLATE_FILES = ['AGENTS.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
+
+type WorkspaceMemoryTemplateFile = (typeof WORKSPACE_MEMORY_TEMPLATE_FILES)[number]
 
 export interface CommandContext {
   pluginId: string
@@ -45,6 +49,70 @@ interface CommandResult {
 }
 
 type CommandHandler = (ctx: CommandContext, args: string) => CommandResult
+
+function tokenizeSlashCommandArguments(text: string): string[] {
+  const normalized = text.trim()
+  if (!normalized) return []
+
+  const args: string[] = []
+  let current = ''
+  let quoteChar: '"' | "'" | null = null
+  let escaping = false
+  let tokenStarted = false
+
+  for (const char of normalized) {
+    if (escaping) {
+      current += char
+      escaping = false
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '\\') {
+      escaping = true
+      tokenStarted = true
+      continue
+    }
+
+    if (quoteChar) {
+      if (char === quoteChar) {
+        quoteChar = null
+      } else {
+        current += char
+      }
+      tokenStarted = true
+      continue
+    }
+
+    if (char === '"' || char === "'") {
+      quoteChar = char
+      tokenStarted = true
+      continue
+    }
+
+    if (/\s/.test(char)) {
+      if (tokenStarted) {
+        args.push(current)
+        current = ''
+        tokenStarted = false
+      }
+      continue
+    }
+
+    current += char
+    tokenStarted = true
+  }
+
+  if (escaping) {
+    current += '\\'
+  }
+
+  if (tokenStarted) {
+    args.push(current)
+  }
+
+  return args
+}
 
 // ── Command Registry ──
 
@@ -75,9 +143,7 @@ function stripAtMention(content: string): string {
   // - @word, @_user_1, @中文名
   // - <@123456> (Discord style)
   // - Multiple consecutive mentions
-  let stripped = content
-    .replace(/^(?:<@[^>]+>\s*|@\S+\s*)+/, '')
-    .trim()
+  let stripped = content.replace(/^(?:<@[^>]+>\s*|@\S+\s*)+/, '').trim()
 
   // If stripping didn't help and content contains "/" somewhere, try to extract the command
   if (!stripped.startsWith('/') && content.includes('/')) {
@@ -104,7 +170,9 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
   const content = stripAtMention(raw)
   if (!content.startsWith('/')) return false
 
-  console.log(`[PluginCommand] Detected command in raw="${raw.slice(0, 80)}" → parsed="${content.slice(0, 80)}"`)
+  console.log(
+    `[PluginCommand] Detected command in raw="${raw.slice(0, 80)}" → parsed="${content.slice(0, 80)}"`
+  )
 
   // Parse: "/command args..."
   const spaceIdx = content.indexOf(' ')
@@ -122,12 +190,18 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
     if (result.reply) {
       const service = ctx.pluginManager.getService(ctx.pluginId)
       if (service) {
-        service.sendMessage(ctx.chatId, result.reply).catch((err) => {
+        const send =
+          ctx.pluginType === 'qq-bot' && ctx.data.messageId
+            ? service.replyMessage(ctx.data.messageId, result.reply)
+            : service.sendMessage(ctx.chatId, result.reply)
+        send.catch((err) => {
           console.error(`[PluginCommand] Failed to send ack for /${cmd}:`, err)
         })
       }
     }
-    console.log(`[PluginCommand] /${cmd} delegating to agent loop for plugin ${ctx.pluginId} chat ${ctx.chatId}`)
+    console.log(
+      `[PluginCommand] /${cmd} delegating to agent loop for plugin ${ctx.pluginId} chat ${ctx.chatId}`
+    )
     return result.rewriteContent
   }
 
@@ -137,7 +211,11 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
   if (result.reply) {
     const service = ctx.pluginManager.getService(ctx.pluginId)
     if (service) {
-      service.sendMessage(ctx.chatId, result.reply).catch((err) => {
+      const send =
+        ctx.pluginType === 'qq-bot' && ctx.data.messageId
+          ? service.replyMessage(ctx.data.messageId, result.reply)
+          : service.sendMessage(ctx.chatId, result.reply)
+      send.catch((err) => {
         console.error(`[PluginCommand] Failed to send reply for /${cmd}:`, err)
       })
     } else {
@@ -151,25 +229,28 @@ export function tryHandleCommand(ctx: CommandContext): boolean | string {
 
 // ── Command Handlers ──
 
-function handleHelp(_ctx: CommandContext, _args: string): CommandResult {
+function handleHelp(ctx: CommandContext, args: string): CommandResult {
+  void ctx
+  void args
   const helpText = [
     '📋 可用指令 / Available Commands',
     '',
     '/help      — 显示此帮助信息',
     '/new       — 清空当前会话，开始新对话',
-    '/init      — 分析项目并生成 AGENTS.md（AI 自动分析）',
+    '/init [args...] — 初始化 AGENTS/SOUL/USER/MEMORY 并分析项目更新 AGENTS.md',
     '/status    — 查看当前状态信息',
     '/stats     — 查看 Token 用量统计',
     '/compress  — 压缩上下文（清理旧工具结果和思考过程）',
     '',
     '💡 群聊中可使用 @机器人 + 指令，如 "@Bot /help"',
-    '直接发送消息即可与 AI 助手对话。',
+    '直接发送消息即可与 AI 助手对话。'
   ].join('\n')
 
   return { handled: true, reply: helpText }
 }
 
-function handleNew(ctx: CommandContext, _args: string): CommandResult {
+function handleNew(ctx: CommandContext, args: string): CommandResult {
+  void args
   if (!ctx.sessionId) {
     return { handled: true, reply: '当前没有活跃会话。\nNo active session found.' }
   }
@@ -180,45 +261,65 @@ function handleNew(ctx: CommandContext, _args: string): CommandResult {
     db.prepare('DELETE FROM messages WHERE session_id = ?').run(ctx.sessionId)
     // Update session title and timestamp
     const now = Date.now()
-    db.prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?')
-      .run('New Conversation', now, ctx.sessionId)
+    db.prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?').run(
+      'New Conversation',
+      now,
+      ctx.sessionId
+    )
 
     console.log(`[PluginCommand] Cleared session ${ctx.sessionId}`)
     return {
       handled: true,
-      reply: '✅ 会话已清空，开始新对话。\nSession cleared. Starting fresh.',
+      reply: '✅ 会话已清空，开始新对话。\nSession cleared. Starting fresh.'
     }
   } catch (err) {
     console.error('[PluginCommand] Failed to clear session:', err)
     return {
       handled: true,
-      reply: '❌ 清空会话失败，请稍后重试。\nFailed to clear session. Please try again.',
+      reply: '❌ 清空会话失败，请稍后重试。\nFailed to clear session. Please try again.'
     }
   }
 }
 
-function handleInit(ctx: CommandContext, _args: string): CommandResult {
+function handleInit(ctx: CommandContext, args: string): CommandResult {
   const agentsPath = path.join(ctx.pluginWorkDir, 'AGENTS.md')
-  const hasExisting = fs.existsSync(agentsPath)
+  const parsedArgs = tokenizeSlashCommandArguments(args)
 
-  // Ensure working directory exists
   if (!fs.existsSync(ctx.pluginWorkDir)) {
     fs.mkdirSync(ctx.pluginWorkDir, { recursive: true })
   }
 
-  // Build the agent prompt for codebase analysis and AGENTS.md generation
-  const initPrompt = buildInitAgentPrompt(ctx.pluginWorkDir, agentsPath, hasExisting)
+  const initialization = initializeWorkspaceMemoryFiles(ctx.pluginWorkDir)
+  const hasExistingAgents = initialization.existing.includes('AGENTS.md')
+
+  const initPrompt = buildInitAgentPrompt({
+    workDir: ctx.pluginWorkDir,
+    agentsPath,
+    hasExistingAgents,
+    createdFiles: initialization.created,
+    existingFiles: initialization.existing,
+    rawArgs: args,
+    parsedArgs
+  })
+
+  const statusLine = [
+    initialization.created.length > 0
+      ? `🧩 已初始化模板文件: ${initialization.created.join(', ')}`
+      : '🧩 模板文件已存在，跳过初始化。',
+    hasExistingAgents
+      ? '🔄 正在分析项目并更新 AGENTS.md...'
+      : '🔍 正在分析项目结构，生成 AGENTS.md...'
+  ].join('\n')
 
   return {
     handled: false,
-    reply: hasExisting
-      ? `🔄 正在分析项目并更新 AGENTS.md...\nAnalyzing project and updating AGENTS.md...`
-      : `🔍 正在分析项目结构，生成 AGENTS.md...\nAnalyzing project structure to generate AGENTS.md...`,
-    rewriteContent: initPrompt,
+    reply: `${statusLine}\n${hasExistingAgents ? 'Analyzing project and updating AGENTS.md...' : 'Analyzing project structure to generate AGENTS.md...'}`,
+    rewriteContent: initPrompt
   }
 }
 
-function handleStatus(ctx: CommandContext, _args: string): CommandResult {
+function handleStatus(ctx: CommandContext, args: string): CommandResult {
+  void args
   const lines: string[] = ['📊 当前状态 / Status']
 
   // Plugin info
@@ -228,7 +329,9 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
       const plugins = JSON.parse(fs.readFileSync(PLUGINS_FILE, 'utf-8')) as ChannelInstance[]
       pluginInstance = plugins.find((p) => p.id === ctx.pluginId)
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   // ── Plugin Basic Info ──
   lines.push('')
@@ -239,7 +342,9 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
   // Service status
   const service = ctx.pluginManager.getService(ctx.pluginId)
   const status = ctx.pluginManager.getStatus(ctx.pluginId)
-  lines.push(`⚡ 运行状态: ${status === 'running' ? '运行中 ✅' : status === 'error' ? '异常 ❌' : '已停止 ⏹'}`)
+  lines.push(
+    `⚡ 运行状态: ${status === 'running' ? '运行中 ✅' : status === 'error' ? '异常 ❌' : '已停止 ⏹'}`
+  )
 
   // ── Model & Provider ──
   lines.push('')
@@ -253,11 +358,17 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
   }
 
   // ── Features ──
-  const features = pluginInstance?.features ?? { autoReply: true, streamingReply: true, autoStart: true }
+  const features = pluginInstance?.features ?? {
+    autoReply: true,
+    streamingReply: true,
+    autoStart: true
+  }
   lines.push('')
   lines.push(`📋 功能开关:`)
   lines.push(`  自动回复: ${features.autoReply ? '✅ 开启' : '❌ 关闭'}`)
-  lines.push(`  流式回复: ${features.streamingReply && service?.supportsStreaming ? '✅ 开启' : '❌ 关闭'}`)
+  lines.push(
+    `  流式回复: ${features.streamingReply && service?.supportsStreaming ? '✅ 开启' : '❌ 关闭'}`
+  )
   lines.push(`  自动启动: ${features.autoStart ? '✅ 开启' : '❌ 关闭'}`)
 
   // ── Permissions ──
@@ -276,9 +387,11 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
   if (ctx.sessionId) {
     try {
       const db = getDb()
-      const sessionRow = db.prepare('SELECT title, created_at, updated_at FROM sessions WHERE id = ?')
+      const sessionRow = db
+        .prepare('SELECT title, created_at, updated_at FROM sessions WHERE id = ?')
         .get(ctx.sessionId) as { title: string; created_at: number; updated_at: number } | undefined
-      const msgCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE session_id = ?')
+      const msgCount = db
+        .prepare('SELECT COUNT(*) as count FROM messages WHERE session_id = ?')
         .get(ctx.sessionId) as { count: number } | undefined
 
       lines.push(`💬 会话: ${sessionRow?.title ?? '未命名'}`)
@@ -289,15 +402,21 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
       if (sessionRow?.updated_at) {
         lines.push(`  最后活跃: ${new Date(sessionRow.updated_at).toLocaleString('zh-CN')}`)
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   } else {
     lines.push(`💬 会话: 无活跃会话`)
   }
 
-  // ── AGENTS.md & Working Directory ──
+  // ── Workspace Memory & Working Directory ──
   lines.push('')
-  const agentsPath = path.join(ctx.pluginWorkDir, 'AGENTS.md')
-  lines.push(`📝 AGENTS.md: ${fs.existsSync(agentsPath) ? '已配置 ✅' : '未初始化（使用 /init 创建）'}`)
+  for (const filename of WORKSPACE_MEMORY_TEMPLATE_FILES) {
+    const filePath = path.join(ctx.pluginWorkDir, filename)
+    lines.push(
+      `📝 ${filename}: ${fs.existsSync(filePath) ? '已配置 ✅' : '未初始化（使用 /init 创建）'}`
+    )
+  }
   lines.push(`📁 工作目录: ${ctx.pluginWorkDir}`)
 
   // ── System Info ──
@@ -308,7 +427,8 @@ function handleStatus(ctx: CommandContext, _args: string): CommandResult {
   return { handled: true, reply: lines.join('\n') }
 }
 
-function handleCompress(ctx: CommandContext, _args: string): CommandResult {
+function handleCompress(ctx: CommandContext, args: string): CommandResult {
+  void args
   if (!ctx.sessionId) {
     return { handled: true, reply: '当前没有活跃会话。\nNo active session found.' }
   }
@@ -317,9 +437,11 @@ function handleCompress(ctx: CommandContext, _args: string): CommandResult {
     const db = getDb()
 
     // Fetch all messages for this session
-    const rows = db.prepare(
-      'SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY created_at ASC'
-    ).all(ctx.sessionId) as Array<{ id: string; role: string; content: string }>
+    const rows = db
+      .prepare(
+        'SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY created_at ASC'
+      )
+      .all(ctx.sessionId) as Array<{ id: string; role: string; content: string }>
 
     if (rows.length < 6) {
       return { handled: true, reply: '消息数量较少，无需压缩。\nToo few messages to compress.' }
@@ -344,7 +466,8 @@ function handleCompress(ctx: CommandContext, _args: string): CommandResult {
       const newBlocks = (content as Array<Record<string, unknown>>).map((block) => {
         // Clear old tool_result content (keep short ones)
         if (block.type === 'tool_result') {
-          const text = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+          const text =
+            typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
           if (text.length > 200) {
             changed = true
             return { ...block, content: '[Context compressed — stale tool result cleared]' }
@@ -359,8 +482,10 @@ function handleCompress(ctx: CommandContext, _args: string): CommandResult {
       })
 
       if (changed) {
-        db.prepare('UPDATE messages SET content = ? WHERE id = ?')
-          .run(JSON.stringify(newBlocks), row.id)
+        db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(
+          JSON.stringify(newBlocks),
+          row.id
+        )
         compressedCount++
       }
     }
@@ -369,21 +494,72 @@ function handleCompress(ctx: CommandContext, _args: string): CommandResult {
       return { handled: true, reply: '上下文已经很精简，无需压缩。\nContext is already compact.' }
     }
 
-    console.log(`[PluginCommand] Compressed ${compressedCount} messages in session ${ctx.sessionId}`)
+    console.log(
+      `[PluginCommand] Compressed ${compressedCount} messages in session ${ctx.sessionId}`
+    )
     return {
       handled: true,
-      reply: `✅ 上下文已压缩，清理了 ${compressedCount} 条消息中的旧工具结果和思考过程。\nCompressed ${compressedCount} messages (stale tool results and thinking blocks cleared).`,
+      reply: `✅ 上下文已压缩，清理了 ${compressedCount} 条消息中的旧工具结果和思考过程。\nCompressed ${compressedCount} messages (stale tool results and thinking blocks cleared).`
     }
   } catch (err) {
     console.error('[PluginCommand] Failed to compress context:', err)
     return {
       handled: true,
-      reply: '❌ 压缩失败，请稍后重试。\nCompression failed. Please try again.',
+      reply: '❌ 压缩失败，请稍后重试。\nCompression failed. Please try again.'
     }
   }
 }
 
-function handleStats(ctx: CommandContext, _args: string): CommandResult {
+function getBundledAgentTemplatesDir(): string {
+  const isDev = !app.isPackaged
+  if (isDev) {
+    return path.join(app.getAppPath(), 'resources', 'agents', 'templates')
+  }
+
+  const unpackedDir = path.join(
+    process.resourcesPath,
+    'app.asar.unpacked',
+    'resources',
+    'agents',
+    'templates'
+  )
+  if (fs.existsSync(unpackedDir)) {
+    return unpackedDir
+  }
+
+  return path.join(process.resourcesPath, 'resources', 'agents', 'templates')
+}
+
+function initializeWorkspaceMemoryFiles(workDir: string): {
+  created: WorkspaceMemoryTemplateFile[]
+  existing: WorkspaceMemoryTemplateFile[]
+} {
+  const bundledDir = getBundledAgentTemplatesDir()
+  const created: WorkspaceMemoryTemplateFile[] = []
+  const existing: WorkspaceMemoryTemplateFile[] = []
+
+  for (const filename of WORKSPACE_MEMORY_TEMPLATE_FILES) {
+    const targetPath = path.join(workDir, filename)
+    if (fs.existsSync(targetPath)) {
+      existing.push(filename)
+      continue
+    }
+
+    const templatePath = path.join(bundledDir, filename)
+    if (!fs.existsSync(templatePath)) {
+      console.warn(`[PluginCommand] Missing bundled template: ${templatePath}`)
+      continue
+    }
+
+    fs.copyFileSync(templatePath, targetPath)
+    created.push(filename)
+  }
+
+  return { created, existing }
+}
+
+function handleStats(ctx: CommandContext, args: string): CommandResult {
+  void args
   if (!ctx.sessionId) {
     return { handled: true, reply: '当前没有活跃会话。\nNo active session found.' }
   }
@@ -392,9 +568,11 @@ function handleStats(ctx: CommandContext, _args: string): CommandResult {
     const db = getDb()
 
     // Fetch all assistant messages with usage data for this session
-    const rows = db.prepare(
-      'SELECT usage, created_at FROM messages WHERE session_id = ? AND role = ? AND usage IS NOT NULL ORDER BY created_at ASC'
-    ).all(ctx.sessionId, 'assistant') as Array<{ usage: string; created_at: number }>
+    const rows = db
+      .prepare(
+        'SELECT usage, created_at FROM messages WHERE session_id = ? AND role = ? AND usage IS NOT NULL ORDER BY created_at ASC'
+      )
+      .all(ctx.sessionId, 'assistant') as Array<{ usage: string; created_at: number }>
 
     if (rows.length === 0) {
       return { handled: true, reply: '暂无 Token 用量数据。\nNo token usage data available.' }
@@ -413,20 +591,23 @@ function handleStats(ctx: CommandContext, _args: string): CommandResult {
         const usage = JSON.parse(row.usage) as {
           inputTokens?: number
           outputTokens?: number
+          billableInputTokens?: number
           cacheCreationTokens?: number
           cacheReadTokens?: number
           reasoningTokens?: number
           totalDurationMs?: number
           requestTimings?: Array<unknown>
         }
-        totalInput += usage.inputTokens ?? 0
+        totalInput += usage.billableInputTokens ?? usage.inputTokens ?? 0
         totalOutput += usage.outputTokens ?? 0
         totalCacheCreation += usage.cacheCreationTokens ?? 0
         totalCacheRead += usage.cacheReadTokens ?? 0
         totalReasoning += usage.reasoningTokens ?? 0
         totalDurationMs += usage.totalDurationMs ?? 0
         requestCount += usage.requestTimings?.length ?? 1
-      } catch { /* skip malformed usage */ }
+      } catch {
+        /* skip malformed usage */
+      }
     }
 
     const totalTokens = totalInput + totalOutput
@@ -460,7 +641,9 @@ function handleStats(ctx: CommandContext, _args: string): CommandResult {
 
     if (totalDurationMs > 0) {
       const totalSec = totalDurationMs / 1000
-      lines.push(`⏱️ 总耗时: ${totalSec < 60 ? `${totalSec.toFixed(1)}s` : `${(totalSec / 60).toFixed(1)}min`}`)
+      lines.push(
+        `⏱️ 总耗时: ${totalSec < 60 ? `${totalSec.toFixed(1)}s` : `${(totalSec / 60).toFixed(1)}min`}`
+      )
     }
 
     // Session time range
@@ -478,28 +661,59 @@ function handleStats(ctx: CommandContext, _args: string): CommandResult {
     console.error('[PluginCommand] Failed to get stats:', err)
     return {
       handled: true,
-      reply: '❌ 获取统计信息失败。\nFailed to get usage stats.',
+      reply: '❌ 获取统计信息失败。\nFailed to get usage stats.'
     }
   }
 }
 
 // ── /init Agent Prompt Builder ──
 
-function buildInitAgentPrompt(workDir: string, agentsPath: string, hasExisting: boolean): string {
-  const existingNote = hasExisting
+function buildInitAgentPrompt(options: {
+  workDir: string
+  agentsPath: string
+  hasExistingAgents: boolean
+  createdFiles: WorkspaceMemoryTemplateFile[]
+  existingFiles: WorkspaceMemoryTemplateFile[]
+  rawArgs: string
+  parsedArgs: string[]
+}): string {
+  const {
+    workDir,
+    agentsPath,
+    hasExistingAgents,
+    createdFiles,
+    existingFiles,
+    rawArgs,
+    parsedArgs
+  } = options
+  const existingNote = hasExistingAgents
     ? `There is already an AGENTS.md at \`${agentsPath}\`. Read it first and suggest improvements — preserve any user-customized sections while enhancing the auto-generated parts.`
     : `No AGENTS.md exists yet. Create a new one at \`${agentsPath}\`.`
+  const initializedNote =
+    createdFiles.length > 0
+      ? `The workspace memory templates were just initialized: ${createdFiles.map((file) => `\`${file}\``).join(', ')}. Keep their intent intact. You may lightly tailor AGENTS.md to the repository, but do not overwrite SOUL.md, USER.md, or MEMORY.md unless the user explicitly asked for it.`
+      : existingFiles.length > 0
+        ? `The workspace already contains memory files: ${existingFiles.map((file) => `\`${file}\``).join(', ')}. Read them before changing anything and preserve user-authored content.`
+        : 'No workspace memory files were pre-existing.'
+  const argsNote = rawArgs
+    ? `The user passed slash-command arguments to /init.
+- Raw arguments: ${rawArgs}
+- Parsed arguments: ${JSON.stringify(parsedArgs)}
+Treat them as explicit scope or preferences for initialization, and honor them when analyzing the workspace.`
+    : 'No slash-command arguments were provided.'
 
   return `[System Command: /init]
 
-Please analyze the codebase in \`${workDir}\` and ${hasExisting ? 'update' : 'create'} an AGENTS.md file.
+Please analyze the codebase in \`${workDir}\` and ${hasExistingAgents ? 'update' : 'create'} an AGENTS.md file.
 
 ${existingNote}
+${initializedNote}
+${argsNote}
 
 **Your task:**
 1. Explore the project structure using Glob, Grep, and Read tools. Look at package.json, README.md, config files, source entry points, and key modules.
 2. Identify the tech stack, build system, common commands (build, lint, test, dev), and project architecture.
-3. ${hasExisting ? 'Update' : 'Write'} the AGENTS.md file at \`${agentsPath}\` with the following structure:
+3. ${hasExistingAgents ? 'Update' : 'Write'} the AGENTS.md file at \`${agentsPath}\` with the following structure:
 
 \`\`\`
 # AGENTS.md

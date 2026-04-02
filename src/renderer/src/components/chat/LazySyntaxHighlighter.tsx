@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useTheme } from 'next-themes'
 
 type AsyncLightHighlighter = React.ComponentType<Record<string, unknown>> & {
   registerLanguage?: (name: string, grammar: unknown) => void
@@ -6,7 +7,8 @@ type AsyncLightHighlighter = React.ComponentType<Record<string, unknown>> & {
 
 interface HighlighterRuntime {
   Highlighter: AsyncLightHighlighter
-  style: Record<string, React.CSSProperties>
+  darkStyle: Record<string, React.CSSProperties>
+  lightStyle: Record<string, React.CSSProperties>
 }
 
 const LANGUAGE_ALIASES: Record<string, string> = {
@@ -20,11 +22,10 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   htm: 'markup',
   xml: 'markup',
   svg: 'markup',
-  text: 'plaintext',
+  text: 'plaintext'
 }
 
 const LANGUAGE_LOADERS: Record<string, () => Promise<{ default: unknown }>> = {
-  plaintext: async () => ({ default: {} }),
   typescript: () => import('react-syntax-highlighter/dist/esm/languages/prism/typescript'),
   javascript: () => import('react-syntax-highlighter/dist/esm/languages/prism/javascript'),
   python: () => import('react-syntax-highlighter/dist/esm/languages/prism/python'),
@@ -55,7 +56,7 @@ const LANGUAGE_LOADERS: Record<string, () => Promise<{ default: unknown }>> = {
   dart: () => import('react-syntax-highlighter/dist/esm/languages/prism/dart'),
   toml: () => import('react-syntax-highlighter/dist/esm/languages/prism/toml'),
   ini: () => import('react-syntax-highlighter/dist/esm/languages/prism/ini'),
-  markup: () => import('react-syntax-highlighter/dist/esm/languages/prism/markup'),
+  markup: () => import('react-syntax-highlighter/dist/esm/languages/prism/markup')
 }
 
 let runtimePromise: Promise<HighlighterRuntime> | null = null
@@ -72,10 +73,11 @@ async function ensureRuntime(): Promise<HighlighterRuntime> {
   if (runtimePromise) return runtimePromise
   runtimePromise = Promise.all([
     import('react-syntax-highlighter/dist/esm/prism-async-light'),
-    import('react-syntax-highlighter/dist/esm/styles/prism'),
+    import('react-syntax-highlighter/dist/esm/styles/prism')
   ]).then(([highlighterMod, styleMod]) => ({
     Highlighter: highlighterMod.default as unknown as AsyncLightHighlighter,
-    style: styleMod.oneDark,
+    darkStyle: styleMod.oneDark,
+    lightStyle: styleMod.oneLight
   }))
   return runtimePromise
 }
@@ -115,10 +117,13 @@ export function LazySyntaxHighlighter({
   children,
   ...rest
 }: LazySyntaxHighlighterProps): React.JSX.Element {
+  const { resolvedTheme } = useTheme()
   const [runtime, setRuntime] = React.useState<HighlighterRuntime | null>(null)
   const normalizedLanguage = normalizeLanguage(language)
+  const canHighlight = normalizedLanguage !== 'plaintext' && normalizedLanguage in LANGUAGE_LOADERS
 
   React.useEffect(() => {
+    if (!canHighlight) return
     let cancelled = false
     ensureRuntime().then((loaded) => {
       if (!cancelled) setRuntime(loaded)
@@ -126,14 +131,14 @@ export function LazySyntaxHighlighter({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [canHighlight])
 
   React.useEffect(() => {
-    if (!runtime) return
+    if (!runtime || !canHighlight) return
     void ensureLanguageLoaded(normalizedLanguage)
-  }, [runtime, normalizedLanguage])
+  }, [runtime, normalizedLanguage, canHighlight])
 
-  if (!runtime) {
+  if (!runtime || !canHighlight) {
     return (
       <pre className="overflow-auto whitespace-pre-wrap break-words text-xs font-mono">
         {children}
@@ -143,7 +148,11 @@ export function LazySyntaxHighlighter({
 
   const Highlighter = runtime.Highlighter
   return (
-    <Highlighter language={normalizedLanguage} style={runtime.style} {...rest}>
+    <Highlighter
+      language={normalizedLanguage}
+      style={resolvedTheme === 'light' ? runtime.lightStyle : runtime.darkStyle}
+      {...rest}
+    >
       {children}
     </Highlighter>
   )

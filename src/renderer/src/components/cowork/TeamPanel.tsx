@@ -29,6 +29,7 @@ import { teamEvents } from '@renderer/lib/agent/teams/events'
 import { ToolCallCard } from '@renderer/components/chat/ToolCallCard'
 import { cn } from '@renderer/lib/utils'
 import { nanoid } from 'nanoid'
+import { getBillableTotalTokens } from '@renderer/lib/format-tokens'
 import type { TeamMember, TeamTask, TeamMessage } from '@renderer/lib/agent/teams/types'
 import { useTranslation } from 'react-i18next'
 import * as React from 'react'
@@ -200,6 +201,12 @@ const MemberDetailRow = React.memo(function MemberDetailRow({
         <div className="ml-4 mr-1 mt-0.5 mb-2 space-y-2 border-l-2 border-cyan-500/15 pl-3">
           {/* Meta info */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground/60">
+            {member.agentName && (
+              <span className="flex items-center gap-0.5 text-violet-500/80">
+                <Bot className="size-2.5" />
+                {member.agentName}
+              </span>
+            )}
             {member.model !== 'default' && (
               <span className="flex items-center gap-0.5">
                 <Bot className="size-2.5" />
@@ -209,10 +216,10 @@ const MemberDetailRow = React.memo(function MemberDetailRow({
             {member.iteration > 0 && <span>Iter {member.iteration}</span>}
             <span>{member.toolCalls.length} tool calls</span>
             <span>{formatElapsed(elapsed)}</span>
-            {member.usage && member.usage.inputTokens + member.usage.outputTokens > 0 && (
+            {member.usage && getBillableTotalTokens(member.usage) > 0 && (
               <span className="flex items-center gap-0.5">
                 <Zap className="size-2.5" />
-                {formatTokenCount(member.usage.inputTokens + member.usage.outputTokens)} tokens
+                {formatTokenCount(getBillableTotalTokens(member.usage))} tokens
               </span>
             )}
           </div>

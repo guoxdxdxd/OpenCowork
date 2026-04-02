@@ -8,17 +8,21 @@ import {
   Terminal,
   Square,
   HelpCircle,
-  User,
   Camera,
   Check,
   Pencil,
-  Globe
+  Globe,
+  Languages,
+  Download,
+  Loader2
 } from 'lucide-react'
+import appIconUrl from '../../../../../resources/icon.png'
 import { Button } from '@renderer/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@renderer/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@renderer/components/ui/hover-card'
 import { Input } from '@renderer/components/ui/input'
+import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { cn } from '@renderer/lib/utils'
 import { useAgentStore } from '@renderer/stores/agent-store'
@@ -28,11 +32,24 @@ import { useChatStore } from '@renderer/stores/chat-store'
 import { pickFriendlyMessage, type FriendlyStatus } from '@renderer/lib/api/generate-title'
 import { useTheme } from 'next-themes'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import { useShallow } from 'zustand/react/shallow'
 import { WindowControls } from './WindowControls'
 
-export function TitleBar(): React.JSX.Element {
+interface TitleBarUpdateInfo {
+  newVersion: string
+  downloading: boolean
+  downloadProgress: number | null
+}
+
+interface TitleBarProps {
+  updateInfo: TitleBarUpdateInfo | null
+  onOpenUpdateDialog: () => void
+}
+
+export function TitleBar({ updateInfo, onOpenUpdateDialog }: TitleBarProps): React.JSX.Element {
   const { t, i18n } = useTranslation('layout')
+  const { t: tCommon } = useTranslation('common')
   const isMac = /Mac/.test(navigator.userAgent)
   const openDetailPanel = useUIStore((s) => s.openDetailPanel)
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
@@ -41,10 +58,13 @@ export function TitleBar(): React.JSX.Element {
   const userAvatar = useSettingsStore((s) => s.userAvatar)
   const userName = useSettingsStore((s) => s.userName)
   const language = useSettingsStore((s) => s.language)
+  const translatePageOpen = useUIStore((s) => s.translatePageOpen)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [isEditingName, setIsEditingName] = useState(false)
   const [editName, setEditName] = useState(userName)
   const [friendlyMessage, setFriendlyMessage] = useState('')
+  const hasCustomAvatar = Boolean(userAvatar)
+  const displayAvatar = userAvatar || appIconUrl
 
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const streamingMessageId = useChatStore((s) => s.streamingMessageId)
@@ -140,6 +160,16 @@ export function TitleBar(): React.JSX.Element {
     e.target.value = ''
   }
 
+  const handleToggleAutoApprove = async (): Promise<void> => {
+    if (!autoApprove) {
+      const ok = await confirm({ title: t('autoApproveConfirm') })
+      if (!ok) return
+    }
+
+    useSettingsStore.getState().updateSettings({ autoApprove: !autoApprove })
+    toast.success(t(autoApprove ? 'autoApproveOff' : 'autoApproveOn'))
+  }
+
   return (
     <header
       className={cn(
@@ -162,11 +192,11 @@ export function TitleBar(): React.JSX.Element {
         <HoverCard>
           <HoverCardTrigger asChild>
             <button className="flex size-7 items-center justify-center overflow-hidden rounded-full bg-muted ring-1 ring-border/50 transition-all hover:ring-primary/50 hover:scale-105">
-              {userAvatar ? (
-                <img src={userAvatar} alt="avatar" className="size-full object-cover" />
-              ) : (
-                <User className="size-4 text-muted-foreground" />
-              )}
+              <img
+                src={displayAvatar}
+                alt="avatar"
+                className={hasCustomAvatar ? 'size-full object-cover' : 'size-full object-contain p-0.5'}
+              />
             </button>
           </HoverCardTrigger>
           <HoverCardContent side="bottom" align="start" className="w-60 p-0 overflow-hidden">
@@ -179,11 +209,11 @@ export function TitleBar(): React.JSX.Element {
                 onClick={handleAvatarClick}
                 className="group relative flex size-14 items-center justify-center overflow-hidden rounded-full bg-muted ring-2 ring-background shadow-md transition-all hover:ring-primary/50"
               >
-                {userAvatar ? (
-                  <img src={userAvatar} alt="avatar" className="size-full object-cover" />
-                ) : (
-                  <User className="size-7 text-muted-foreground" />
-                )}
+                <img
+                  src={displayAvatar}
+                  alt="avatar"
+                  className={hasCustomAvatar ? 'size-full object-cover' : 'size-full object-contain p-1'}
+                />
                 <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
                   <Camera className="size-4 text-white" />
                 </div>
@@ -251,6 +281,16 @@ export function TitleBar(): React.JSX.Element {
             {/* Menu items */}
             <div className="border-t px-1 py-1">
               <button
+                onClick={() => useUIStore.getState().openTranslatePage()}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors',
+                  translatePageOpen && 'bg-muted text-foreground'
+                )}
+              >
+                <Languages className="size-3.5" />
+                {t('navRail.translate')}
+              </button>
+              <button
                 onClick={toggleTheme}
                 className="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
               >
@@ -306,15 +346,56 @@ export function TitleBar(): React.JSX.Element {
 
       {/* Right-side controls */}
       <div className="flex shrink-0 items-center gap-1">
-        {/* Auto-approve warning */}
-        {autoApprove && (
+        {updateInfo && (
           <Tooltip>
-            <TooltipTrigger className="titlebar-no-drag rounded bg-destructive/10 px-1.5 py-0.5 text-[9px] font-medium text-destructive cursor-default">
-              AUTO
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="titlebar-no-drag h-7 gap-1.5 border-amber-500/30 bg-amber-500/10 px-2 text-[10px] text-amber-600 hover:bg-amber-500/15 dark:text-amber-400"
+                onClick={onOpenUpdateDialog}
+              >
+                {updateInfo.downloading ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Download className="size-3.5" />
+                )}
+                {updateInfo.downloading
+                  ? typeof updateInfo.downloadProgress === 'number'
+                    ? tCommon('app.update.downloadingShort', {
+                        progress: Math.round(updateInfo.downloadProgress)
+                      })
+                    : tCommon('app.update.downloading')
+                  : tCommon('app.update.buttonLabel', { version: updateInfo.newVersion })}
+              </Button>
             </TooltipTrigger>
-            <TooltipContent>{t('topbar.autoApproveOn')}</TooltipContent>
+            <TooltipContent>{tCommon('app.update.buttonTooltip')}</TooltipContent>
           </Tooltip>
         )}
+
+        {/* Auto-approve toggle */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-pressed={autoApprove}
+              aria-label={autoApprove ? t('topbar.autoApproveOn') : t('topbar.autoApproveOff')}
+              className={cn(
+                'titlebar-no-drag rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors',
+                autoApprove
+                  ? 'bg-destructive/10 text-destructive hover:bg-destructive/15'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground'
+              )}
+              onClick={() => void handleToggleAutoApprove()}
+            >
+              AUTO
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {autoApprove ? t('topbar.autoApproveOn') : t('topbar.autoApproveOff')} ·{' '}
+            {t('topbar.clickToSwitch')}
+          </TooltipContent>
+        </Tooltip>
 
         {/* Pending approval indicator */}
         {pendingApprovals > 0 && (
@@ -429,16 +510,15 @@ export function TitleBar(): React.JSX.Element {
         {/* Help */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <a
-              href="https://open-cowork.shop/"
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
               className="titlebar-no-drag inline-flex size-7 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 transition-all"
+              onClick={() => useUIStore.getState().setConversationGuideOpen(true)}
             >
               <HelpCircle className="size-4" />
-            </a>
+            </button>
           </TooltipTrigger>
-          <TooltipContent>{t('topbar.help', { defaultValue: 'Help Center' })}</TooltipContent>
+          <TooltipContent>{t('topbar.help', { defaultValue: '新人引导' })}</TooltipContent>
         </Tooltip>
       </div>
 

@@ -1,8 +1,30 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
-import { Search, FolderOpen, Trash2, Plus, Wand2, ArrowLeft, Pencil, Eye, Save, Download, FileText, FileCode, CheckCircle2, Loader2, Settings2, ExternalLink, AlertCircle, KeyRound } from 'lucide-react'
+import {
+  Search,
+  FolderOpen,
+  Trash2,
+  Plus,
+  Wand2,
+  ArrowLeft,
+  Pencil,
+  Eye,
+  Save,
+  Download,
+  FileText,
+  FileCode,
+  CheckCircle2,
+  Loader2,
+  Settings2,
+  ExternalLink,
+  KeyRound
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@renderer/lib/utils'
-import { useSkillsStore, type ScanFileInfo, type MarketSkillInfo } from '@renderer/stores/skills-store'
+import {
+  useSkillsStore,
+  type ScanFileInfo,
+  type MarketSkillInfo
+} from '@renderer/stores/skills-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { confirm } from '@renderer/components/ui/confirm-dialog'
@@ -15,6 +37,9 @@ import { toast } from 'sonner'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { SkillInstallDialog } from './SkillInstallDialog'
 
+const SKILLS_MARKET_DOCS_URL = 'https://skills.open-cowork.shop/docs'
+const SKILLS_MARKET_DASHBOARD_URL = 'https://skills.open-cowork.shop/dashboard'
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -22,13 +47,30 @@ function formatSize(bytes: number): string {
 }
 
 function FileIcon({ type }: { type: string }): React.JSX.Element {
-  const codeExts = new Set(['.py', '.js', '.ts', '.sh', '.bash', '.ps1', '.bat', '.cmd', '.rb', '.pl'])
+  const codeExts = new Set([
+    '.py',
+    '.js',
+    '.ts',
+    '.sh',
+    '.bash',
+    '.ps1',
+    '.bat',
+    '.cmd',
+    '.rb',
+    '.pl'
+  ])
   if (type === '.md') return <FileText className="size-3.5 text-blue-500" />
   if (codeExts.has(type)) return <FileCode className="size-3.5 text-amber-500" />
   return <FileText className="size-3.5 text-muted-foreground" />
 }
 
-function FileListSection({ files, t }: { files: ScanFileInfo[]; t: (key: string) => string }): React.JSX.Element {
+function FileListSection({
+  files,
+  t
+}: {
+  files: ScanFileInfo[]
+  t: (key: string) => string
+}): React.JSX.Element {
   if (files.length === 0) {
     return <p className="text-xs text-muted-foreground px-1">{t('skillsPage.noFiles')}</p>
   }
@@ -40,10 +82,15 @@ function FileListSection({ files, t }: { files: ScanFileInfo[]; t: (key: string)
       </h4>
       <div className="space-y-0 max-h-48 overflow-y-auto">
         {files.map((file) => (
-          <div key={file.name} className="flex items-center gap-2 text-xs px-1 py-0.5 rounded hover:bg-muted/50">
+          <div
+            key={file.name}
+            className="flex items-center gap-2 text-xs px-1 py-0.5 rounded hover:bg-muted/50"
+          >
             <FileIcon type={file.type} />
             <span className="flex-1 truncate font-mono text-[11px]">{file.name}</span>
-            <span className="text-muted-foreground text-[10px] shrink-0">{formatSize(file.size)}</span>
+            <span className="text-muted-foreground text-[10px] shrink-0">
+              {formatSize(file.size)}
+            </span>
           </div>
         ))}
       </div>
@@ -56,44 +103,62 @@ function FileListSection({ files, t }: { files: ScanFileInfo[]; t: (key: string)
 function MarketSkillCard({
   skill,
   installed,
-  onInstall,
+  onInstall
 }: {
   skill: MarketSkillInfo
   installed: boolean
   onInstall: () => void
 }): React.JSX.Element {
   const { t } = useTranslation('layout')
+  const updatedAtLabel = skill.updatedAt
+    ? new Intl.DateTimeFormat(undefined, {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(new Date(skill.updatedAt))
+    : null
+
   return (
     <div className="rounded-lg border bg-card p-4 hover:shadow-md transition-shadow flex flex-col h-full">
-      {/* Header */}
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-semibold truncate">{skill.name}</h3>
-          <p className="text-xs text-muted-foreground">{skill.owner}/{skill.repo}</p>
+          <p className="text-xs font-mono text-muted-foreground truncate">{skill.slug}</p>
         </div>
         <div className="size-8 shrink-0 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 border border-border/60 flex items-center justify-center">
           <Wand2 className="size-4 text-primary/70" />
         </div>
       </div>
 
-      {/* Description */}
-      {skill.description && (
-        <p className="text-xs text-muted-foreground line-clamp-2 mb-3 flex-1">{skill.description}</p>
+      {skill.description ? (
+        <p className="text-xs text-muted-foreground line-clamp-2 mb-3">{skill.description}</p>
+      ) : (
+        <div className="mb-3 flex-1" />
       )}
 
-      {/* Stats */}
+      {(skill.category || skill.tags.length > 0) && (
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {skill.category ? (
+            <Badge variant="outline" className="text-[10px]">
+              {skill.category}
+            </Badge>
+          ) : null}
+          {skill.tags.slice(0, 3).map((tag) => (
+            <Badge key={tag} variant="secondary" className="text-[10px] font-normal">
+              #{tag}
+            </Badge>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center gap-4 text-xs text-muted-foreground mb-3 py-2 border-t border-b">
         <div className="flex items-center gap-1">
           <Download className="size-3" />
-          <span>{skill.installs}</span>
+          <span>{skill.downloads}</span>
         </div>
-        <div className="flex items-center gap-1">
-          <Wand2 className="size-3" />
-          <span>Rank #{skill.rank}</span>
-        </div>
+        {updatedAtLabel ? <span className="font-mono text-[11px]">{updatedAtLabel}</span> : null}
       </div>
 
-      {/* Action */}
       <div className="mt-auto">
         {installed ? (
           <Badge variant="secondary" className="w-full justify-center gap-1 text-[11px]">
@@ -123,9 +188,12 @@ function MarketProviderConfig(): React.JSX.Element {
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   const loadMarketSkills = useSkillsStore((s) => s.loadMarketSkills)
 
-  const handleApiKeyChange = useCallback((value: string) => {
-    updateSettings({ skillsMarketApiKey: value })
-  }, [updateSettings])
+  const handleApiKeyChange = useCallback(
+    (value: string) => {
+      updateSettings({ skillsMarketApiKey: value })
+    },
+    [updateSettings]
+  )
 
   const handleReload = useCallback(() => {
     void loadMarketSkills('', true)
@@ -134,11 +202,7 @@ function MarketProviderConfig(): React.JSX.Element {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-        >
+        <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
           <Settings2 className="size-4" />
         </Button>
       </PopoverTrigger>
@@ -150,19 +214,29 @@ function MarketProviderConfig(): React.JSX.Element {
 
         {/* API Key */}
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between gap-2">
             <label className="text-xs font-medium flex items-center gap-1">
               <KeyRound className="size-3" />
               {t('skillsmarket.apiKey')}
             </label>
-            <Button
-              variant="link"
-              size="sm"
-              className="h-auto p-0 text-[10px] text-primary"
-              onClick={() => window.open('https://skillsmp.com', '_blank', 'noopener')}
-            >
-              {t('skillsmarket.getApiKey')} <ExternalLink className="ml-0.5 size-2.5" />
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-[10px] text-primary"
+                onClick={() => window.open(SKILLS_MARKET_DASHBOARD_URL, '_blank', 'noopener')}
+              >
+                {t('skillsmarket.getApiKey')} <ExternalLink className="ml-0.5 size-2.5" />
+              </Button>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-[10px] text-primary"
+                onClick={() => window.open(SKILLS_MARKET_DOCS_URL, '_blank', 'noopener')}
+              >
+                {t('skillsmarket.openDocs')} <ExternalLink className="ml-0.5 size-2.5" />
+              </Button>
+            </div>
           </div>
           <Input
             type="password"
@@ -210,9 +284,6 @@ export function SkillsPage(): React.JSX.Element {
   const setEditContent = useSkillsStore((s) => s.setEditContent)
   const setMarketQuery = useSkillsStore((s) => s.setMarketQuery)
 
-  // Skills market provider settings
-  const marketApiKey = useSettingsStore((s) => s.skillsMarketApiKey)
-
   // Installed tab search
   const [installedQuery, setInstalledQuery] = useState('')
 
@@ -221,16 +292,21 @@ export function SkillsPage(): React.JSX.Element {
     void loadMarketSkills('', true)
   }, [loadSkills, loadMarketSkills])
 
-  const installedNames = useMemo(() => new Set(skills.map((s) => s.name)), [skills])
+  const installedNames = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills])
 
   const filteredInstalled = useMemo(() => {
     if (!installedQuery.trim()) return skills
     const q = installedQuery.toLowerCase()
-    return skills.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q))
+    return skills.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
+    )
   }, [skills, installedQuery])
 
   const handleAddSkill = async (): Promise<void> => {
-    const result = (await ipcClient.invoke('fs:select-folder')) as { canceled?: boolean; path?: string }
+    const result = (await ipcClient.invoke('fs:select-folder')) as {
+      canceled?: boolean
+      path?: string
+    }
     if (result.canceled || !result.path) return
     useSkillsStore.getState().openInstallDialog(result.path)
   }
@@ -240,16 +316,23 @@ export function SkillsPage(): React.JSX.Element {
   }
 
   const handleDelete = async (name: string): Promise<void> => {
-    const ok = await confirm({ title: t('skillsPage.deleteConfirm', { name }), variant: 'destructive' })
+    const ok = await confirm({
+      title: t('skillsPage.deleteConfirm', { name }),
+      variant: 'destructive'
+    })
     if (!ok) return
     const success = await useSkillsStore.getState().deleteSkill(name)
-    toast[success ? 'success' : 'error'](success ? t('skillsPage.deleted', { name }) : t('skillsPage.deleteFailed'))
+    toast[success ? 'success' : 'error'](
+      success ? t('skillsPage.deleted', { name }) : t('skillsPage.deleteFailed')
+    )
   }
 
   const handleSave = async (): Promise<void> => {
     if (!selectedSkill || !editContent) return
     const success = await useSkillsStore.getState().saveSkill(selectedSkill, editContent)
-    toast[success ? 'success' : 'error'](success ? t('skillsPage.saved') : t('skillsPage.saveFailed'))
+    toast[success ? 'success' : 'error'](
+      success ? t('skillsPage.saved') : t('skillsPage.saveFailed')
+    )
   }
 
   const handleBack = (): void => useUIStore.getState().closeSkillsPage()
@@ -277,7 +360,9 @@ export function SkillsPage(): React.JSX.Element {
             onClick={() => setActiveTab(tab)}
             className={cn(
               'rounded-md px-3 py-1 text-xs font-medium transition-all',
-              activeTab === tab ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
+              activeTab === tab
+                ? 'bg-background shadow-sm text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
             )}
           >
             {t(`skillsPage.${tab}`)}
@@ -310,7 +395,12 @@ export function SkillsPage(): React.JSX.Element {
       {activeTab === 'market' && <MarketProviderConfig />}
 
       {activeTab === 'installed' && (
-        <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" onClick={() => void handleAddSkill()}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => void handleAddSkill()}
+        >
           <Plus className="size-3.5" />
           {t('skillsPage.addSkill')}
         </Button>
@@ -320,8 +410,6 @@ export function SkillsPage(): React.JSX.Element {
 
   // ── MARKET TAB — full-width grid ─────────────────────────────────────
   if (activeTab === 'market') {
-    const needsApiKey = !marketApiKey
-
     return (
       <div className="flex h-full flex-col">
         {TopBar}
@@ -331,29 +419,11 @@ export function SkillsPage(): React.JSX.Element {
           <div className="px-8 pt-8 pb-5 border-b shrink-0">
             <div className="flex items-end gap-3 mb-1">
               <h1 className="text-3xl font-bold tracking-tight">SKILLS</h1>
-              <span className="text-sm text-muted-foreground mb-1">{t('skillsPage.skillCount', { count: marketSkills.length })}</span>
+              <span className="text-sm text-muted-foreground mb-1">
+                {t('skillsPage.skillCount', { count: marketSkills.length })}
+              </span>
             </div>
             <p className="text-sm text-muted-foreground">{t('skillsPage.marketDescription')}</p>
-
-            {/* API key missing banner */}
-            {needsApiKey && (
-              <div className="mt-4 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-                <AlertCircle className="size-4 text-amber-500 shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-amber-700 dark:text-amber-400">{t('skillsPage.noApiKeyTitle')}</p>
-                  <p className="text-[11px] text-amber-600/80 dark:text-amber-400/70 mt-0.5">{t('skillsPage.noApiKeyDesc')}</p>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-xs shrink-0 border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10"
-                  onClick={() => window.open('https://skillsmp.com', '_blank', 'noopener')}
-                >
-                  <ExternalLink className="size-3 mr-1" />
-                  {t('skillsPage.getApiKey')}
-                </Button>
-              </div>
-            )}
           </div>
 
           {/* Grid */}
@@ -374,7 +444,10 @@ export function SkillsPage(): React.JSX.Element {
                     <MarketSkillCard
                       key={ms.id}
                       skill={ms}
-                      installed={installedNames.has(ms.name)}
+                      installed={
+                        installedNames.has(ms.slug.toLowerCase()) ||
+                        installedNames.has(ms.name.toLowerCase())
+                      }
                       onInstall={() => handleInstallMarket(ms)}
                     />
                   ))}
@@ -390,7 +463,10 @@ export function SkillsPage(): React.JSX.Element {
                       disabled={marketLoading}
                     >
                       {marketLoading ? (
-                        <><Loader2 className="size-3.5 animate-spin mr-2" />Loading...</>
+                        <>
+                          <Loader2 className="size-3.5 animate-spin mr-2" />
+                          Loading...
+                        </>
                       ) : (
                         `Load More (${marketSkills.length}/${marketTotal})`
                       )}
@@ -417,12 +493,20 @@ export function SkillsPage(): React.JSX.Element {
         <div className="flex w-64 shrink-0 flex-col border-r bg-muted/20 overflow-hidden">
           <div className="flex-1 overflow-y-auto px-2 py-2">
             {loading ? (
-              <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">Loading...</div>
+              <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
+                Loading...
+              </div>
             ) : filteredInstalled.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                 <Wand2 className="size-8 text-muted-foreground/30" />
-                <p className="text-xs text-muted-foreground">{skills.length === 0 ? t('skillsPage.noSkills') : t('skillsPage.noResults')}</p>
-                {skills.length === 0 && <p className="text-[10px] text-muted-foreground/60">{t('skillsPage.noSkillsDesc')}</p>}
+                <p className="text-xs text-muted-foreground">
+                  {skills.length === 0 ? t('skillsPage.noSkills') : t('skillsPage.noResults')}
+                </p>
+                {skills.length === 0 && (
+                  <p className="text-[10px] text-muted-foreground/60">
+                    {t('skillsPage.noSkillsDesc')}
+                  </p>
+                )}
               </div>
             ) : (
               <div className="flex flex-col gap-0.5">
@@ -432,11 +516,15 @@ export function SkillsPage(): React.JSX.Element {
                     onClick={() => selectSkill(skill.name)}
                     className={cn(
                       'flex flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors',
-                      selectedSkill === skill.name ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted'
+                      selectedSkill === skill.name
+                        ? 'bg-primary/10 text-primary'
+                        : 'text-foreground hover:bg-muted'
                     )}
                   >
                     <span className="text-xs font-medium truncate">{skill.name}</span>
-                    <span className="text-[10px] text-muted-foreground line-clamp-2">{skill.description}</span>
+                    <span className="text-[10px] text-muted-foreground line-clamp-2">
+                      {skill.description}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -456,7 +544,12 @@ export function SkillsPage(): React.JSX.Element {
                     <>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Button variant="ghost" size="icon" className="size-7" onClick={() => setEditing(false)}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7"
+                            onClick={() => setEditing(false)}
+                          >
                             <Eye className="size-3.5" />
                           </Button>
                         </TooltipTrigger>
@@ -464,7 +557,12 @@ export function SkillsPage(): React.JSX.Element {
                       </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Button variant="default" size="icon" className="size-7" onClick={() => void handleSave()}>
+                          <Button
+                            variant="default"
+                            size="icon"
+                            className="size-7"
+                            onClick={() => void handleSave()}
+                          >
                             <Save className="size-3.5" />
                           </Button>
                         </TooltipTrigger>
@@ -474,7 +572,12 @@ export function SkillsPage(): React.JSX.Element {
                   ) : (
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Button variant="ghost" size="icon" className="size-7" onClick={() => setEditing(true)}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-7"
+                          onClick={() => setEditing(true)}
+                        >
                           <Pencil className="size-3.5" />
                         </Button>
                       </TooltipTrigger>
@@ -483,7 +586,14 @@ export function SkillsPage(): React.JSX.Element {
                   )}
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="ghost" size="icon" className="size-7" onClick={() => void useSkillsStore.getState().openSkillFolder(selectedSkill)}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        onClick={() =>
+                          void useSkillsStore.getState().openSkillFolder(selectedSkill)
+                        }
+                      >
                         <FolderOpen className="size-3.5" />
                       </Button>
                     </TooltipTrigger>
@@ -491,7 +601,12 @@ export function SkillsPage(): React.JSX.Element {
                   </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="ghost" size="icon" className="size-7 text-destructive hover:text-destructive" onClick={() => void handleDelete(selectedSkill)}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7 text-destructive hover:text-destructive"
+                        onClick={() => void handleDelete(selectedSkill)}
+                      >
                         <Trash2 className="size-3.5" />
                       </Button>
                     </TooltipTrigger>
@@ -510,7 +625,9 @@ export function SkillsPage(): React.JSX.Element {
                   />
                 ) : skillContent ? (
                   <div className="p-4 space-y-4">
-                    <pre className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/90 font-mono">{skillContent}</pre>
+                    <pre className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/90 font-mono">
+                      {skillContent}
+                    </pre>
                     {skillFiles.length > 0 && (
                       <div className="border-t pt-4">
                         <FileListSection files={skillFiles} t={t} />
@@ -518,7 +635,9 @@ export function SkillsPage(): React.JSX.Element {
                     )}
                   </div>
                 ) : (
-                  <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">Loading...</div>
+                  <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
+                    Loading...
+                  </div>
                 )}
               </div>
             </>

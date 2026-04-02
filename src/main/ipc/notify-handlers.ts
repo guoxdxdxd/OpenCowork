@@ -1,4 +1,5 @@
 import { ipcMain, Notification } from 'electron'
+import { safeSendToAllWindows } from '../window-ipc'
 
 // Deduplication cache to prevent duplicate notifications
 const notificationCache = new Map<string, number>()
@@ -35,7 +36,7 @@ export function showSystemNotification(title: string, body: string): void {
       body,
       silent: false,
       urgency: 'critical', // Force notification to show even in focus assist mode
-      timeoutType: 'default',
+      timeoutType: 'default'
     })
 
     notification.on('show', () => {
@@ -54,15 +55,34 @@ export function showSystemNotification(title: string, body: string): void {
 }
 
 export function registerNotifyHandlers(): void {
-  ipcMain.handle('notify:desktop', async (_event, args: { title: string; body: string; type?: string; duration?: number }) => {
-    try {
-      showSystemNotification(
-        args.title ?? 'OpenCowork',
-        args.body ?? '',
-      )
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+  ipcMain.handle(
+    'notify:desktop',
+    async (_event, args: { title: string; body: string; type?: string; duration?: number }) => {
+      try {
+        showSystemNotification(args.title ?? 'OpenCowork', args.body ?? '')
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
     }
-  })
+  )
+
+  ipcMain.handle(
+    'notify:session',
+    async (_event, args: { sessionId: string; title: string; body: string }) => {
+      try {
+        if (!args?.sessionId) {
+          return { success: false, error: 'sessionId is required' }
+        }
+        safeSendToAllWindows('notify:session-message', {
+          sessionId: args.sessionId,
+          title: args.title ?? 'OpenCowork',
+          body: args.body ?? ''
+        })
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
 }

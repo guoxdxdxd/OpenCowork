@@ -2,9 +2,10 @@ import { ipcMain, dialog, BrowserWindow, app } from 'electron'
 import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
-import { globSync } from 'glob'
+import { glob } from 'glob'
 import { createInterface } from 'readline'
 import { recordLocalTextWriteChange } from './agent-change-handlers'
+import { safeSendToWindow } from '../window-ipc'
 import { createGitIgnoreMatcher } from './gitignore-utils'
 
 const IMAGE_EXTENSIONS = new Set([
@@ -14,7 +15,6 @@ const IMAGE_EXTENSIONS = new Set([
   '.gif',
   '.bmp',
   '.webp',
-  '.svg',
   '.ico',
   '.tiff',
   '.heic',
@@ -34,6 +34,10 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   '.heic': 'image/heic',
   '.heif': 'image/heif'
 }
+
+const FILE_SEARCH_CACHE_TTL_MS = 5_000
+const FILE_SEARCH_MAX_RESULTS = 20
+const fileSearchCache = new Map<string, { expiresAt: number; files: string[] }>()
 
 type GrepResultItem = { file: string; line: number; text: string }
 type GrepLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | null
@@ -74,6 +78,27 @@ const GREP_IGNORE_DIRS = new Set([
   'env'
 ])
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function buildGlobIgnorePatterns(pattern: string): string[] {
+  const normalizedPattern = pattern.replace(/\\/g, '/')
+  const ignorePatterns: string[] = []
+
+  for (const dirName of GREP_IGNORE_DIRS) {
+    const targetsDir = new RegExp(`(^|/)${escapeRegex(dirName)}(/|$)`).test(normalizedPattern)
+    if (targetsDir) continue
+
+    ignorePatterns.push(`${dirName}`)
+    ignorePatterns.push(`${dirName}/**`)
+    ignorePatterns.push(`**/${dirName}`)
+    ignorePatterns.push(`**/${dirName}/**`)
+  }
+
+  return ignorePatterns
+}
+
 const GREP_BINARY_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -81,7 +106,6 @@ const GREP_BINARY_EXTENSIONS = new Set([
   '.gif',
   '.bmp',
   '.webp',
-  '.svg',
   '.ico',
   '.mp4',
   '.avi',
@@ -196,6 +220,75 @@ function normalizeRipgrepGlob(pattern: string): string {
     return `*${normalized}`
   }
   return normalized
+}
+
+function scoreFileSearchMatch(filePath: string, query: string): number {
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase()
+  const normalizedQuery = query.replace(/\\/g, '/').trim().toLowerCase()
+  if (!normalizedQuery) return Number.POSITIVE_INFINITY
+
+  const fileName = path.basename(normalizedPath)
+  if (fileName === normalizedQuery) return 0
+  if (fileName.startsWith(normalizedQuery)) return 1
+
+  const fileNameIndex = fileName.indexOf(normalizedQuery)
+  if (fileNameIndex >= 0) return 10 + fileNameIndex
+
+  if (normalizedPath === normalizedQuery) return 20
+
+  const pathIndex = normalizedPath.indexOf(normalizedQuery)
+  if (pathIndex >= 0) return 30 + pathIndex
+
+  let cursor = 0
+  let gapScore = 0
+  for (const char of normalizedQuery) {
+    const nextIndex = normalizedPath.indexOf(char, cursor)
+    if (nextIndex < 0) return Number.POSITIVE_INFINITY
+    gapScore += nextIndex - cursor
+    cursor = nextIndex + 1
+  }
+
+  return 100 + gapScore
+}
+
+async function listSearchableFiles(searchRoot: string): Promise<string[]> {
+  const normalizedRoot = path.resolve(searchRoot)
+  const now = Date.now()
+  const cached = fileSearchCache.get(normalizedRoot)
+  if (cached && cached.expiresAt > now) {
+    return cached.files
+  }
+
+  const matcher = await createLocalGitIgnoreContext(normalizedRoot)
+  const files: string[] = []
+
+  const walk = async (dirPath: string): Promise<void> => {
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+
+    for (const entry of entries) {
+      const absolutePath = path.join(dirPath, entry.name)
+      if (entry.isDirectory()) {
+        if (GREP_IGNORE_DIRS.has(entry.name)) continue
+        if (await matcher.ignores(absolutePath, true)) continue
+        await walk(absolutePath)
+        continue
+      }
+
+      if (!entry.isFile()) continue
+      if (await matcher.ignores(absolutePath, false)) continue
+
+      files.push(path.relative(normalizedRoot, absolutePath).replace(/\\/g, '/'))
+    }
+  }
+
+  await walk(normalizedRoot)
+
+  fileSearchCache.set(normalizedRoot, {
+    expiresAt: now + FILE_SEARCH_CACHE_TTL_MS,
+    files
+  })
+
+  return files
 }
 
 function isBinaryFile(filePath: string): boolean {
@@ -484,7 +577,7 @@ export function registerFsHandlers(): void {
         }
         return content
       } catch (err) {
-        return JSON.stringify({ error: String(err) })
+        return { error: String(err) }
       }
     }
   )
@@ -617,19 +710,20 @@ export function registerFsHandlers(): void {
     try {
       const cwd = path.resolve(args.path || process.cwd())
       const matcher = await createLocalGitIgnoreContext(cwd)
-      const matches = globSync(args.pattern, { cwd })
+      const matches = await glob(args.pattern, {
+        cwd,
+        mark: true,
+        ignore: buildGlobIgnorePatterns(args.pattern)
+      })
       const filteredMatches: string[] = []
 
       for (const match of matches) {
-        const absolutePath = path.resolve(cwd, match)
-        let isDir = false
-        try {
-          isDir = fs.statSync(absolutePath).isDirectory()
-        } catch {
-          isDir = false
-        }
+        const isDir = /[\\/]$/.test(match)
+        const normalizedMatch = match.replace(/[\\/]+$/, '')
+        if (!normalizedMatch) continue
+        const absolutePath = path.resolve(cwd, normalizedMatch)
         if (await matcher.ignores(absolutePath, isDir)) continue
-        filteredMatches.push(match)
+        filteredMatches.push(normalizedMatch)
       }
 
       return filteredMatches
@@ -637,6 +731,55 @@ export function registerFsHandlers(): void {
       return { error: String(err) }
     }
   })
+
+  ipcMain.handle(
+    'fs:search-files',
+    async (_event, args: { path: string; query: string; limit?: number }) => {
+      try {
+        const searchRoot = path.resolve(args.path || process.cwd())
+        const normalizedQuery = args.query?.trim() ?? ''
+        const files = await listSearchableFiles(searchRoot)
+        const limit = Math.max(1, Math.min(args.limit ?? FILE_SEARCH_MAX_RESULTS, 100))
+
+        if (!normalizedQuery) {
+          return [...files]
+            .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+            .slice(0, limit)
+            .map((filePath) => ({
+              path: filePath,
+              name: path.basename(filePath)
+            }))
+        }
+
+        const topMatches: Array<{ path: string; score: number }> = []
+
+        for (const filePath of files) {
+          const score = scoreFileSearchMatch(filePath, normalizedQuery)
+          if (!Number.isFinite(score)) continue
+
+          const candidate = { path: filePath, score }
+          let insertAt = topMatches.findIndex(
+            (item) =>
+              score < item.score ||
+              (score === item.score &&
+                filePath.localeCompare(item.path, undefined, { sensitivity: 'base' }) < 0)
+          )
+          if (insertAt === -1) insertAt = topMatches.length
+
+          if (insertAt >= limit && topMatches.length >= limit) continue
+          topMatches.splice(insertAt, 0, candidate)
+          if (topMatches.length > limit) topMatches.length = limit
+        }
+
+        return topMatches.map((item) => ({
+          path: item.path,
+          name: path.basename(item.path)
+        }))
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
 
   ipcMain.handle(
     'fs:grep',
@@ -832,8 +975,8 @@ export function registerFsHandlers(): void {
           setTimeout(() => {
             debounceTimers.delete(filePath)
             const win = BrowserWindow.getAllWindows()[0]
-            if (win && !win.isDestroyed()) {
-              win.webContents.send('fs:file-changed', { path: filePath })
+            if (win) {
+              safeSendToWindow(win, 'fs:file-changed', { path: filePath })
             }
           }, 300)
         )
@@ -860,37 +1003,43 @@ export function registerFsHandlers(): void {
     return { success: true }
   })
 
-  ipcMain.handle('fs:select-file', async (_event, args?: { filters?: Electron.FileFilter[] }) => {
-    const win = BrowserWindow.getFocusedWindow()
-    if (!win) return { canceled: true }
-    const result = await dialog.showOpenDialog(win, {
-      properties: ['openFile'],
-      filters: args?.filters ?? [
-        {
-          name: 'Documents',
-          extensions: [
-            'md',
-            'txt',
-            'docx',
-            'pdf',
-            'html',
-            'csv',
-            'json',
-            'xml',
-            'yaml',
-            'yml',
-            'ts',
-            'js',
-            'tsx',
-            'jsx'
-          ]
-        },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    })
-    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
-    return { path: result.filePaths[0] }
-  })
+  ipcMain.handle(
+    'fs:select-file',
+    async (_event, args?: { filters?: Electron.FileFilter[]; multiSelections?: boolean }) => {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return { canceled: true }
+      const result = await dialog.showOpenDialog(win, {
+        properties: args?.multiSelections ? ['openFile', 'multiSelections'] : ['openFile'],
+        filters: args?.filters ?? [
+          {
+            name: 'Documents',
+            extensions: [
+              'md',
+              'txt',
+              'docx',
+              'pdf',
+              'html',
+              'csv',
+              'json',
+              'xml',
+              'yaml',
+              'yml',
+              'ts',
+              'js',
+              'tsx',
+              'jsx'
+            ]
+          },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      })
+      if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+      return {
+        path: result.filePaths[0],
+        paths: result.filePaths
+      }
+    }
+  )
 
   ipcMain.handle('fs:read-document', async (_event, args: { path: string }) => {
     try {

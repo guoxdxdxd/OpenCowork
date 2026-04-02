@@ -1,13 +1,14 @@
 import { create } from 'zustand'
 import { nanoid } from 'nanoid'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { useChatStore } from '@renderer/stores/chat-store'
 import type {
   McpServerConfig,
   McpServerStatus,
   McpTool,
   McpResource,
   McpPrompt,
-  McpServerInfo,
+  McpServerInfo
 } from '@renderer/lib/mcp/types'
 import { IPC } from '@renderer/lib/ipc/channels'
 
@@ -19,8 +20,8 @@ interface McpStore {
   serverPrompts: Record<string, McpPrompt[]>
   serverErrors: Record<string, string | undefined>
 
-  // Per-session activation (toggled via + menu)
-  activeMcpIds: string[]
+  // Per-project activation (toggled via + menu)
+  activeMcpIdsByProject: Record<string, string[]>
 
   // Init
   loadServers: () => Promise<void>
@@ -36,11 +37,12 @@ interface McpStore {
   refreshServerInfo: (id: string) => Promise<void>
   refreshAllServers: () => Promise<void>
 
-  // Per-session activation
-  toggleActiveMcp: (id: string) => void
-  clearActiveMcps: () => void
-  getActiveMcps: () => McpServerConfig[]
-  getActiveMcpTools: () => Record<string, McpTool[]>
+  // Per-project activation
+  toggleActiveMcp: (id: string, projectId?: string | null) => void
+  clearActiveMcps: (projectId?: string | null) => void
+  getActiveMcpIds: (projectId?: string | null) => string[]
+  getActiveMcps: (projectId?: string | null) => McpServerConfig[]
+  getActiveMcpTools: (projectId?: string | null) => Record<string, McpTool[]>
 
   // UI
   selectedServerId: string | null
@@ -54,7 +56,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   serverResources: {},
   serverPrompts: {},
   serverErrors: {},
-  activeMcpIds: [],
+  activeMcpIdsByProject: {},
   selectedServerId: null,
 
   loadServers: async () => {
@@ -71,7 +73,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     const config: McpServerConfig = {
       ...partial,
       id,
-      createdAt: Date.now(),
+      createdAt: Date.now()
     }
     await ipcClient.invoke(IPC.MCP_ADD, config)
     set((s) => ({ servers: [...s.servers, config] }))
@@ -81,7 +83,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   updateServer: async (id, patch) => {
     await ipcClient.invoke(IPC.MCP_UPDATE, { id, patch })
     set((s) => ({
-      servers: s.servers.map((srv) => (srv.id === id ? { ...srv, ...patch } : srv)),
+      servers: s.servers.map((srv) => (srv.id === id ? { ...srv, ...patch } : srv))
     }))
   },
 
@@ -90,14 +92,19 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     set((s) => ({
       servers: s.servers.filter((srv) => srv.id !== id),
       selectedServerId: s.selectedServerId === id ? null : s.selectedServerId,
-      activeMcpIds: s.activeMcpIds.filter((mid) => mid !== id),
+      activeMcpIdsByProject: Object.fromEntries(
+        Object.entries(s.activeMcpIdsByProject).map(([projectId, ids]) => [
+          projectId,
+          ids.filter((mid) => mid !== id)
+        ])
+      )
     }))
   },
 
   connectServer: async (id) => {
     set((s) => ({
       serverStatuses: { ...s.serverStatuses, [id]: 'connecting' },
-      serverErrors: { ...s.serverErrors, [id]: undefined },
+      serverErrors: { ...s.serverErrors, [id]: undefined }
     }))
     try {
       const res = (await ipcClient.invoke(IPC.MCP_CONNECT, id)) as {
@@ -107,21 +114,21 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       if (!res.success) {
         set((s) => ({
           serverStatuses: { ...s.serverStatuses, [id]: 'error' },
-          serverErrors: { ...s.serverErrors, [id]: res.error },
+          serverErrors: { ...s.serverErrors, [id]: res.error }
         }))
         return res.error ?? 'Unknown error'
       }
       // Refresh info after connect
       await get().refreshServerInfo(id)
       set((s) => ({
-        serverStatuses: { ...s.serverStatuses, [id]: 'connected' },
+        serverStatuses: { ...s.serverStatuses, [id]: 'connected' }
       }))
       return undefined
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       set((s) => ({
         serverStatuses: { ...s.serverStatuses, [id]: 'error' },
-        serverErrors: { ...s.serverErrors, [id]: msg },
+        serverErrors: { ...s.serverErrors, [id]: msg }
       }))
       return msg
     }
@@ -138,7 +145,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       serverTools: { ...s.serverTools, [id]: [] },
       serverResources: { ...s.serverResources, [id]: [] },
       serverPrompts: { ...s.serverPrompts, [id]: [] },
-      serverErrors: { ...s.serverErrors, [id]: undefined },
+      serverErrors: { ...s.serverErrors, [id]: undefined }
     }))
   },
 
@@ -151,7 +158,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
           serverTools: { ...s.serverTools, [id]: info.tools },
           serverResources: { ...s.serverResources, [id]: info.resources },
           serverPrompts: { ...s.serverPrompts, [id]: info.prompts },
-          serverErrors: { ...s.serverErrors, [id]: info.error },
+          serverErrors: { ...s.serverErrors, [id]: info.error }
         }))
       }
     } catch {
@@ -181,33 +188,53 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         serverTools: tools,
         serverResources: resources,
         serverPrompts: prompts,
-        serverErrors: errors,
+        serverErrors: errors
       })
     } catch {
       // ignore
     }
   },
 
-  toggleActiveMcp: (id) => {
+  getActiveMcpIds: (projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
+    return get().activeMcpIdsByProject[resolvedProjectId] ?? []
+  },
+
+  toggleActiveMcp: (id, projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
     set((s) => {
-      const isActive = s.activeMcpIds.includes(id)
+      const currentIds = s.activeMcpIdsByProject[resolvedProjectId] ?? []
+      const isActive = currentIds.includes(id)
       return {
-        activeMcpIds: isActive
-          ? s.activeMcpIds.filter((mid) => mid !== id)
-          : [...s.activeMcpIds, id],
+        activeMcpIdsByProject: {
+          ...s.activeMcpIdsByProject,
+          [resolvedProjectId]: isActive
+            ? currentIds.filter((mid) => mid !== id)
+            : [...currentIds, id]
+        }
       }
     })
   },
 
-  clearActiveMcps: () => set({ activeMcpIds: [] }),
+  clearActiveMcps: (projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
+    set((s) => ({
+      activeMcpIdsByProject: {
+        ...s.activeMcpIdsByProject,
+        [resolvedProjectId]: []
+      }
+    }))
+  },
 
-  getActiveMcps: () => {
-    const { servers, activeMcpIds } = get()
+  getActiveMcps: (projectId) => {
+    const { servers } = get()
+    const activeMcpIds = get().getActiveMcpIds(projectId)
     return servers.filter((s) => activeMcpIds.includes(s.id))
   },
 
-  getActiveMcpTools: () => {
-    const { activeMcpIds, serverTools } = get()
+  getActiveMcpTools: (projectId) => {
+    const activeMcpIds = get().getActiveMcpIds(projectId)
+    const { serverTools } = get()
     const result: Record<string, McpTool[]> = {}
     for (const id of activeMcpIds) {
       if (serverTools[id]?.length) {
@@ -217,5 +244,5 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     return result
   },
 
-  setSelectedServer: (id) => set({ selectedServerId: id }),
+  setSelectedServer: (id) => set({ selectedServerId: id })
 }))

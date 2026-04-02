@@ -1,14 +1,16 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
-import { formatTokens } from '@renderer/lib/format-tokens'
+import { formatTokens, getBillableTotalTokens } from '@renderer/lib/format-tokens'
 import {
   Plus,
   MessageSquare,
+  CircleHelp,
   Trash2,
   Eraser,
   Search,
   Briefcase,
   Code2,
+  ShieldCheck,
   Download,
   Copy,
   X,
@@ -54,17 +56,33 @@ import {
 } from '@renderer/components/ui/dialog'
 import { toast } from 'sonner'
 import { useChatStore, type SessionMode } from '@renderer/stores/chat-store'
+import type { ProviderType } from '@renderer/lib/api/types'
+import {
+  isProviderAvailableForModelSelection,
+  useProviderStore
+} from '@renderer/stores/provider-store'
+import { ModelIcon } from '@renderer/components/settings/provider-icons'
 import { useUIStore } from '@renderer/stores/ui-store'
+import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
 import { useTeamStore } from '@renderer/stores/team-store'
-import { abortSession } from '@renderer/hooks/use-chat-actions'
+import {
+  abortSession,
+  clearPendingSessionMessages,
+  getPendingSessionMessageCountForSession,
+  subscribePendingSessionMessages
+} from '@renderer/hooks/use-chat-actions'
 import { sessionToMarkdown } from '@renderer/lib/utils/export-chat'
 import { cn } from '@renderer/lib/utils'
+import { WorkingFolderSelectorDialog } from '@renderer/components/chat/WorkingFolderSelectorDialog'
+import { clampLeftSidebarWidth, LEFT_SIDEBAR_DEFAULT_WIDTH } from './right-panel-defs'
 
 const modeIcons: Record<SessionMode, React.ReactNode> = {
   chat: <MessageSquare className="size-4" />,
+  clarify: <CircleHelp className="size-4" />,
   cowork: <Briefcase className="size-4" />,
-  code: <Code2 className="size-4" />
+  code: <Code2 className="size-4" />,
+  acp: <ShieldCheck className="size-4" />
 }
 
 interface SessionListItem {
@@ -84,7 +102,32 @@ interface ProjectListItem {
   id: string
   name: string
   updatedAt: number
+  workingFolder?: string | null
+  sshConnectionId?: string | null
   pluginId?: string
+  pinned?: boolean
+}
+
+type FolderPickerTarget = { type: 'create' } | { type: 'project'; projectId: string }
+
+interface VisibleProjectGroup {
+  project: ProjectListItem
+  items: SessionListItem[]
+  isMissing: boolean
+}
+
+const HISTORY_AUTO_COLLAPSE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
+const RECENT_MINUTES_MS = 10 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+const WEEK_MS = 7 * DAY_MS
+const TWO_WEEKS_MS = 14 * DAY_MS
+const MONTH_MS = 30 * DAY_MS
+
+function deriveProjectNameFromFolder(folderPath?: string | null): string {
+  const normalized = folderPath?.trim().replace(/[\\/]+$/, '')
+  if (!normalized) return 'New Project'
+  const parts = normalized.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] || 'New Project'
 }
 
 export function SessionListPanel(): React.JSX.Element {
@@ -96,7 +139,10 @@ export function SessionListPanel(): React.JSX.Element {
         id: project.id,
         name: project.name,
         updatedAt: project.updatedAt,
-        pluginId: project.pluginId
+        workingFolder: project.workingFolder,
+        sshConnectionId: project.sshConnectionId,
+        pluginId: project.pluginId,
+        pinned: project.pinned
       })),
     [projectsRaw]
   )
@@ -136,18 +182,29 @@ export function SessionListPanel(): React.JSX.Element {
   }, [sessionDigest])
   const activeProjectId = useChatStore((s) => s.activeProjectId)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const activeSessionProjectId = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId)?.projectId ?? null,
+    [activeSessionId, sessions]
+  )
   const deleteSession = useChatStore((s) => s.deleteSession)
   const setActiveSession = useChatStore((s) => s.setActiveSession)
   const setActiveProject = useChatStore((s) => s.setActiveProject)
   const createProject = useChatStore((s) => s.createProject)
   const renameProject = useChatStore((s) => s.renameProject)
   const deleteProject = useChatStore((s) => s.deleteProject)
+  const togglePinProject = useChatStore((s) => s.togglePinProject)
+  const updateProjectDirectory = useChatStore((s) => s.updateProjectDirectory)
   const updateSessionTitle = useChatStore((s) => s.updateSessionTitle)
   const clearSessionMessages = useChatStore((s) => s.clearSessionMessages)
   const duplicateSession = useChatStore((s) => s.duplicateSession)
   const updateSessionMode = useChatStore((s) => s.updateSessionMode)
   const togglePinSession = useChatStore((s) => s.togglePinSession)
   const mode = useUIStore((s) => s.mode)
+  const runtimeLeftSidebarWidth = useUIStore((s) => s.leftSidebarWidth)
+  const setRuntimeLeftSidebarWidth = useUIStore((s) => s.setLeftSidebarWidth)
+  const persistedLeftSidebarWidth = useSettingsStore((s) => s.leftSidebarWidth)
+  const updateSettings = useSettingsStore((s) => s.updateSettings)
+  const providers = useProviderStore((s) => s.providers)
   const runningSessions = useAgentStore((s) => s.runningSessions)
   const runningSubAgentSessionIdsSig = useAgentStore((s) => s.runningSubAgentSessionIdsSig)
   const activeTeamSessionId = useTeamStore((s) => s.activeTeam?.sessionId ?? null)
@@ -156,10 +213,12 @@ export function SessionListPanel(): React.JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const editRef = useRef<HTMLInputElement>(null)
+  const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{
     id: string
     title: string
     msgCount: number
+    queueCount: number
   } | null>(null)
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<{
     id: string
@@ -171,10 +230,31 @@ export function SessionListPanel(): React.JSX.Element {
     id: string
     currentName: string
   } | null>(null)
+  const [folderPickerTarget, setFolderPickerTarget] = useState<FolderPickerTarget | null>(null)
+  const [projectModelDialog, setProjectModelDialog] = useState<{
+    projectId: string
+    projectName: string
+  } | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set())
+  const [expandedHistoryProjectIds, setExpandedHistoryProjectIds] = useState<Set<string>>(
+    () => new Set()
+  )
   const projectIdSet = useMemo(() => new Set(projects.map((project) => project.id)), [projects])
+  const initialProjectCollapseAppliedRef = useRef(false)
+  const draggingRef = useRef(false)
+  const startXRef = useRef(0)
+  const startWidthRef = useRef(
+    runtimeLeftSidebarWidth || persistedLeftSidebarWidth || LEFT_SIDEBAR_DEFAULT_WIDTH
+  )
+  const [isDraggingSidebar, setIsDraggingSidebar] = useState(false)
+  const applyLeftSidebarWidth = useCallback(
+    (width: number): void => {
+      setRuntimeLeftSidebarWidth(clampLeftSidebarWidth(width))
+    },
+    [setRuntimeLeftSidebarWidth]
+  )
   const getSessionSnapshot = useCallback(
     (sessionId: string) =>
       useChatStore.getState().sessions.find((session) => session.id === sessionId),
@@ -184,13 +264,122 @@ export function SessionListPanel(): React.JSX.Element {
     () => new Set(runningSubAgentSessionIdsSig ? runningSubAgentSessionIdsSig.split('\u0000') : []),
     [runningSubAgentSessionIdsSig]
   )
+  const pendingQueueSignature = useSyncExternalStore(
+    subscribePendingSessionMessages,
+    () =>
+      sessions
+        .map((session) => `${session.id}:${getPendingSessionMessageCountForSession(session.id)}`)
+        .join('|'),
+    () => ''
+  )
+  const formatSessionRecency = useCallback(
+    (updatedAt: number): string => {
+      const elapsed = Date.now() - updatedAt
+      if (elapsed < RECENT_MINUTES_MS) {
+        return t('sidebar.recentMinutes', { defaultValue: '最近几分钟' })
+      }
+      if (elapsed < DAY_MS) {
+        return t('sidebar.today')
+      }
+      if (elapsed < DAY_MS * 2) {
+        return t('sidebar.yesterday')
+      }
+      if (elapsed < WEEK_MS) {
+        return t('sidebar.recentWeek', { defaultValue: '最近一周' })
+      }
+      if (elapsed < TWO_WEEKS_MS) {
+        return t('sidebar.twoWeeks', { defaultValue: '2周内' })
+      }
+      if (elapsed < MONTH_MS) {
+        return t('sidebar.oneMonth', { defaultValue: '1个月内' })
+      }
+      return t('sidebar.older')
+    },
+    [t]
+  )
 
   useEffect(() => {
     if (!renameDialog) return
     requestAnimationFrame(() => renameInputRef.current?.select())
   }, [renameDialog])
 
+  useEffect(() => {
+    if (initialProjectCollapseAppliedRef.current || projects.length === 0) return
+    const expandedProjectId = activeSessionProjectId ?? activeProjectId
+    setCollapsedProjectIds(
+      new Set(
+        projects
+          .map((project) => project.id)
+          .filter((projectId) => !expandedProjectId || projectId !== expandedProjectId)
+      )
+    )
+    initialProjectCollapseAppliedRef.current = true
+  }, [activeProjectId, activeSessionProjectId, projects])
+
+  useEffect(() => {
+    const expandedProjectId = activeSessionProjectId ?? activeProjectId
+    if (!expandedProjectId) return
+    setCollapsedProjectIds((prev) => {
+      if (!prev.has(expandedProjectId)) return prev
+      const next = new Set(prev)
+      next.delete(expandedProjectId)
+      return next
+    })
+  }, [activeProjectId, activeSessionProjectId])
+
+  useEffect(() => {
+    if (isDraggingSidebar) return
+    const nextWidth = clampLeftSidebarWidth(
+      persistedLeftSidebarWidth || runtimeLeftSidebarWidth || LEFT_SIDEBAR_DEFAULT_WIDTH
+    )
+    if (runtimeLeftSidebarWidth !== nextWidth) {
+      setRuntimeLeftSidebarWidth(nextWidth)
+    }
+  }, [
+    isDraggingSidebar,
+    persistedLeftSidebarWidth,
+    runtimeLeftSidebarWidth,
+    setRuntimeLeftSidebarWidth
+  ])
+
+  useEffect(() => {
+    if (!isDraggingSidebar) return
+
+    const handleMouseMove = (event: MouseEvent): void => {
+      if (!draggingRef.current) return
+      const delta = event.clientX - startXRef.current
+      applyLeftSidebarWidth(startWidthRef.current + delta)
+    }
+
+    const handleMouseUp = (): void => {
+      draggingRef.current = false
+      const nextWidth = clampLeftSidebarWidth(
+        useUIStore.getState().leftSidebarWidth ||
+          persistedLeftSidebarWidth ||
+          LEFT_SIDEBAR_DEFAULT_WIDTH
+      )
+      setRuntimeLeftSidebarWidth(nextWidth)
+      updateSettings({ leftSidebarWidth: nextWidth })
+      setIsDraggingSidebar(false)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [
+    applyLeftSidebarWidth,
+    isDraggingSidebar,
+    persistedLeftSidebarWidth,
+    setRuntimeLeftSidebarWidth,
+    updateSettings
+  ])
+
   const deleteTargetRunningInfo = useMemo(() => {
+    void pendingQueueSignature
     if (!deleteTarget) return null
     const id = deleteTarget.id
     const isAgentRunning = runningSessions[id] === 'running'
@@ -198,7 +387,18 @@ export function SessionListPanel(): React.JSX.Element {
     const hasActiveTeam = activeTeamSessionId === id
     const hasRunning = isAgentRunning || hasActiveSubAgents || hasActiveTeam
     return { isAgentRunning, hasActiveSubAgents, hasActiveTeam, hasRunning }
-  }, [deleteTarget, runningSessions, runningSubAgentSessionIds, activeTeamSessionId])
+  }, [
+    deleteTarget,
+    runningSessions,
+    runningSubAgentSessionIds,
+    activeTeamSessionId,
+    pendingQueueSignature
+  ])
+  const folderPickerProjectId =
+    folderPickerTarget?.type === 'project' ? folderPickerTarget.projectId : null
+  const folderPickerProject = folderPickerProjectId
+    ? projects.find((project) => project.id === folderPickerProjectId)
+    : undefined
 
   const confirmDelete = useCallback(() => {
     if (!deleteTarget) return
@@ -210,6 +410,7 @@ export function SessionListPanel(): React.JSX.Element {
     if (runningSessions[session.id] === 'running') {
       abortSession(session.id)
     }
+    clearPendingSessionMessages(session.id)
     const snapshot = JSON.parse(JSON.stringify(session))
     deleteSession(session.id)
     setDeleteTarget(null)
@@ -226,15 +427,38 @@ export function SessionListPanel(): React.JSX.Element {
     useUIStore.getState().navigateToHome()
   }
 
-  const handleCreateProject = async (): Promise<void> => {
-    const id = await createProject({ name: 'New Project' })
-    setActiveProject(id)
-    useUIStore.getState().navigateToHome()
-    toast.success(t('sidebar_toast.projectCreated', { defaultValue: 'Project created' }))
-  }
+  const handleCreateProject = useCallback((): void => {
+    setFolderPickerTarget({ type: 'create' })
+  }, [])
+
+  const handleCreateProjectWithDirectory = useCallback(
+    async (workingFolder: string, sshConnectionId: string | null): Promise<void> => {
+      const id = await createProject({
+        name: deriveProjectNameFromFolder(workingFolder),
+        workingFolder,
+        sshConnectionId: sshConnectionId ?? undefined
+      })
+      setActiveProject(id)
+      useUIStore.getState().navigateToHome()
+      toast.success(t('sidebar_toast.projectCreated', { defaultValue: 'Project created' }))
+    },
+    [createProject, setActiveProject, t]
+  )
 
   const toggleProjectCollapsed = useCallback((projectId: string): void => {
     setCollapsedProjectIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(projectId)) {
+        next.delete(projectId)
+      } else {
+        next.add(projectId)
+      }
+      return next
+    })
+  }, [])
+
+  const toggleProjectHistoryExpanded = useCallback((projectId: string): void => {
+    setExpandedHistoryProjectIds((prev) => {
       const next = new Set(prev)
       if (next.has(projectId)) {
         next.delete(projectId)
@@ -289,8 +513,79 @@ export function SessionListPanel(): React.JSX.Element {
     []
   )
 
+  const handleEditProjectDirectory = useCallback((projectId: string): void => {
+    setFolderPickerTarget({ type: 'project', projectId })
+  }, [])
+
+  const handleEditProjectModel = useCallback((projectId: string, projectName: string): void => {
+    setProjectModelDialog({ projectId, projectName })
+  }, [])
+
+  const chatProviderGroups = useMemo(
+    () =>
+      providers
+        .filter((provider) => isProviderAvailableForModelSelection(provider))
+        .map((provider) => ({
+          provider,
+          models: provider.models.filter(
+            (model) => model.enabled && (!model.category || model.category === 'chat')
+          )
+        }))
+        .filter((group) => group.models.length > 0),
+    [providers]
+  )
+
+  const buildModelValue = useCallback((providerId: string, modelId: string): string => {
+    return `${providerId}::${modelId}`
+  }, [])
+
+  const applyProjectModel = useCallback(
+    (value: string): void => {
+      if (!projectModelDialog) return
+      const project = useChatStore
+        .getState()
+        .projects.find((item) => item.id === projectModelDialog.projectId)
+      if (!project) return
+      if (value === '__global__') {
+        const now = Date.now()
+        useChatStore.setState((state) => {
+          const target = state.projects.find((item) => item.id === projectModelDialog.projectId)
+          if (!target) return
+          target.providerId = undefined
+          target.modelId = undefined
+          target.updatedAt = now
+        })
+        setProjectModelDialog(null)
+        toast.success('项目默认模型已改为跟随全局')
+        return
+      }
+      const [providerId, modelId] = value.split('::')
+      if (!providerId || !modelId) return
+      const now = Date.now()
+      useChatStore.setState((state) => {
+        const target = state.projects.find((item) => item.id === projectModelDialog.projectId)
+        if (!target) return
+        target.providerId = providerId
+        target.modelId = modelId
+        target.updatedAt = now
+      })
+      setProjectModelDialog(null)
+      toast.success('项目默认模型已更新')
+    },
+    [projectModelDialog]
+  )
+
   const confirmDeleteProject = useCallback(async (): Promise<void> => {
     if (!projectDeleteTarget) return
+
+    const relatedSessionIds = useChatStore
+      .getState()
+      .sessions.filter((session) => session.projectId === projectDeleteTarget.id)
+      .map((session) => session.id)
+    for (const sessionId of relatedSessionIds) {
+      abortSession(sessionId)
+      clearPendingSessionMessages(sessionId)
+    }
 
     await deleteProject(projectDeleteTarget.id)
     setCollapsedProjectIds((prev) => {
@@ -321,6 +616,19 @@ export function SessionListPanel(): React.JSX.Element {
     a.click()
     URL.revokeObjectURL(url)
   }
+
+  const startResize = useCallback(
+    (event: React.MouseEvent): void => {
+      event.preventDefault()
+      draggingRef.current = true
+      startXRef.current = event.clientX
+      startWidthRef.current = clampLeftSidebarWidth(
+        runtimeLeftSidebarWidth || persistedLeftSidebarWidth || LEFT_SIDEBAR_DEFAULT_WIDTH
+      )
+      setIsDraggingSidebar(true)
+    },
+    [persistedLeftSidebarWidth, runtimeLeftSidebarWidth]
+  )
 
   const sortedSessions = sessions.slice().sort((a, b) => {
     if (a.pinned && !b.pinned) return -1
@@ -393,8 +701,9 @@ export function SessionListPanel(): React.JSX.Element {
     return map
   }, [filteredSessions])
 
-  const filteredProjectGroups = useMemo(() => {
+  const filteredProjectGroups = useMemo<VisibleProjectGroup[]>(() => {
     const sortedProjects = projects.slice().sort((a, b) => {
+      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
       if (!!a.pluginId !== !!b.pluginId) return a.pluginId ? 1 : -1
       return b.updatedAt - a.updatedAt
     })
@@ -418,7 +727,8 @@ export function SessionListPanel(): React.JSX.Element {
         project: {
           id: projectId,
           name: t('sidebar.unknownProject', { defaultValue: 'Unknown Project' }),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          pinned: false
         },
         items,
         isMissing: true
@@ -428,9 +738,445 @@ export function SessionListPanel(): React.JSX.Element {
     return visibleGroups
   }, [projects, sessionsByProject, searchQuery, t])
 
+  const pinnedProjectGroups = useMemo(
+    () => filteredProjectGroups.filter((group) => group.project.pinned && !group.isMissing),
+    [filteredProjectGroups]
+  )
+  const regularProjectGroups = useMemo(
+    () => filteredProjectGroups.filter((group) => !group.project.pinned || group.isMissing),
+    [filteredProjectGroups]
+  )
+  const historyCollapseThreshold = Date.now() - HISTORY_AUTO_COLLAPSE_AFTER_MS
+
+  const renderSessionItem = (session: SessionListItem): React.JSX.Element => (
+    <ContextMenu key={session.id}>
+      <ContextMenuTrigger asChild>
+        <button
+          className={cn(
+            'group flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
+            session.id === activeSessionId &&
+              useUIStore.getState().chatView === 'session' &&
+              !useUIStore.getState().settingsPageOpen
+              ? 'bg-accent text-accent-foreground'
+              : 'text-foreground/80 hover:bg-muted/60'
+          )}
+          onClick={() => {
+            setActiveSession(session.id)
+            useUIStore.getState().navigateToSession()
+          }}
+          onDoubleClick={(e) => {
+            e.preventDefault()
+            setEditingId(session.id)
+            setEditTitle(session.title)
+            setTimeout(() => editRef.current?.select(), 0)
+          }}
+          onMouseEnter={() => setHoveredSessionId(session.id)}
+          onMouseLeave={() =>
+            setHoveredSessionId((current) => (current === session.id ? null : current))
+          }
+        >
+          <span className="relative flex size-4 shrink-0 items-center justify-center">
+            {session.pinned ? (
+              <button
+                type="button"
+                className="flex size-4 items-center justify-center text-amber-500/75 transition-all duration-150 hover:-rotate-12 hover:text-amber-500"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  togglePinSession(session.id)
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+                title={t('action.unpin', { ns: 'common' })}
+              >
+                <Pin className="size-3.5" />
+              </button>
+            ) : hoveredSessionId === session.id ? (
+              <button
+                type="button"
+                className="flex size-4 items-center justify-center text-muted-foreground/65 transition-all duration-150 hover:scale-105 hover:text-foreground/80"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  togglePinSession(session.id)
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+                title={t('sidebar.pinToTop')}
+              >
+                <Pin className="size-3.25" />
+              </button>
+            ) : session.icon ? (
+              <DynamicIcon name={session.icon as never} className="size-4" />
+            ) : (
+              modeIcons[session.mode]
+            )}
+          </span>
+          {editingId === session.id ? (
+            <input
+              ref={editRef}
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              onBlur={() => {
+                const trimmed = editTitle.trim()
+                if (trimmed && trimmed !== session.title) {
+                  useChatStore.getState().updateSessionTitle(session.id, trimmed)
+                  toast.success(t('action.rename', { ns: 'common' }))
+                }
+                setEditingId(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                if (e.key === 'Escape') {
+                  setEditingId(null)
+                }
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="h-6 w-full min-w-0 rounded border bg-background px-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          ) : (
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-sm leading-4">{session.title}</span>
+              {searchQuery &&
+                !session.title.toLowerCase().includes(searchQuery) &&
+                contentSearchMeta.snippetBySessionId.get(session.id) && (
+                  <span className="truncate text-[9px] text-muted-foreground/40">
+                    {contentSearchMeta.snippetBySessionId.get(session.id)}
+                  </span>
+                )}
+            </div>
+          )}
+          {editingId !== session.id && (
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {runningSessions[session.id] === 'running' && (
+                <Loader2 className="size-3.5 animate-spin text-blue-500" />
+              )}
+              {runningSessions[session.id] === 'completed' && (
+                <CheckCircle2 className="size-3.5 text-emerald-500" />
+              )}
+              {getPendingSessionMessageCountForSession(session.id) > 0 && (
+                <span className="rounded-full border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
+                  {getPendingSessionMessageCountForSession(session.id)}
+                </span>
+              )}
+              {session.mode !== mode && (
+                <span className="rounded bg-muted px-1 py-px text-[8px] uppercase text-muted-foreground/40">
+                  {session.mode}
+                </span>
+              )}
+              <span className="text-[10px] text-muted-foreground/40">
+                {formatSessionRecency(session.updatedAt)}
+              </span>
+            </span>
+          )}
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem
+          onClick={() => {
+            togglePinSession(session.id)
+            toast.success(
+              session.pinned
+                ? t('sidebar_toast.sessionUnpinned', { defaultValue: '会话已取消置顶' })
+                : t('sidebar_toast.sessionPinned', { defaultValue: '会话已置顶' })
+            )
+          }}
+        >
+          {session.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+          {session.pinned ? t('action.unpin', { ns: 'common' }) : t('sidebar.pinToTop')}
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => openRenameDialog('session', session.id, session.title)}>
+          <Pencil className="size-4" />
+          {t('action.rename', { ns: 'common' })}
+        </ContextMenuItem>
+        {session.messageCount > 0 && (
+          <>
+            <ContextMenuItem
+              onClick={async () => {
+                await handleExport(session.id)
+                toast.success(t('sidebar_toast.exportedOne'))
+              }}
+            >
+              <Download className="size-4" />
+              {t('sidebar.exportAsMarkdown')}
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={async () => {
+                await useChatStore.getState().loadSessionMessages(session.id)
+                const snapshot = getSessionSnapshot(session.id)
+                if (!snapshot) return
+                const json = JSON.stringify(snapshot, null, 2)
+                const blob = new Blob([json], {
+                  type: 'application/json'
+                })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `${
+                  session.title
+                    .replace(/[^a-zA-Z0-9-_ ]/g, '')
+                    .slice(0, 50)
+                    .trim() || 'session'
+                }.json`
+                a.click()
+                URL.revokeObjectURL(url)
+                toast.success(t('sidebar_toast.exportedAsJson'))
+              }}
+            >
+              <Download className="size-4" />
+              {t('sidebar.exportAsJson')}
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => {
+                duplicateSession(session.id)
+                toast.success(t('sidebar_toast.sessionDuplicated'))
+              }}
+            >
+              <Copy className="size-4" />
+              {t('action.duplicate', { ns: 'common' })}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => {
+                clearSessionMessages(session.id)
+                clearPendingSessionMessages(session.id)
+                toast.success(t('sidebar_toast.messagesCleared'))
+              }}
+            >
+              <Eraser className="size-4" />
+              {t('sidebar.clearMessages')}
+            </ContextMenuItem>
+          </>
+        )}
+        <ContextMenuItem
+          onClick={() => {
+            togglePinSession(session.id)
+            toast.success(
+              session.pinned ? t('sidebar_toast.unpinned') : t('sidebar_toast.pinnedMsg')
+            )
+          }}
+        >
+          {session.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+          {session.pinned ? t('action.unpin', { ns: 'common' }) : t('sidebar.pinToTop')}
+        </ContextMenuItem>
+        <ContextMenuSub>
+          <ContextMenuSubTrigger>
+            {modeIcons[session.mode]}
+            {t('sidebar.switchMode')}
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            {(['chat', 'clarify', 'cowork', 'code'] as const).map((m) => (
+              <ContextMenuItem
+                key={m}
+                disabled={session.mode === m}
+                onClick={() => {
+                  updateSessionMode(session.id, m)
+                  toast.success(t('sidebar_toast.switchedMode', { mode: m }))
+                }}
+              >
+                {modeIcons[m]}
+                <span className="capitalize">{m}</span>
+              </ContextMenuItem>
+            ))}
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          variant="destructive"
+          onClick={() => {
+            const hasRunning =
+              runningSessions[session.id] === 'running' ||
+              runningSubAgentSessionIds.has(session.id) ||
+              activeTeamSessionId === session.id
+            const queueCount = getPendingSessionMessageCountForSession(session.id)
+            if (session.messageCount > 0 || hasRunning || queueCount > 0) {
+              setDeleteTarget({
+                id: session.id,
+                title: session.title,
+                msgCount: session.messageCount,
+                queueCount
+              })
+              return
+            }
+            const snapshot = getSessionSnapshot(session.id)
+            if (!snapshot) return
+            clearPendingSessionMessages(snapshot.id)
+            deleteSession(snapshot.id)
+            toast.success(t('sidebar_toast.sessionDeleted'), {
+              action: {
+                label: t('action.undo', { ns: 'common' }),
+                onClick: () => useChatStore.getState().restoreSession(snapshot)
+              },
+              duration: 5000
+            })
+          }}
+        >
+          <Trash2 className="size-4" />
+          {t('action.delete', { ns: 'common' })}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+
+  const renderProjectGroup = (group: VisibleProjectGroup): React.JSX.Element => {
+    const isCollapsed = collapsedProjectIds.has(group.project.id)
+    const canManageProject = !group.isMissing && projectIdSet.has(group.project.id)
+    const shouldAutoCollapseHistory = !searchQuery
+    const recentItems = shouldAutoCollapseHistory
+      ? group.items.filter((session) => session.updatedAt >= historyCollapseThreshold)
+      : group.items
+    const historicalItems = shouldAutoCollapseHistory
+      ? group.items.filter((session) => session.updatedAt < historyCollapseThreshold)
+      : []
+    const isHistoryExpanded =
+      expandedHistoryProjectIds.has(group.project.id) ||
+      historicalItems.some((session) => session.id === activeSessionId)
+
+    return (
+      <div key={group.project.id} className="mb-1.5">
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <button
+              className={cn(
+                'mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors',
+                activeProjectId === group.project.id
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+              )}
+              onClick={() => setActiveProject(group.project.id)}
+              title={group.project.name}
+            >
+              <span
+                className="inline-flex size-4 shrink-0 items-center justify-center"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  toggleProjectCollapsed(group.project.id)
+                }}
+              >
+                <ChevronRight
+                  className={cn(
+                    'size-3.5 transition-transform duration-200 ease-in-out',
+                    !isCollapsed && 'rotate-90'
+                  )}
+                />
+              </span>
+              <FolderOpen className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{group.project.name}</span>
+              {group.project.pinned && (
+                <Pin className="size-3 text-muted-foreground/35 -rotate-45" />
+              )}
+              <span className="text-xs text-muted-foreground/60">{group.items.length}</span>
+            </button>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-48">
+            <ContextMenuItem
+              disabled={!canManageProject}
+              onClick={() => {
+                togglePinProject(group.project.id)
+                toast.success(
+                  group.project.pinned
+                    ? t('sidebar_toast.projectUnpinned', { defaultValue: '项目已取消置顶' })
+                    : t('sidebar_toast.projectPinned', { defaultValue: '项目已置顶' })
+                )
+              }}
+            >
+              {group.project.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+              {group.project.pinned ? t('action.unpin', { ns: 'common' }) : t('sidebar.pinToTop')}
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={!canManageProject}
+              onClick={() => handleRenameProject(group.project.id, group.project.name)}
+            >
+              <Pencil className="size-4" />
+              {t('action.rename', { ns: 'common' })}
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={!canManageProject}
+              onClick={() => handleEditProjectDirectory(group.project.id)}
+            >
+              <FolderOpen className="size-4" />
+              修改工作目录
+            </ContextMenuItem>
+            <ContextMenuSub>
+              <ContextMenuSubTrigger inset>修改默认模型</ContextMenuSubTrigger>
+              <ContextMenuSubContent className="w-72">
+                <ContextMenuItem
+                  onClick={() => handleEditProjectModel(group.project.id, group.project.name)}
+                >
+                  打开模型选择
+                </ContextMenuItem>
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              disabled={!canManageProject}
+              onClick={() =>
+                handleDeleteProject(group.project.id, group.project.name, group.items.length)
+              }
+            >
+              <Trash2 className="size-4" />
+              {t('action.delete', { ns: 'common' })}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+        <div
+          className={cn(
+            'grid transition-[grid-template-rows,opacity] duration-200 ease-in-out',
+            isCollapsed
+              ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
+              : 'grid-rows-[1fr] opacity-100'
+          )}
+        >
+          <div className="overflow-hidden">
+            <div className="ml-4 border-l border-border/40 pl-2">
+              {recentItems.map(renderSessionItem)}
+              {historicalItems.length > 0 && (
+                <div className="mt-1 border-t border-border/30 pt-1">
+                  <button
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                    onClick={() => toggleProjectHistoryExpanded(group.project.id)}
+                  >
+                    <ChevronRight
+                      className={cn(
+                        'size-3.5 transition-transform duration-200 ease-in-out',
+                        isHistoryExpanded && 'rotate-90'
+                      )}
+                    />
+                    <span>
+                      {isHistoryExpanded
+                        ? t('sidebar.collapseOlderSessions', { defaultValue: '收起历史记录' })
+                        : t('sidebar.expandOlderSessions', {
+                            count: historicalItems.length,
+                            defaultValue: '展开历史记录（{{count}}）'
+                          })}
+                    </span>
+                  </button>
+                  {isHistoryExpanded && historicalItems.map(renderSessionItem)}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <>
-      <div className="flex h-full w-[20rem] shrink-0 flex-col border-r bg-background/50">
+      <div
+        data-tour="left-sidebar"
+        className="relative flex h-full shrink-0 flex-col overflow-hidden border-r bg-background/50"
+        style={{
+          width: clampLeftSidebarWidth(
+            runtimeLeftSidebarWidth || persistedLeftSidebarWidth || LEFT_SIDEBAR_DEFAULT_WIDTH
+          )
+        }}
+      >
         {/* Header: title + new chat */}
         <div className="flex items-center justify-between px-3 pt-3 pb-1">
           <div className="flex items-center gap-1.5">
@@ -441,7 +1187,7 @@ export function SessionListPanel(): React.JSX.Element {
               <span className="text-[10px] text-muted-foreground">({sessions.length})</span>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          <div data-tour="session-actions" className="flex items-center gap-1">
             {sessions.some((s) => s.messageCount > 0) && (
               <Button
                 variant="ghost"
@@ -462,7 +1208,7 @@ export function SessionListPanel(): React.JSX.Element {
               variant="ghost"
               size="icon"
               className="size-6"
-              onClick={() => void handleCreateProject()}
+              onClick={handleCreateProject}
               title={t('sidebar.newProject', { defaultValue: 'New Project' })}
             >
               <FolderPlus className="size-3.5" />
@@ -534,324 +1280,28 @@ export function SessionListPanel(): React.JSX.Element {
             </div>
           ) : (
             <>
-              {filteredProjectGroups.map((group) => {
-                const isCollapsed = collapsedProjectIds.has(group.project.id)
-                const canManageProject = !group.isMissing && projectIdSet.has(group.project.id)
+              {pinnedProjectGroups.length > 0 && (
+                <div className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">
+                  {t('sidebar.pinnedProjects', { defaultValue: '置顶项目' })}
+                </div>
+              )}
+              {pinnedProjectGroups.map(renderProjectGroup)}
 
-                return (
-                  <div key={group.project.id} className="mb-1.5">
-                    <ContextMenu>
-                      <ContextMenuTrigger asChild>
-                        <button
-                          className={cn(
-                            'mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors',
-                            activeProjectId === group.project.id
-                              ? 'bg-muted text-foreground'
-                              : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
-                          )}
-                          onClick={() => setActiveProject(group.project.id)}
-                          title={group.project.name}
-                        >
-                          <span
-                            className="inline-flex size-4 shrink-0 items-center justify-center"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              toggleProjectCollapsed(group.project.id)
-                            }}
-                          >
-                            <ChevronRight
-                              className={cn(
-                                'size-3.5 transition-transform duration-200 ease-in-out',
-                                !isCollapsed && 'rotate-90'
-                              )}
-                            />
-                          </span>
-                          <FolderOpen className="size-4 shrink-0" />
-                          <span className="min-w-0 flex-1 truncate">{group.project.name}</span>
-                          <span className="text-xs text-muted-foreground/60">
-                            {group.items.length}
-                          </span>
-                        </button>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent className="w-48">
-                        <ContextMenuItem
-                          disabled={!canManageProject}
-                          onClick={() => handleRenameProject(group.project.id, group.project.name)}
-                        >
-                          <Pencil className="size-4" />
-                          {t('action.rename', { ns: 'common' })}
-                        </ContextMenuItem>
-                        <ContextMenuSeparator />
-                        <ContextMenuItem
-                          variant="destructive"
-                          disabled={!canManageProject}
-                          onClick={() =>
-                            handleDeleteProject(
-                              group.project.id,
-                              group.project.name,
-                              group.items.length
-                            )
-                          }
-                        >
-                          <Trash2 className="size-4" />
-                          {t('action.delete', { ns: 'common' })}
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
-                    <div
-                      className={cn(
-                        'grid transition-[grid-template-rows,opacity] duration-200 ease-in-out',
-                        isCollapsed
-                          ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
-                          : 'grid-rows-[1fr] opacity-100'
-                      )}
-                    >
-                      <div className="overflow-hidden">
-                        {group.items.map((session) => (
-                          <ContextMenu key={session.id}>
-                            <ContextMenuTrigger asChild>
-                              <button
-                                className={cn(
-                                  'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
-                                  session.id === activeSessionId &&
-                                    useUIStore.getState().chatView === 'session' &&
-                                    !useUIStore.getState().settingsPageOpen
-                                    ? 'bg-accent text-accent-foreground'
-                                    : 'text-foreground/80 hover:bg-muted/60'
-                                )}
-                                onClick={() => {
-                                  setActiveSession(session.id)
-                                  useUIStore.getState().navigateToSession()
-                                }}
-                                onDoubleClick={(e) => {
-                                  e.preventDefault()
-                                  setEditingId(session.id)
-                                  setEditTitle(session.title)
-                                  setTimeout(() => editRef.current?.select(), 0)
-                                }}
-                              >
-                                <span className="shrink-0">
-                                  {session.pinned ? (
-                                    <Pin className="size-3.5 text-muted-foreground/50" />
-                                  ) : session.icon ? (
-                                    <DynamicIcon name={session.icon as never} className="size-4" />
-                                  ) : (
-                                    modeIcons[session.mode]
-                                  )}
-                                </span>
-                                {editingId === session.id ? (
-                                  <input
-                                    ref={editRef}
-                                    value={editTitle}
-                                    onChange={(e) => setEditTitle(e.target.value)}
-                                    onBlur={() => {
-                                      const trimmed = editTitle.trim()
-                                      if (trimmed && trimmed !== session.title) {
-                                        useChatStore
-                                          .getState()
-                                          .updateSessionTitle(session.id, trimmed)
-                                        toast.success(t('action.rename', { ns: 'common' }))
-                                      }
-                                      setEditingId(null)
-                                    }}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-                                      if (e.key === 'Escape') {
-                                        setEditingId(null)
-                                      }
-                                    }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="h-6 w-full min-w-0 rounded border bg-background px-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                                  />
-                                ) : (
-                                  <div className="flex min-w-0 flex-1 flex-col">
-                                    <span className="truncate text-sm leading-4">
-                                      {session.title}
-                                    </span>
-                                    {searchQuery &&
-                                      !session.title.toLowerCase().includes(searchQuery) &&
-                                      contentSearchMeta.snippetBySessionId.get(session.id) && (
-                                        <span className="truncate text-[9px] text-muted-foreground/40">
-                                          {contentSearchMeta.snippetBySessionId.get(session.id)}
-                                        </span>
-                                      )}
-                                  </div>
-                                )}
-                                {editingId !== session.id && (
-                                  <span className="ml-auto flex shrink-0 items-center gap-1">
-                                    {runningSessions[session.id] === 'running' && (
-                                      <Loader2 className="size-3.5 animate-spin text-blue-500" />
-                                    )}
-                                    {runningSessions[session.id] === 'completed' && (
-                                      <CheckCircle2 className="size-3.5 text-emerald-500" />
-                                    )}
-                                    {session.pinned && (
-                                      <Pin className="size-3 text-muted-foreground/30 -rotate-45" />
-                                    )}
-                                    {session.mode !== mode && (
-                                      <span className="rounded bg-muted px-1 py-px text-[8px] uppercase text-muted-foreground/40">
-                                        {session.mode}
-                                      </span>
-                                    )}
-                                    {session.messageCount > 0 && (
-                                      <span className="text-[10px] text-muted-foreground/40">
-                                        {session.messageCount}
-                                      </span>
-                                    )}
-                                  </span>
-                                )}
-                              </button>
-                            </ContextMenuTrigger>
-                            <ContextMenuContent className="w-48">
-                              <ContextMenuItem
-                                onClick={() =>
-                                  openRenameDialog('session', session.id, session.title)
-                                }
-                              >
-                                <Pencil className="size-4" />
-                                {t('action.rename', { ns: 'common' })}
-                              </ContextMenuItem>
-                              {session.messageCount > 0 && (
-                                <>
-                                  <ContextMenuItem
-                                    onClick={async () => {
-                                      await handleExport(session.id)
-                                      toast.success(t('sidebar_toast.exportedOne'))
-                                    }}
-                                  >
-                                    <Download className="size-4" />
-                                    {t('sidebar.exportAsMarkdown')}
-                                  </ContextMenuItem>
-                                  <ContextMenuItem
-                                    onClick={async () => {
-                                      await useChatStore.getState().loadSessionMessages(session.id)
-                                      const snapshot = getSessionSnapshot(session.id)
-                                      if (!snapshot) return
-                                      const json = JSON.stringify(snapshot, null, 2)
-                                      const blob = new Blob([json], {
-                                        type: 'application/json'
-                                      })
-                                      const url = URL.createObjectURL(blob)
-                                      const a = document.createElement('a')
-                                      a.href = url
-                                      a.download = `${
-                                        session.title
-                                          .replace(/[^a-zA-Z0-9-_ ]/g, '')
-                                          .slice(0, 50)
-                                          .trim() || 'session'
-                                      }.json`
-                                      a.click()
-                                      URL.revokeObjectURL(url)
-                                      toast.success(t('sidebar_toast.exportedAsJson'))
-                                    }}
-                                  >
-                                    <Download className="size-4" />
-                                    {t('sidebar.exportAsJson')}
-                                  </ContextMenuItem>
-                                  <ContextMenuItem
-                                    onClick={() => {
-                                      duplicateSession(session.id)
-                                      toast.success(t('sidebar_toast.sessionDuplicated'))
-                                    }}
-                                  >
-                                    <Copy className="size-4" />
-                                    {t('action.duplicate', { ns: 'common' })}
-                                  </ContextMenuItem>
-                                  <ContextMenuSeparator />
-                                  <ContextMenuItem
-                                    onClick={() => {
-                                      clearSessionMessages(session.id)
-                                      toast.success(t('sidebar_toast.messagesCleared'))
-                                    }}
-                                  >
-                                    <Eraser className="size-4" />
-                                    {t('sidebar.clearMessages')}
-                                  </ContextMenuItem>
-                                </>
-                              )}
-                              <ContextMenuItem
-                                onClick={() => {
-                                  togglePinSession(session.id)
-                                  toast.success(
-                                    session.pinned
-                                      ? t('sidebar_toast.unpinned')
-                                      : t('sidebar_toast.pinnedMsg')
-                                  )
-                                }}
-                              >
-                                {session.pinned ? (
-                                  <PinOff className="size-4" />
-                                ) : (
-                                  <Pin className="size-4" />
-                                )}
-                                {session.pinned
-                                  ? t('action.unpin', { ns: 'common' })
-                                  : t('sidebar.pinToTop')}
-                              </ContextMenuItem>
-                              <ContextMenuSub>
-                                <ContextMenuSubTrigger>
-                                  {modeIcons[session.mode]}
-                                  {t('sidebar.switchMode')}
-                                </ContextMenuSubTrigger>
-                                <ContextMenuSubContent>
-                                  {(['chat', 'cowork', 'code'] as const).map((m) => (
-                                    <ContextMenuItem
-                                      key={m}
-                                      disabled={session.mode === m}
-                                      onClick={() => {
-                                        updateSessionMode(session.id, m)
-                                        toast.success(t('sidebar_toast.switchedMode', { mode: m }))
-                                      }}
-                                    >
-                                      {modeIcons[m]}
-                                      <span className="capitalize">{m}</span>
-                                    </ContextMenuItem>
-                                  ))}
-                                </ContextMenuSubContent>
-                              </ContextMenuSub>
-                              <ContextMenuSeparator />
-                              <ContextMenuItem
-                                variant="destructive"
-                                onClick={() => {
-                                  const hasRunning =
-                                    runningSessions[session.id] === 'running' ||
-                                    runningSubAgentSessionIds.has(session.id) ||
-                                    activeTeamSessionId === session.id
-                                  if (session.messageCount > 0 || hasRunning) {
-                                    setDeleteTarget({
-                                      id: session.id,
-                                      title: session.title,
-                                      msgCount: session.messageCount
-                                    })
-                                    return
-                                  }
-                                  const snapshot = getSessionSnapshot(session.id)
-                                  if (!snapshot) return
-                                  deleteSession(snapshot.id)
-                                  toast.success(t('sidebar_toast.sessionDeleted'), {
-                                    action: {
-                                      label: t('action.undo', { ns: 'common' }),
-                                      onClick: () =>
-                                        useChatStore.getState().restoreSession(snapshot)
-                                    },
-                                    duration: 5000
-                                  })
-                                }}
-                              >
-                                <Trash2 className="size-4" />
-                                {t('action.delete', { ns: 'common' })}
-                              </ContextMenuItem>
-                            </ContextMenuContent>
-                          </ContextMenu>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
+              {regularProjectGroups.length > 0 && (
+                <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">
+                  {t('sidebar.projects', { defaultValue: '项目' })}
+                </div>
+              )}
+              {regularProjectGroups.map(renderProjectGroup)}
             </>
           )}
         </div>
+
+        {isDraggingSidebar && <div className="absolute inset-0 z-30" />}
+        <div
+          className="absolute right-0 top-0 z-20 h-full w-1.5 cursor-col-resize transition-colors hover:bg-primary/20"
+          onMouseDown={startResize}
+        />
 
         {/* Footer stats */}
         <div className="border-t px-3 py-2">
@@ -860,11 +1310,24 @@ export function SessionListPanel(): React.JSX.Element {
             {sessions.reduce((sum, session) => sum + session.messageCount, 0)} {t('sidebar.msgs')}
             {(() => {
               const rawSessions = useChatStore.getState().sessions
+              const providerState = useProviderStore.getState()
+              const getSessionRequestType = (
+                session: (typeof rawSessions)[number]
+              ): ProviderType | undefined => {
+                const provider = session.providerId
+                  ? providerState.providers.find((item) => item.id === session.providerId)
+                  : null
+                const model = session.modelId
+                  ? provider?.models.find((item) => item.id === session.modelId)
+                  : null
+                return model?.type ?? provider?.type
+              }
               let total = rawSessions.reduce(
                 (a, s) =>
                   a +
                   s.messages.reduce(
-                    (b, m) => b + (m.usage ? m.usage.inputTokens + m.usage.outputTokens : 0),
+                    (b, m) =>
+                      b + (m.usage ? getBillableTotalTokens(m.usage, getSessionRequestType(s)) : 0),
                     0
                   ),
                 0
@@ -875,7 +1338,7 @@ export function SessionListPanel(): React.JSX.Element {
                 ...teamState.teamHistory.flatMap((t) => t.members)
               ]
               for (const m of allMembers) {
-                if (m.usage) total += m.usage.inputTokens + m.usage.outputTokens
+                if (m.usage) total += getBillableTotalTokens(m.usage)
               }
               return total > 0 ? ` · ${formatTokens(total)} tokens` : ''
             })()}
@@ -900,17 +1363,19 @@ export function SessionListPanel(): React.JSX.Element {
                     title: deleteTarget?.title
                   })}
                 </p>
+                {deleteTarget?.queueCount ? (
+                  <p>
+                    {t('sidebar.deleteQueuedMessagesNotice', {
+                      defaultValue: '该会话还有 {{count}} 条待发送消息，也会一起删除。',
+                      count: deleteTarget.queueCount
+                    })}
+                  </p>
+                ) : null}
                 {deleteTargetRunningInfo?.hasRunning && (
-                  <p className="text-destructive font-medium">
-                    ⚠ This session has active tasks that will be stopped:
-                    {[
-                      deleteTargetRunningInfo.isAgentRunning && 'running agent',
-                      deleteTargetRunningInfo.hasActiveSubAgents && 'running sub-agents',
-                      deleteTargetRunningInfo.hasActiveTeam && 'active team'
-                    ]
-                      .filter(Boolean)
-                      .join(', ')}
-                    .
+                  <p className="font-medium text-destructive">
+                    {t('sidebar.deleteRunningNotice', {
+                      defaultValue: '该会话存在正在运行的任务，删除前会先停止当前运行。'
+                    })}
                   </p>
                 )}
               </div>
@@ -962,6 +1427,104 @@ export function SessionListPanel(): React.JSX.Element {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog
+        open={!!projectModelDialog}
+        onOpenChange={(open) => {
+          if (!open) setProjectModelDialog(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-lg p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              修改项目默认模型{projectModelDialog ? ` · ${projectModelDialog.projectName}` : ''}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-start"
+              onClick={() => applyProjectModel('__global__')}
+            >
+              跟随全局默认模型
+            </Button>
+            {chatProviderGroups.map(({ provider, models }) => (
+              <div key={`project-model-${provider.id}`} className="space-y-1">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground px-1">
+                  {provider.name}
+                </div>
+                {models.map((model) => (
+                  <Button
+                    key={`project-model-${provider.id}-${model.id}`}
+                    variant="ghost"
+                    size="sm"
+                    className="w-full justify-start"
+                    onClick={() => applyProjectModel(buildModelValue(provider.id, model.id))}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ModelIcon
+                        icon={model.icon}
+                        modelId={model.id}
+                        providerBuiltinId={provider.builtinId}
+                        size={16}
+                        className="text-muted-foreground/70"
+                      />
+                      <div className="flex min-w-0 flex-col items-start text-left">
+                        <span className="truncate max-w-[220px]">{model.name}</span>
+                        <span className="text-[10px] text-muted-foreground/60 truncate max-w-[220px]">
+                          {model.id}
+                        </span>
+                      </div>
+                    </div>
+                  </Button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <WorkingFolderSelectorDialog
+        open={!!folderPickerTarget}
+        onOpenChange={(open) => {
+          if (!open) setFolderPickerTarget(null)
+        }}
+        workingFolder={folderPickerProject?.workingFolder ?? undefined}
+        sshConnectionId={folderPickerProject?.sshConnectionId ?? null}
+        onSelectLocalFolder={async (folderPath) => {
+          if (folderPickerTarget?.type === 'create') {
+            await handleCreateProjectWithDirectory(folderPath, null)
+            return
+          }
+          if (!folderPickerProjectId) return
+          updateProjectDirectory(folderPickerProjectId, {
+            workingFolder: folderPath,
+            sshConnectionId: null
+          })
+          toast.success(
+            t('sidebar_toast.projectWorkingFolderUpdated', {
+              defaultValue: 'Project working folder updated'
+            })
+          )
+        }}
+        onSelectSshFolder={async (folderPath, connectionId) => {
+          if (folderPickerTarget?.type === 'create') {
+            await handleCreateProjectWithDirectory(folderPath, connectionId)
+            return
+          }
+          if (!folderPickerProjectId) return
+          updateProjectDirectory(folderPickerProjectId, {
+            workingFolder: folderPath,
+            sshConnectionId: connectionId
+          })
+          toast.success(
+            t('sidebar_toast.projectWorkingFolderUpdated', {
+              defaultValue: 'Project working folder updated'
+            })
+          )
+        }}
+      />
 
       <Dialog
         open={!!renameDialog}

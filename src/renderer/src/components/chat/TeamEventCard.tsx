@@ -1,14 +1,8 @@
-import {
-  Users,
-  ClipboardList,
-  MessageSquare,
-  Trash2,
-  RefreshCw,
-  UserPlus
-} from 'lucide-react'
+import { Users, ClipboardList, MessageSquare, Trash2, RefreshCw, UserPlus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@renderer/lib/utils'
 import type { ToolResultContent } from '@renderer/lib/api/types'
+import { decodeStructuredToolResult } from '@renderer/lib/tools/tool-result-format'
 
 interface TeamEventCardProps {
   name: string
@@ -51,11 +45,8 @@ const toolConfig: Record<string, { icon: React.ReactNode; color: string; labelKe
 
 function parseOutput(output?: ToolResultContent): Record<string, unknown> | null {
   if (!output || typeof output !== 'string') return null
-  try {
-    return JSON.parse(output)
-  } catch {
-    return null
-  }
+  const parsed = decodeStructuredToolResult(output)
+  return parsed && !Array.isArray(parsed) ? parsed : null
 }
 
 export function TeamEventCard({ name, input, output }: TeamEventCardProps): React.JSX.Element {
@@ -111,7 +102,9 @@ export function TeamEventCard({ name, input, output }: TeamEventCardProps): Reac
         <span className="text-[11px] font-medium text-cyan-600 dark:text-cyan-400">
           {config.labelKey ? t(config.labelKey) : name}
         </span>
-        {isError && <span className="text-[9px] text-destructive font-medium">{t('teamEvent.failed')}</span>}
+        {isError && (
+          <span className="text-[9px] text-destructive font-medium">{t('teamEvent.failed')}</span>
+        )}
         <span className="flex-1" />
       </div>
       {summary && (

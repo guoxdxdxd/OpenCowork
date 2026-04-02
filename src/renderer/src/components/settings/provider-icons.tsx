@@ -1,10 +1,12 @@
-import { Bot } from 'lucide-react'
+import { Bot, Sparkles } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
 const ICON_BASE = 'https://unpkg.com/@lobehub/icons-static-png@1.83.0'
 
 const iconUrlMap: Record<string, string> = {
   'routin-ai': 'https://routin.ai/icons/favicon.ico',
+  'routin-ai-plan': 'https://routin.ai/icons/favicon.ico',
+  'copilot-oauth': 'https://github.githubassets.com/favicons/favicon.png'
 }
 
 const providerIconSlugMap: Record<string, string> = {
@@ -26,9 +28,10 @@ const providerIconSlugMap: Record<string, string> = {
   siliconflow: 'siliconcloud',
   'gitee-ai': 'giteeai',
   'codex-oauth': 'openai',
+  'copilot-oauth': 'github',
   xiaomi: 'xiaomimimo',
   'bigmodel-coding': 'chatglm',
-  bigmodel: 'chatglm',
+  bigmodel: 'chatglm'
 }
 
 const modelIconSlugMap: Record<string, string> = {
@@ -58,13 +61,51 @@ const modelIconSlugMap: Record<string, string> = {
   step: 'stepfun',
   doubao: 'doubao',
   ollama: 'ollama',
-  siliconcloud: 'siliconcloud',
+  siliconcloud: 'siliconcloud'
 }
 
-function StaticIcon({ src, size, className }: { src: string; size: number; className?: string }) {
+const colorIconSlugs = new Set([
+  'azureai',
+  'baidu',
+  'chatglm',
+  'claude',
+  'deepseek',
+  'doubao',
+  'gemini',
+  'google',
+  'hunyuan',
+  'kimi',
+  'meta',
+  'minimax',
+  'mistral',
+  'nvidia',
+  'qwen',
+  'siliconcloud',
+  'stepfun'
+])
+
+function StaticIcon({
+  src,
+  size,
+  className
+}: {
+  src: string
+  size: number
+  className?: string
+}): React.JSX.Element {
   return (
-    <span className={className} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-      <img src={src} alt="" width={size} height={size} className="rounded-sm" style={{ width: size, height: size }} />
+    <span
+      className={className}
+      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+    >
+      <img
+        src={src}
+        alt=""
+        width={size}
+        height={size}
+        className="rounded-sm"
+        style={{ width: size, height: size }}
+      />
     </span>
   )
 }
@@ -75,10 +116,11 @@ function useIconVariant(): 'light' | 'dark' {
 }
 
 function getIconUrl(slug: string, variant: 'light' | 'dark'): string {
-  return `${ICON_BASE}/${variant}/${slug}.png`
+  const fileName = colorIconSlugs.has(slug) ? `${slug}-color` : slug
+  return `${ICON_BASE}/${variant}/${fileName}.png`
 }
 
-export function detectModelIconKey(modelId: string): string | undefined {
+function detectModelIconKey(modelId: string): string | undefined {
   const id = modelId.toLowerCase()
   if (/\bgpt[-.]/.test(id) || /^o[34]/.test(id) || /\bo[34][-]/.test(id)) return 'openai'
   if (/\bclaude/.test(id)) return 'claude'
@@ -106,7 +148,7 @@ export function ModelIcon({
   modelId,
   providerBuiltinId,
   size = 16,
-  className,
+  className
 }: {
   icon?: string
   modelId?: string
@@ -124,14 +166,25 @@ export function ModelIcon({
     const url = slug ? getIconUrl(slug, variant) : undefined
     if (url) return <StaticIcon src={url} size={size} className={className} />
   }
-  if (providerBuiltinId) return <ProviderIcon builtinId={providerBuiltinId} size={size} className={className} />
+  if (providerBuiltinId)
+    return <ProviderIcon builtinId={providerBuiltinId} size={size} className={className} />
   return <Bot size={size} className={className ?? 'text-muted-foreground'} />
+}
+
+export function AutoModelIcon({
+  size = 16,
+  className
+}: {
+  size?: number
+  className?: string
+}): React.JSX.Element {
+  return <Sparkles size={size} className={className ?? 'text-amber-500'} />
 }
 
 export function ProviderIcon({
   builtinId,
   size = 20,
-  className,
+  className
 }: {
   builtinId?: string
   size?: number

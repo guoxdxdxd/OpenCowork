@@ -1,11 +1,13 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
+import { useTheme } from 'next-themes'
 import { FileCode, FilePlus2, FileX2, FileEdit, Loader2, CheckCircle2, XCircle } from 'lucide-react'
 import { PrismAsyncLight as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { cn } from '@renderer/lib/utils'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
 import type { ToolResultContent } from '@renderer/lib/api/types'
+import { decodeStructuredToolResult } from '@renderer/lib/tools/tool-result-format'
 import type { AgentRunFileChange } from '@renderer/stores/agent-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
 import { MONO_FONT } from '@renderer/lib/constants'
@@ -90,19 +92,63 @@ function fileName(filePath: string): string {
   return parts[parts.length - 1] || filePath
 }
 
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, '\n')
+}
+
+function lineCount(text: string): number {
+  const normalized = normalizeLineEndings(text)
+  return normalized.length === 0 ? 0 : normalized.split('\n').length
+}
+
 type DiffLine = { type: 'keep' | 'add' | 'del'; text: string; oldNum?: number; newNum?: number }
 
+function computeLargeDiff(a: string[], b: string[]): DiffLine[] {
+  const result: DiffLine[] = []
+  const m = a.length
+  const n = b.length
+
+  let start = 0
+  while (start < m && start < n && a[start] === b[start]) {
+    result.push({ type: 'keep', text: a[start], oldNum: start + 1, newNum: start + 1 })
+    start += 1
+  }
+
+  let endA = m - 1
+  let endB = n - 1
+  while (endA >= start && endB >= start && a[endA] === b[endB]) {
+    endA -= 1
+    endB -= 1
+  }
+
+  for (let index = start; index <= endA; index += 1) {
+    result.push({ type: 'del', text: a[index], oldNum: index + 1 })
+  }
+
+  for (let index = start; index <= endB; index += 1) {
+    result.push({ type: 'add', text: b[index], newNum: index + 1 })
+  }
+
+  for (let offset = 1; endA + offset < m && endB + offset < n; offset += 1) {
+    result.push({
+      type: 'keep',
+      text: a[endA + offset],
+      oldNum: endA + offset + 1,
+      newNum: endB + offset + 1
+    })
+  }
+
+  return result
+}
+
 function computeDiff(oldStr: string, newStr: string): DiffLine[] {
-  const a = oldStr.split('\n')
-  const b = newStr.split('\n')
+  const a = normalizeLineEndings(oldStr).split('\n')
+  const b = normalizeLineEndings(newStr).split('\n')
   const m = a.length,
     n = b.length
 
   if (m * n > 100000) {
-    return [
-      ...a.map((t, i): DiffLine => ({ type: 'del', text: t, oldNum: i + 1 })),
-      ...b.map((t, i): DiffLine => ({ type: 'add', text: t, newNum: i + 1 }))
-    ]
+    return computeLargeDiff(a, b)
   }
 
   const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1))
@@ -229,10 +275,16 @@ function ChangeStats({
   trackedChange?: AgentRunFileChange
 }): React.JSX.Element | null {
   const { t } = useTranslation('chat')
+  const trackedStats = React.useMemo(() => {
+    if (!trackedChange || trackedChange.op === 'create') return null
+    return summarizeDiff(
+      computeDiff(trackedChange.before.text ?? '', trackedChange.after.text ?? '')
+    )
+  }, [trackedChange])
 
   if (trackedChange) {
     if (trackedChange.op === 'create') {
-      const lines = (trackedChange.after.text ?? '').split('\n').length
+      const lines = lineCount(trackedChange.after.text ?? '')
       return (
         <span className="flex items-center gap-1.5 text-[10px]">
           <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-green-500 font-medium">
@@ -243,20 +295,18 @@ function ChangeStats({
       )
     }
 
-    const stats = summarizeDiff(
-      computeDiff(trackedChange.before.text ?? '', trackedChange.after.text ?? '')
-    )
+    if (!trackedStats) return null
     return (
       <span className="flex items-center gap-1 text-[10px]">
-        <span className="text-green-400/70">+{stats.added}</span>
-        <span className="text-red-400/70">-{stats.deleted}</span>
+        <span className="text-green-400/70">+{trackedStats.added}</span>
+        <span className="text-red-400/70">-{trackedStats.deleted}</span>
       </span>
     )
   }
 
   if (name === 'Write') {
-    const content = String(input.content ?? '')
-    const lines = content.split('\n').length
+    const content = typeof input.content === 'string' ? input.content : ''
+    const lines = lineCount(content)
     return (
       <span className="flex items-center gap-1.5 text-[10px]">
         <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-green-500 font-medium">
@@ -267,14 +317,14 @@ function ChangeStats({
     )
   }
   if (name === 'Edit') {
-    const oldStr = String(input.old_string ?? '')
-    const newStr = String(input.new_string ?? '')
-    const removed = oldStr.split('\n').length
-    const added = newStr.split('\n').length
+    const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
+    const newStr = typeof input.new_string === 'string' ? input.new_string : ''
+    if (!oldStr && !newStr) return null
+    const stats = summarizeDiff(computeDiff(oldStr, newStr))
     return (
       <span className="flex items-center gap-1 text-[10px]">
-        <span className="text-green-400/70">+{added}</span>
-        <span className="text-red-400/70">-{removed}</span>
+        <span className="text-green-400/70">+{stats.added}</span>
+        <span className="text-red-400/70">-{stats.deleted}</span>
       </span>
     )
   }
@@ -309,10 +359,10 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
         className={cn(
           'select-none w-5 shrink-0 text-right pr-1',
           line.type === 'del'
-            ? 'text-red-400/40'
+            ? 'text-red-600/50 dark:text-red-400/40'
             : line.type === 'add'
-              ? 'text-green-400/40'
-              : 'text-zinc-600'
+              ? 'text-green-600/50 dark:text-green-400/40'
+              : 'text-muted-foreground/70 dark:text-zinc-600'
         )}
       >
         {line.oldNum ?? line.newNum ?? ''}
@@ -320,9 +370,9 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
       <span
         className={cn(
           'px-1.5 flex-1',
-          line.type === 'del' && 'text-red-300/80',
-          line.type === 'add' && 'text-green-300/80',
-          line.type === 'keep' && 'text-zinc-500'
+          line.type === 'del' && 'text-red-700/85 dark:text-red-300/80',
+          line.type === 'add' && 'text-green-700/85 dark:text-green-300/80',
+          line.type === 'keep' && 'text-foreground/70 dark:text-zinc-500'
         )}
       >
         {line.type === 'del' ? '- ' : line.type === 'add' ? '+ ' : '  '}
@@ -346,7 +396,7 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
         return (
           <button
             key={`c${ci}`}
-            className="flex w-full items-center justify-center py-0.5 text-[9px] text-zinc-500/50 hover:text-zinc-400 hover:bg-zinc-800/30 transition-colors border-y border-zinc-800/30"
+            className="flex w-full items-center justify-center border-y border-border/50 py-0.5 text-[9px] text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground dark:border-zinc-800/30 dark:text-zinc-500/50 dark:hover:bg-zinc-800/30 dark:hover:text-zinc-400"
             onClick={() => setExpandedChunks((prev) => new Set([...prev, ci]))}
           >
             {t('fileChange.unchangedLines', { count: chunk.count })}
@@ -369,6 +419,7 @@ function NewFileContent({
   isStreaming?: boolean
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
+  const { resolvedTheme } = useTheme()
   const lang = detectLang(filePath)
   const lines = content.split('\n').length
   const truncated = !isStreaming && lines > 50
@@ -394,7 +445,7 @@ function NewFileContent({
       >
         <SyntaxHighlighter
           language={lang}
-          style={oneDark}
+          style={resolvedTheme === 'light' ? oneLight : oneDark}
           customStyle={{
             margin: 0,
             padding: '0.5rem',
@@ -407,10 +458,15 @@ function NewFileContent({
           lineNumberStyle={{
             minWidth: '2em',
             paddingRight: '0.5em',
-            color: 'rgba(74,222,128,0.3)',
+            color: resolvedTheme === 'light' ? 'rgba(15,23,42,0.28)' : 'rgba(74,222,128,0.3)',
             userSelect: 'none'
           }}
-          lineProps={() => ({ style: { background: 'rgba(74,222,128,0.05)' } })}
+          lineProps={() => ({
+            style: {
+              background:
+                resolvedTheme === 'light' ? 'rgba(15,23,42,0.035)' : 'rgba(74,222,128,0.05)'
+            }
+          })}
         >
           {expanded || isStreaming ? content : displayed}
         </SyntaxHighlighter>
@@ -418,10 +474,86 @@ function NewFileContent({
       {truncated && !expanded && (
         <button
           onClick={() => setExpanded(true)}
-          className="w-full py-1 text-[10px] text-center text-zinc-500/60 hover:text-zinc-400 transition-colors border-t border-zinc-800/30"
+          className="w-full border-t border-border/50 py-1 text-center text-[10px] text-muted-foreground/70 transition-colors hover:text-foreground dark:border-zinc-800/30 dark:text-zinc-500/60 dark:hover:text-zinc-400"
         >
           {t('fileChange.moreLines', { count: lines - 50 })}
         </button>
+      )}
+    </div>
+  )
+}
+
+function PendingEditPreview({ input }: { input: Record<string, unknown> }): React.JSX.Element {
+  const filePath = String(input.file_path ?? input.path ?? '')
+  const explanation = input.explanation ? String(input.explanation) : null
+  const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
+  const newStr = typeof input.new_string === 'string' ? input.new_string : ''
+  const hasCounts = oldStr.length > 0 || newStr.length > 0
+  const stats = React.useMemo(() => summarizeDiff(computeDiff(oldStr, newStr)), [oldStr, newStr])
+
+  return (
+    <div className="px-3 py-2 space-y-1.5 text-[11px] text-muted-foreground/70">
+      <div className="flex flex-wrap items-center gap-2">
+        {filePath && (
+          <span
+            className="font-mono text-[10px] text-muted-foreground/50"
+            style={{ fontFamily: MONO_FONT }}
+          >
+            {shortPath(filePath)}
+          </span>
+        )}
+        {hasCounts && (
+          <span className="text-[10px] text-muted-foreground/50">
+            -{stats.deleted} / +{stats.added} lines
+          </span>
+        )}
+      </div>
+      {explanation && <p className="text-[11px] text-muted-foreground/60">{explanation}</p>}
+    </div>
+  )
+}
+
+function PendingWritePreview({
+  input,
+  isStreaming
+}: {
+  input: Record<string, unknown>
+  isStreaming: boolean
+}): React.JSX.Element {
+  const content = typeof input.content === 'string' ? input.content : null
+  const preview = typeof input.content_preview === 'string' ? input.content_preview : null
+  const lineTotal =
+    typeof input.content_lines === 'number'
+      ? input.content_lines
+      : content !== null
+        ? lineCount(content)
+        : null
+  const charTotal =
+    typeof input.content_chars === 'number'
+      ? input.content_chars
+      : content !== null
+        ? content.length
+        : null
+  const visiblePreview = content ?? preview
+
+  return (
+    <div className="px-3 py-2 space-y-2">
+      {(lineTotal !== null || charTotal !== null) && (
+        <div className="text-[10px] text-muted-foreground/50">
+          {lineTotal !== null ? `${lineTotal} lines` : ''}
+          {lineTotal !== null && charTotal !== null ? ' · ' : ''}
+          {charTotal !== null ? `${charTotal} chars` : ''}
+          {isStreaming ? ' · streaming' : ''}
+        </div>
+      )}
+      {visiblePreview && (
+        <pre
+          className="overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-2 text-[11px] text-foreground/80 dark:bg-zinc-950 dark:text-zinc-300/80"
+          style={{ fontFamily: MONO_FONT, maxHeight: isStreaming ? '240px' : '180px' }}
+        >
+          {visiblePreview}
+          {input.content_truncated ? '\n…' : ''}
+        </pre>
       )}
     </div>
   )
@@ -435,10 +567,14 @@ function trackedStatusLabel(change: AgentRunFileChange): string {
 }
 
 function trackedStatusTone(change: AgentRunFileChange): string {
-  if (change.status === 'accepted') return 'bg-emerald-500/10 text-emerald-500'
-  if (change.status === 'reverted') return 'bg-zinc-500/10 text-zinc-300'
-  if (change.status === 'conflicted') return 'bg-amber-500/10 text-amber-500'
-  return change.transport === 'ssh' ? 'bg-sky-500/10 text-sky-400' : 'bg-blue-500/10 text-blue-400'
+  if (change.status === 'accepted')
+    return 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-500'
+  if (change.status === 'reverted')
+    return 'bg-muted text-foreground/70 dark:bg-zinc-500/10 dark:text-zinc-300'
+  if (change.status === 'conflicted') return 'bg-amber-500/10 text-amber-600 dark:text-amber-500'
+  return change.transport === 'ssh'
+    ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
+    : 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
 }
 
 // ── Main Component ───────────────────────────────────────────────
@@ -475,10 +611,16 @@ export function FileChangeCard({
   const outputStr = typeof output === 'string' ? output : undefined
   const isFileActionable =
     trackedChange?.status === 'open' || trackedChange?.status === 'conflicted'
-  const isSuccess = outputStr
-    ? outputStr.includes('"success"') || outputStr.includes('success')
+  const parsedOutput = outputStr ? decodeStructuredToolResult(outputStr) : null
+  const isSuccess = !!(
+    parsedOutput &&
+    !Array.isArray(parsedOutput) &&
+    parsedOutput.success === true
+  )
+  const isOutputError = outputStr
+    ? !!(parsedOutput && !Array.isArray(parsedOutput) && typeof parsedOutput.error === 'string') ||
+      (!parsedOutput && outputStr.length > 0)
     : false
-  const isOutputError = outputStr ? !isSuccess && outputStr.length > 0 : false
 
   // Determine border color based on status
   const borderColor =
@@ -577,18 +719,26 @@ export function FileChangeCard({
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="border-t border-inherit bg-zinc-950 overflow-hidden"
+            className="overflow-hidden border-t border-inherit bg-muted/20 dark:bg-zinc-950"
           >
-            {/* Edit: single diff */}
+            {/* Edit: delay diff rendering until the tool settles */}
             {name === 'Edit' && trackedChange && (
               <InlineDiff
                 oldStr={trackedChange.before.text ?? ''}
                 newStr={trackedChange.after.text ?? ''}
               />
             )}
-            {name === 'Edit' && !trackedChange && !!input.old_string && !!input.new_string && (
-              <InlineDiff oldStr={String(input.old_string)} newStr={String(input.new_string)} />
+            {name === 'Edit' && !trackedChange && status !== 'completed' && status !== 'error' && (
+              <PendingEditPreview input={input} />
             )}
+            {name === 'Edit' &&
+              !trackedChange &&
+              status !== 'streaming' &&
+              status !== 'running' &&
+              !!input.old_string &&
+              !!input.new_string && (
+                <InlineDiff oldStr={String(input.old_string)} newStr={String(input.new_string)} />
+              )}
 
             {/* Write: new file content or overwrite diff */}
             {name === 'Write' && trackedChange?.op === 'modify' && (
@@ -604,13 +754,22 @@ export function FileChangeCard({
                 isStreaming={status === 'streaming'}
               />
             )}
-            {name === 'Write' && !trackedChange && !!input.content && (
-              <NewFileContent
-                content={String(input.content)}
-                filePath={filePath}
-                isStreaming={status === 'streaming'}
-              />
-            )}
+            {name === 'Write' &&
+              !trackedChange &&
+              (status === 'streaming' || status === 'running') && (
+                <PendingWritePreview input={input} isStreaming={status === 'streaming'} />
+              )}
+            {name === 'Write' &&
+              !trackedChange &&
+              status !== 'streaming' &&
+              status !== 'running' &&
+              !!input.content && (
+                <NewFileContent
+                  content={String(input.content)}
+                  filePath={filePath}
+                  isStreaming={false}
+                />
+              )}
 
             {/* Delete: minimal indicator */}
             {name === 'Delete' && (

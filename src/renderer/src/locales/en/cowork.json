@@ -90,6 +90,7 @@
     "insertPath": "Insert path into chat",
     "closePreview": "Close preview",
     "unableToRead": "(Unable to read file)",
+    "empty": "Empty folder",
     "stats": "{{folders}} folders · {{files}} files"
   },
   "teammateCard": {
@@ -114,6 +115,7 @@
     "noContent": "No plan content saved yet.",
     "implement": "Implement",
     "confirmExecute": "Confirm Execute",
+    "executeInNewSession": "New Session Execute",
     "approve": "Approve",
     "reject": "Reject",
     "rejectTitle": "Reject Plan",

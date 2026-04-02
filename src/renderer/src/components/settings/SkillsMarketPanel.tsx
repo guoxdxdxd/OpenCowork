@@ -8,17 +8,16 @@ import { Separator } from '@renderer/components/ui/separator'
 import { toast } from 'sonner'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 
+const SKILLS_MARKET_DOCS_URL = 'https://skills.open-cowork.shop/docs'
+const SKILLS_MARKET_DASHBOARD_URL = 'https://skills.open-cowork.shop/dashboard'
+const SKILLS_MARKET_BASE_URL = 'https://skills.open-cowork.shop'
+
 export function SkillsMarketPanel(): React.JSX.Element {
   const { t } = useTranslation('settings')
   const settings = useSettingsStore()
   const [testing, setTesting] = useState(false)
 
   const handleTestConnection = useCallback(async () => {
-    if (!settings.skillsMarketApiKey) {
-      toast.error(t('skillsmarket.apiKeyRequired'))
-      return
-    }
-
     setTesting(true)
     try {
       const result = (await ipcClient.invoke('skills:market-list', {
@@ -26,7 +25,7 @@ export function SkillsMarketPanel(): React.JSX.Element {
         limit: 5,
         query: '',
         provider: 'skillsmp',
-        apiKey: settings.skillsMarketApiKey,
+        apiKey: settings.skillsMarketApiKey
       })) as { total: number; skills: unknown[] }
 
       if (result && result.total >= 0) {
@@ -70,12 +69,19 @@ export function SkillsMarketPanel(): React.JSX.Element {
             variant="outline"
             size="sm"
             className="h-7 gap-1.5 text-xs"
-            onClick={() =>
-              window.open('https://skillsmp.com/zh/docs/api', '_blank', 'noopener')
-            }
+            onClick={() => window.open(SKILLS_MARKET_DASHBOARD_URL, '_blank', 'noopener')}
           >
             <ExternalLink className="size-3" />
             {t('skillsmarket.getApiKey')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            onClick={() => window.open(SKILLS_MARKET_DOCS_URL, '_blank', 'noopener')}
+          >
+            <ExternalLink className="size-3" />
+            {t('skillsmarket.openDocs')}
           </Button>
         </div>
 
@@ -83,20 +89,16 @@ export function SkillsMarketPanel(): React.JSX.Element {
         <div className="rounded-lg border border-border/60 bg-muted/30 p-4 space-y-2">
           <div className="flex items-center gap-2 text-sm font-medium">
             <Wand2 className="size-4 text-primary" />
-            SkillsMP
+            OpenCoWork Skills
           </div>
-          <p className="text-xs text-muted-foreground">
-            {t('skillsmarket.skillsmpInfo')}
-          </p>
+          <p className="text-xs text-muted-foreground">{t('skillsmarket.skillsmpInfo')}</p>
           <Button
             variant="link"
             size="sm"
             className="h-auto p-0 text-xs text-primary"
-            onClick={() =>
-              window.open('https://skillsmp.com', '_blank', 'noopener')
-            }
+            onClick={() => window.open(SKILLS_MARKET_BASE_URL, '_blank', 'noopener')}
           >
-            skillsmp.com <ExternalLink className="ml-1 size-2.5" />
+            skills.open-cowork.shop <ExternalLink className="ml-1 size-2.5" />
           </Button>
         </div>
       </section>
@@ -110,7 +112,7 @@ export function SkillsMarketPanel(): React.JSX.Element {
           size="sm"
           className="gap-1.5 text-xs"
           onClick={() => void handleTestConnection()}
-          disabled={testing || !settings.skillsMarketApiKey}
+          disabled={testing}
         >
           <RefreshCw className={`size-3.5 ${testing ? 'animate-spin' : ''}`} />
           {testing ? t('skillsmarket.testing') : t('skillsmarket.test')}
@@ -125,8 +127,7 @@ export function SkillsMarketPanel(): React.JSX.Element {
         <h3 className="text-sm font-medium">{t('skillsmarket.configSummary')}</h3>
         <div className="text-xs space-y-1 text-muted-foreground">
           <p>
-            <strong>{t('skillsmarket.provider')}:</strong>{' '}
-            SkillsMP
+            <strong>{t('skillsmarket.provider')}:</strong> OpenCoWork Skills
           </p>
           <p>
             <strong>{t('skillsmarket.apiKey')}:</strong>{' '}

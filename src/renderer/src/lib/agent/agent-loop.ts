@@ -1,10 +1,17 @@
 import { nanoid } from 'nanoid'
 import { Allow, parse as parsePartialJSON } from 'partial-json'
-import type { UnifiedMessage, ContentBlock, ToolUseBlock, ToolResultContent } from '../api/types'
+import type {
+  UnifiedMessage,
+  ContentBlock,
+  ToolUseBlock,
+  ToolResultContent,
+  ToolCallExtraContent
+} from '../api/types'
 import { createProvider } from '../api/provider'
 import { toolRegistry } from './tool-registry'
 import type { AgentEvent, AgentLoopConfig, ToolCallState } from './types'
-import type { ToolContext } from '../tools/tool-types'
+import type { ToolContext, ToolHandler } from '../tools/tool-types'
+import { encodeToolError } from '../tools/tool-result-format'
 import { shouldCompress, shouldPreCompress, preCompressMessages } from './context-compression'
 
 const MAX_PROVIDER_RETRIES = 3
@@ -36,12 +43,11 @@ export async function* runAgentLoop(
 ): AsyncGenerator<AgentEvent> {
   yield { type: 'loop_start' }
 
-  console.log('[Agent Loop] Creating provider with config:', {
+  console.log('[Agent Loop] Initial provider config:', {
     type: config.provider.type,
     model: config.provider.model,
     baseUrl: config.provider.baseUrl
   })
-  const provider = createProvider(config.provider)
   let conversationMessages = [...messages]
   let iteration = 0
   let lastInputTokens = 0
@@ -94,6 +100,7 @@ export async function* runAgentLoop(
     let assistantContentBlocks: ContentBlock[] = []
     let toolCalls: ToolCallState[] = []
     let sendAttempt = 0
+    let providerResponseId: string | undefined
     // stopReason from message_end is not used at loop level
 
     while (sendAttempt < MAX_PROVIDER_RETRIES) {
@@ -101,15 +108,21 @@ export async function* runAgentLoop(
       toolCalls = []
       const toolArgsById = new Map<string, string>()
       const toolNamesById = new Map<string, string>()
+      const toolExtraContentById = new Map<string, ToolCallExtraContent>()
       let currentToolId = ''
       let currentToolName = ''
       let streamedContent = false
 
       try {
+        const resolvedProviderConfig = config.resolveProvider
+          ? await config.resolveProvider(conversationMessages)
+          : config.provider
+        const provider = createProvider(resolvedProviderConfig)
+
         const stream = provider.sendMessage(
           conversationMessages,
           config.tools,
-          config.provider,
+          resolvedProviderConfig,
           config.signal
         )
 
@@ -132,7 +145,7 @@ export async function* runAgentLoop(
                 yield {
                   type: 'thinking_encrypted',
                   thinkingEncryptedContent: event.thinkingEncryptedContent,
-                  thinkingEncryptedProvider: event.thinkingEncryptedProvider,
+                  thinkingEncryptedProvider: event.thinkingEncryptedProvider
                 }
                 appendThinkingEncryptedToBlocks(
                   assistantContentBlocks,
@@ -163,7 +176,7 @@ export async function* runAgentLoop(
                 assistantContentBlocks.push({
                   type: 'image_error',
                   code: event.imageError.code,
-                  message: event.imageError.message,
+                  message: event.imageError.message
                 })
                 yield { type: 'image_error', imageError: event.imageError }
               }
@@ -176,9 +189,19 @@ export async function* runAgentLoop(
               if (currentToolId) {
                 toolArgsById.set(currentToolId, '')
                 toolNamesById.set(currentToolId, currentToolName)
+                if (event.toolCallExtraContent) {
+                  toolExtraContentById.set(currentToolId, event.toolCallExtraContent)
+                }
               }
               // Immediately notify UI so it can render the tool card while args stream
-              yield { type: 'tool_use_streaming_start', toolCallId: currentToolId, toolName: currentToolName }
+              yield {
+                type: 'tool_use_streaming_start',
+                toolCallId: currentToolId,
+                toolName: currentToolName,
+                ...(event.toolCallExtraContent
+                  ? { toolCallExtraContent: event.toolCallExtraContent }
+                  : {})
+              }
               break
 
             case 'tool_call_delta':
@@ -194,7 +217,7 @@ export async function* runAgentLoop(
                   yield {
                     type: 'tool_use_args_delta',
                     toolCallId: targetToolId,
-                    partialInput,
+                    partialInput
                   }
                 }
               }
@@ -208,53 +231,79 @@ export async function* runAgentLoop(
               const streamedToolInput = parseToolInputSnapshot(rawToolArgs, endToolName)
               const mergedToolInput = mergeToolInputs(streamedToolInput, event.toolCallInput)
               const toolInput =
-                Object.keys(mergedToolInput).length > 0 ? mergedToolInput : safeParseJSON(rawToolArgs)
+                Object.keys(mergedToolInput).length > 0
+                  ? mergedToolInput
+                  : safeParseJSON(rawToolArgs)
               const toolUseBlock: ToolUseBlock = {
                 type: 'tool_use',
                 id: endToolId,
                 name: endToolName,
                 input: toolInput,
+                extraContent: event.toolCallExtraContent ?? toolExtraContentById.get(endToolId)
               }
               assistantContentBlocks.push(toolUseBlock)
               toolArgsById.delete(endToolId)
               toolNamesById.delete(endToolId)
+              toolExtraContentById.delete(endToolId)
 
-              const requiresApproval = config.forceApproval || toolRegistry.checkRequiresApproval(
-                endToolName,
-                toolInput,
-                toolCtx
-              )
+              const requiresApproval =
+                config.forceApproval ||
+                checkToolRequiresApproval(endToolName, toolInput, toolCtx)
 
               const tc: ToolCallState = {
                 id: toolUseBlock.id,
                 name: endToolName,
                 input: toolInput,
                 status: requiresApproval ? 'pending_approval' : 'running',
-                requiresApproval,
+                requiresApproval
               }
               toolCalls.push(tc)
-              yield { type: 'tool_use_generated', toolUseBlock: { id: toolUseBlock.id, name: endToolName, input: toolInput } }
-              break;
+              yield {
+                type: 'tool_use_generated',
+                toolUseBlock: {
+                  id: toolUseBlock.id,
+                  name: endToolName,
+                  input: toolInput,
+                  ...(toolUseBlock.extraContent ? { extraContent: toolUseBlock.extraContent } : {})
+                }
+              }
+              break
             }
 
             case 'message_end':
               if (event.usage) {
                 lastInputTokens = event.usage.inputTokens
               }
-              if (event.usage || event.timing) {
-                yield { type: 'message_end', usage: event.usage, timing: event.timing }
+              if (event.providerResponseId) {
+                providerResponseId = event.providerResponseId
+              }
+              if (event.usage || event.timing || event.providerResponseId) {
+                yield {
+                  type: 'message_end',
+                  usage: event.usage,
+                  timing: event.timing,
+                  providerResponseId: event.providerResponseId
+                }
               }
               break
 
             case 'request_debug':
               if (event.debugInfo) {
-                yield { type: 'request_debug', debugInfo: event.debugInfo }
+                yield {
+                  type: 'request_debug',
+                  debugInfo: {
+                    ...event.debugInfo,
+                    providerId: resolvedProviderConfig.providerId,
+                    providerBuiltinId: resolvedProviderConfig.providerBuiltinId,
+                    model: resolvedProviderConfig.model
+                  }
+                }
               }
               break
 
             case 'error':
               throw new ProviderRequestError(event.error?.message ?? 'Unknown API error', {
-                type: event.error?.type,
+                type: event.error?.type
               })
           }
         }
@@ -264,17 +313,17 @@ export async function* runAgentLoop(
         if (toolArgsById.size > 0) {
           for (const [danglingToolId, argsText] of toolArgsById) {
             const danglingName = toolNamesById.get(danglingToolId) || currentToolName
-            const danglingInput = parseToolInputSnapshot(argsText, danglingName) ?? safeParseJSON(argsText)
-            const requiresApproval = config.forceApproval || toolRegistry.checkRequiresApproval(
-              danglingName,
-              danglingInput,
-              toolCtx
-            )
+            const danglingInput =
+              parseToolInputSnapshot(argsText, danglingName) ?? safeParseJSON(argsText)
+            const requiresApproval =
+              config.forceApproval ||
+              checkToolRequiresApproval(danglingName, danglingInput, toolCtx)
             const toolUseBlock: ToolUseBlock = {
               type: 'tool_use',
               id: danglingToolId,
               name: danglingName,
               input: danglingInput,
+              extraContent: toolExtraContentById.get(danglingToolId)
             }
             assistantContentBlocks.push(toolUseBlock)
             toolCalls.push({
@@ -282,11 +331,11 @@ export async function* runAgentLoop(
               name: danglingName,
               input: danglingInput,
               status: requiresApproval ? 'pending_approval' : 'running',
-              requiresApproval,
+              requiresApproval
             })
             yield {
               type: 'tool_use_generated',
-              toolUseBlock: { id: danglingToolId, name: danglingName, input: danglingInput },
+              toolUseBlock: { id: danglingToolId, name: danglingName, input: danglingInput }
             }
           }
           toolArgsById.clear()
@@ -323,6 +372,7 @@ export async function* runAgentLoop(
       role: 'assistant',
       content: assistantContentBlocks.length > 0 ? assistantContentBlocks : '',
       createdAt: Date.now(),
+      ...(providerResponseId ? { providerResponseId } : {})
     }
     conversationMessages.push(assistantMsg)
 
@@ -345,12 +395,15 @@ export async function* runAgentLoop(
             yield { type: 'loop_end', reason: 'aborted' }
             return
           }
-          yield { type: 'tool_call_result', toolCall: { ...tc, status: 'error', error: 'User denied permission' } }
+          yield {
+            type: 'tool_call_result',
+            toolCall: { ...tc, status: 'error', error: 'User denied permission' }
+          }
           toolResults.push({
             type: 'tool_result',
             toolUseId: tc.id,
             content: 'Permission denied by user',
-            isError: true,
+            isError: true
           })
           continue
         }
@@ -362,7 +415,10 @@ export async function* runAgentLoop(
       let output: ToolResultContent
       let toolError: string | undefined
       try {
-        output = await toolRegistry.execute(tc.name, tc.input, { ...toolCtx, currentToolUseId: tc.id })
+        output = await executeTool(tc.name, tc.input, {
+          ...toolCtx,
+          currentToolUseId: tc.id
+        })
       } catch (toolErr) {
         if (config.signal.aborted) {
           yield { type: 'loop_end', reason: 'aborted' }
@@ -370,14 +426,10 @@ export async function* runAgentLoop(
         }
         const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr)
         toolError = errMsg
-        output = JSON.stringify({ error: errMsg })
+        output = encodeToolError(errMsg)
       }
 
-      if (config.signal.aborted) {
-        yield { type: 'loop_end', reason: 'aborted' }
-        return
-      }
-
+      const completedAt = Date.now()
       yield {
         type: 'tool_call_result',
         toolCall: {
@@ -386,15 +438,20 @@ export async function* runAgentLoop(
           output,
           ...(toolError ? { error: toolError } : {}),
           startedAt,
-          completedAt: Date.now()
+          completedAt
         }
+      }
+
+      if (config.signal.aborted) {
+        yield { type: 'loop_end', reason: 'aborted' }
+        return
       }
 
       toolResults.push({
         type: 'tool_result',
         toolUseId: tc.id,
         content: output,
-        ...(toolError ? { isError: true } : {}),
+        ...(toolError ? { isError: true } : {})
       })
     }
 
@@ -403,7 +460,7 @@ export async function* runAgentLoop(
       id: nanoid(),
       role: 'user',
       content: toolResults,
-      createdAt: Date.now(),
+      createdAt: Date.now()
     }
     conversationMessages.push(toolResultMsg)
 
@@ -413,7 +470,11 @@ export async function* runAgentLoop(
       stopReason: 'tool_use',
       toolResults: toolResults
         .filter((b) => b.type === 'tool_result')
-        .map((b) => ({ toolUseId: (b as { toolUseId: string }).toolUseId, content: (b as { content: ToolResultContent }).content, isError: (b as { isError?: boolean }).isError })),
+        .map((b) => ({
+          toolUseId: (b as { toolUseId: string }).toolUseId,
+          content: (b as { content: ToolResultContent }).content,
+          isError: (b as { isError?: boolean }).isError
+        }))
     }
   }
 
@@ -425,6 +486,32 @@ export async function* runAgentLoop(
 }
 
 // --- Helpers ---
+
+function getToolHandler(name: string, toolCtx: ToolContext): ToolHandler | undefined {
+  return toolCtx.inlineToolHandlers?.[name] ?? toolRegistry.get(name)
+}
+
+function checkToolRequiresApproval(
+  name: string,
+  input: Record<string, unknown>,
+  toolCtx: ToolContext
+): boolean {
+  const handler = getToolHandler(name, toolCtx)
+  if (!handler) return true
+  return handler.requiresApproval?.(input, toolCtx) ?? false
+}
+
+async function executeTool(
+  name: string,
+  input: Record<string, unknown>,
+  toolCtx: ToolContext
+): Promise<ToolResultContent> {
+  const inlineHandler = toolCtx.inlineToolHandlers?.[name]
+  if (inlineHandler) {
+    return inlineHandler.execute(input, toolCtx)
+  }
+  return toolRegistry.execute(name, input, toolCtx)
+}
 
 function appendThinkingToBlocks(blocks: ContentBlock[], thinking: string): void {
   const last = blocks[blocks.length - 1]
@@ -438,7 +525,7 @@ function appendThinkingToBlocks(blocks: ContentBlock[], thinking: string): void 
 function appendThinkingEncryptedToBlocks(
   blocks: ContentBlock[],
   encryptedContent: string,
-  provider: 'anthropic' | 'openai-responses'
+  provider: 'anthropic' | 'openai-responses' | 'google'
 ): void {
   if (!encryptedContent) return
 
@@ -472,7 +559,7 @@ function appendThinkingEncryptedToBlocks(
     type: 'thinking',
     thinking: '',
     encryptedContent,
-    encryptedContentProvider: provider,
+    encryptedContentProvider: provider
   })
 }
 

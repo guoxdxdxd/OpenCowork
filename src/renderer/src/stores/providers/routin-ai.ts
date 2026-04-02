@@ -10,6 +10,55 @@ export const routinAiPreset: BuiltinProviderPreset = {
   defaultEnabled: true,
   defaultModel: 'glm-5',
   defaultModels: [
+    {
+      id: 'kimi-k2.5:free',
+      name: 'Kimi K2.5',
+      icon: 'kimi',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0,
+      outputPrice: 0,
+      cacheHitPrice: 0,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } },
+        forceTemperature: 1
+      }
+    },
+    {
+      id: 'MiniMax-M2.1:free',
+      name: 'MiniMax M2.1',
+      icon: 'minimax',
+      enabled: true,
+      contextLength: 204_800,
+      maxOutputTokens: 64_000,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.3,
+      outputPrice: 1.1,
+      cacheHitPrice: 0.03,
+      cacheCreationPrice: 0.4,
+      type: 'anthropic'
+    },
+    {
+      id: 'MiniMax-M2.5:free',
+      name: 'MiniMax M2.5',
+      icon: 'minimax',
+      enabled: true,
+      contextLength: 204_800,
+      maxOutputTokens: 131_072,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.3,
+      outputPrice: 1.1,
+      cacheHitPrice: 0.03,
+      cacheCreationPrice: 0.4,
+      type: 'anthropic'
+    },
     // ── Z.AI / GLM (智谱) ──
     {
       id: 'glm-5',
@@ -60,7 +109,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
       outputPrice: 0.56
     },
     {
-      id: "mimo-v2-flash", name: "Mimo V2 Flash",
+      id: 'mimo-v2-flash',
+      name: 'Mimo V2 Flash',
       icon: 'mimo',
       enabled: true,
       contextLength: 262_144,
@@ -72,8 +122,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
       supportsThinking: true,
       thinkingConfig: {
         bodyParams: { thinking: { type: 'enabled' } },
-        disabledBodyParams: { thinking: { type: 'disabled' } },
-      },
+        disabledBodyParams: { thinking: { type: 'disabled' } }
+      }
     },
     // ── OpenAI — GPT-4o family (cache: 50% off input) ──
     {
@@ -91,7 +141,9 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 1.25
     },
     {
-      id: 'gpt-4o-mini', name: 'GPT-4o Mini', icon: 'openai',
+      id: 'gpt-4o-mini',
+      name: 'GPT-4o Mini',
+      icon: 'openai',
       enabled: true,
       contextLength: 128_000,
       maxOutputTokens: 16_384,
@@ -112,10 +164,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       maxOutputTokens: 100_000,
       supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 15.00,
-      outputPrice: 60.00,
-      cacheCreationPrice: 15.00,
-      cacheHitPrice: 7.50,
+      inputPrice: 15.0,
+      outputPrice: 60.0,
+      cacheCreationPrice: 15.0,
+      cacheHitPrice: 7.5,
       supportsThinking: true,
       thinkingConfig: {
         bodyParams: {
@@ -124,7 +176,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
         reasoningEffortLevels: ['low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       }
-    }, {
+    },
+    {
       id: 'o1-pro',
       name: 'o1 Pro',
       icon: 'openai',
@@ -133,8 +186,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
       maxOutputTokens: 100_000,
       supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 150.00,
-      outputPrice: 600.00,
+      inputPrice: 150.0,
+      outputPrice: 600.0,
       supportsThinking: true,
       thinkingConfig: {
         bodyParams: {
@@ -197,8 +250,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
       maxOutputTokens: 100_000,
       supportsVision: false,
       supportsFunctionCall: true,
-      inputPrice: 20.00,
-      outputPrice: 80.00,
+      inputPrice: 20.0,
+      outputPrice: 80.0,
       supportsThinking: true,
       thinkingConfig: {
         bodyParams: {
@@ -231,13 +284,52 @@ export const routinAiPreset: BuiltinProviderPreset = {
       }
     },
     // ── OpenAI — GPT-4.1 family (cache: 75% off input) ──
-    { id: 'gpt-4.1', name: 'GPT-4.1', icon: 'openai', enabled: true, contextLength: 1_048_576, maxOutputTokens: 32_768, supportsVision: true, supportsFunctionCall: true, inputPrice: 2, outputPrice: 8, cacheCreationPrice: 2, cacheHitPrice: 0.5 },
-    { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', icon: 'openai', enabled: true, contextLength: 1_048_576, maxOutputTokens: 32_768, supportsVision: true, supportsFunctionCall: true, inputPrice: 0.4, outputPrice: 1.6, cacheCreationPrice: 0.4, cacheHitPrice: 0.1 },
-    { id: 'gpt-4.1-nano', name: 'GPT-4.1 Nano', icon: 'openai', enabled: true, contextLength: 1_048_576, maxOutputTokens: 32_768, supportsVision: false, supportsFunctionCall: true, inputPrice: 0.1, outputPrice: 0.4, cacheCreationPrice: 0.1, cacheHitPrice: 0.025 },
+    {
+      id: 'gpt-4.1',
+      name: 'GPT-4.1',
+      icon: 'openai',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 2,
+      outputPrice: 8,
+      cacheCreationPrice: 2,
+      cacheHitPrice: 0.5
+    },
+    {
+      id: 'gpt-4.1-mini',
+      name: 'GPT-4.1 Mini',
+      icon: 'openai',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.4,
+      outputPrice: 1.6,
+      cacheCreationPrice: 0.4,
+      cacheHitPrice: 0.1
+    },
+    {
+      id: 'gpt-4.1-nano',
+      name: 'GPT-4.1 Nano',
+      icon: 'openai',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 32_768,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.1,
+      outputPrice: 0.4,
+      cacheCreationPrice: 0.1,
+      cacheHitPrice: 0.025
+    },
     // ── OpenAI — GPT-5 family ──
     {
       id: 'gpt-5-chat',
-      name: "GPT-5 Chat",
+      name: 'GPT-5 Chat',
       icon: 'openai',
       enabled: true,
       contextLength: 128_000,
@@ -250,8 +342,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
@@ -259,7 +350,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
     },
     {
       id: 'gpt-5.1-chat',
-      name: "GPT-5.1 Chat",
+      name: 'GPT-5.1 Chat',
       icon: 'openai',
       enabled: true,
       contextLength: 128_000,
@@ -272,8 +363,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.175,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
@@ -281,7 +371,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
     },
     {
       id: 'gpt-5.2-chat',
-      name: "GPT-5.2 Chat",
+      name: 'GPT-5.2 Chat',
       icon: 'openai',
       enabled: true,
       contextLength: 128_000,
@@ -294,20 +384,19 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.175,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
       type: 'openai-responses'
     },
     {
-      id: "gpt-5",
-      name: "GPT 5",
+      id: 'gpt-5',
+      name: 'GPT 5',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.25,
@@ -316,20 +405,19 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.1",
-      name: "GPT 5.1",
+      id: 'gpt-5.1',
+      name: 'GPT 5.1',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.25,
@@ -338,20 +426,19 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.2",
-      name: "GPT 5.2",
+      id: 'gpt-5.2',
+      name: 'GPT 5.2',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.75,
@@ -360,8 +447,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.175,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
@@ -371,12 +457,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5-codex",
-      name: "GPT 5 Codex",
+      id: 'gpt-5-codex',
+      name: 'GPT 5 Codex',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.25,
@@ -385,9 +471,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
@@ -397,12 +481,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.1-codex",
-      name: "GPT 5.1 Codex",
+      id: 'gpt-5.1-codex',
+      name: 'GPT 5.1 Codex',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.25,
@@ -411,8 +495,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
@@ -422,12 +505,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.1-codex-max",
-      name: "GPT 5.1 Codex Max",
+      id: 'gpt-5.1-codex-max',
+      name: 'GPT 5.1 Codex Max',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.25,
@@ -436,8 +519,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.125,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
@@ -447,22 +529,21 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.1-codex-mini",
-      name: "GPT 5.1 Codex Mini",
+      id: 'gpt-5.1-codex-mini',
+      name: 'GPT 5.1 Codex Mini',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 0.25,
-      outputPrice: 2.00,
+      outputPrice: 2.0,
       cacheCreationPrice: 0.25,
       cacheHitPrice: 0.025,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
       },
@@ -472,12 +553,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.2-codex",
-      name: "GPT 5.2 Codex",
+      id: 'gpt-5.2-codex',
+      name: 'GPT 5.2 Codex',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.75,
@@ -486,9 +567,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.175,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
@@ -498,12 +577,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.3-codex",
-      name: "GPT 5.3 Codex",
+      id: 'gpt-5.3-codex',
+      name: 'GPT 5.3 Codex',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 1.75,
@@ -512,10 +591,9 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.175,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
-        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium'
+        bodyParams: {},
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
       },
       responseSummary: 'detailed',
       enablePromptCache: true,
@@ -523,10 +601,59 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.4",
-      name: "GPT 5.4",
+      id: 'gpt-5.4-nano',
+      name: 'GPT 5.4 Nano',
       icon: 'openai',
       enabled: true,
+      serviceTier: 'priority',
+      contextLength: 400_000, // 400k
+      maxOutputTokens: 128_000,
+      supportsVision: true,
+      supportsFunctionCall: false,
+      inputPrice: 0.2,
+      outputPrice: 1.25,
+      cacheHitPrice: 0.02,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: {},
+        reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
+      },
+      responseSummary: 'detailed',
+      enablePromptCache: true,
+      enableSystemPromptCache: true,
+      type: 'openai-responses'
+    },
+    {
+      id: 'gpt-5.4-mini',
+      name: 'GPT 5.4 Mini',
+      icon: 'openai',
+      enabled: true,
+      serviceTier: 'priority',
+      contextLength: 400_000,
+      maxOutputTokens: 128_000,
+      supportsVision: true,
+      supportsFunctionCall: false,
+      inputPrice: 0.75,
+      outputPrice: 4.5,
+      cacheHitPrice: 0.075,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: {},
+        reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
+      },
+      responseSummary: 'detailed',
+      enablePromptCache: true,
+      enableSystemPromptCache: true,
+      type: 'openai-responses'
+    },
+    {
+      id: 'gpt-5.4',
+      name: 'GPT 5.4',
+      icon: 'openai',
+      enabled: true,
+      serviceTier: 'priority',
       contextLength: 1_050_000,
       maxOutputTokens: 128_000,
       supportsVision: true,
@@ -536,10 +663,9 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.25,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
-        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium'
+        bodyParams: {},
+        reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
       },
       responseSummary: 'detailed',
       enablePromptCache: true,
@@ -547,8 +673,8 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5-pro",
-      name: "GPT 5 Pro",
+      id: 'gpt-5-pro',
+      name: 'GPT 5 Pro',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
@@ -559,10 +685,9 @@ export const routinAiPreset: BuiltinProviderPreset = {
       outputPrice: 120,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
-        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'], defaultReasoningEffort: 'medium'
+        bodyParams: {},
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'medium'
       },
       responseSummary: 'detailed',
       enablePromptCache: true,
@@ -570,22 +695,21 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.2-pro",
-      name: "GPT 5.2 Pro",
+      id: 'gpt-5.2-pro',
+      name: 'GPT 5.2 Pro',
       icon: 'openai',
       enabled: true,
       contextLength: 400_000,
       maxOutputTokens: 272_000,
       supportsVision: true,
       supportsFunctionCall: false,
-      inputPrice: 21.00,
-      outputPrice: 168.00,
+      inputPrice: 21.0,
+      outputPrice: 168.0,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
-        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'], defaultReasoningEffort: 'medium'
+        bodyParams: {},
+        reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'medium'
       },
       responseSummary: 'detailed',
       enablePromptCache: true,
@@ -593,12 +717,12 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.3-codex-spark",
-      name: "GPT 5.3 Codex Spark",
+      id: 'gpt-5.3-codex-spark',
+      name: 'GPT 5.3 Codex Spark',
       icon: 'openai',
       enabled: true,
       contextLength: 128_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 2.5,
@@ -607,13 +731,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.25,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
-      responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
       type: 'openai-responses'
@@ -640,7 +761,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       icon: 'minimax',
       enabled: true,
       contextLength: 204_800,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: false,
       supportsFunctionCall: true,
       inputPrice: 0.3,
@@ -655,7 +776,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       icon: 'minimax',
       enabled: true,
       contextLength: 196_608,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: false,
       supportsFunctionCall: true,
       inputPrice: 0.6,
@@ -695,7 +816,22 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheCreationPrice: 0.7
     },
     // ── DeepSeek ──
-    { id: 'deepseek-v3.2', name: 'DeepSeek V3.2', icon: 'deepseek', enabled: true, contextLength: 163_840, maxOutputTokens: 8_192, supportsVision: false, supportsFunctionCall: true, inputPrice: 0.26, outputPrice: 0.38, cacheCreationPrice: 0.26, cacheHitPrice: 0.026, supportsThinking: true, thinkingConfig: { bodyParams: { enable_thinking: true } } },
+    {
+      id: 'deepseek-v3.2',
+      name: 'DeepSeek V3.2',
+      icon: 'deepseek',
+      enabled: true,
+      contextLength: 163_840,
+      maxOutputTokens: 8_192,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.26,
+      outputPrice: 0.38,
+      cacheCreationPrice: 0.26,
+      cacheHitPrice: 0.026,
+      supportsThinking: true,
+      thinkingConfig: { bodyParams: { enable_thinking: true } }
+    },
     // ── Moonshot / Kimi ──
     {
       id: 'kimi-k2.5',
@@ -727,7 +863,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 0.5,
-      outputPrice: 3,
+      outputPrice: 3
     },
     {
       id: 'gemini-3-pro-preview',
@@ -744,13 +880,46 @@ export const routinAiPreset: BuiltinProviderPreset = {
     {
       id: 'gemini-3.1-pro-preview',
       name: 'Gemini 3.1 Pro Preview',
-      icon: 'gemini', enabled: true,
+      icon: 'gemini',
+      enabled: true,
       contextLength: 1_048_576,
       maxOutputTokens: 65_536,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 2,
       outputPrice: 12
+    },
+    {
+      id: 'gemini-3.1-flash-lite-preview',
+      name: 'Gemini 3.1 flash Lite Preview',
+      icon: 'gemini',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.2,
+      outputPrice: 1.5
+    },
+    {
+      id: 'gemini-3.1-flash-image-preview',
+      name: 'Gemini 3.1 Flash Image Preview',
+      icon: 'gemini',
+      enabled: true,
+      category: 'image',
+      type: 'gemini',
+      supportsVision: true,
+      supportsFunctionCall: false
+    },
+    {
+      id: 'gemini-3-pro-image-preview',
+      name: 'Gemini 3 Pro Image Preview',
+      icon: 'gemini',
+      enabled: true,
+      category: 'image',
+      type: 'gemini',
+      supportsVision: true,
+      supportsFunctionCall: false
     },
     // ── ByteDance Doubao ──
     {
@@ -785,17 +954,16 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.04,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
-      },
+      }
     },
     {
       id: 'doubao-seed-2.0-code',
       name: 'Doubao Seed 2.0 Code',
       icon: 'doubao',
-      enabled: true,
+      enabled: true
     },
     {
       id: 'doubao-seed-2-0-pro-260215',
@@ -808,11 +976,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.64,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
-      },
+      }
     },
     {
       id: 'doubao-seed-2-0-lite-260215',
@@ -825,11 +992,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.12,
       supportsThinking: true,
       thinkingConfig: {
-        bodyParams: {
-        },
+        bodyParams: {},
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high'],
         defaultReasoningEffort: 'medium'
-      },
+      }
     },
     {
       id: 'doubao-seedream-4-5-251128',
@@ -839,7 +1005,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       category: 'image',
       type: 'openai-images',
       supportsVision: true,
-      supportsFunctionCall: false,
+      supportsFunctionCall: false
     },
     {
       id: 'doubao-seedream-4-0-250828',
@@ -849,7 +1015,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       category: 'image',
       type: 'openai-images',
       supportsVision: true,
-      supportsFunctionCall: false,
+      supportsFunctionCall: false
     },
     {
       id: 'doubao-seedream-5-0-260128',
@@ -859,7 +1025,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       category: 'image',
       type: 'openai-images',
       supportsVision: true,
-      supportsFunctionCall: false,
+      supportsFunctionCall: false
     },
     {
       id: 'doubao-seedream-3-0-t2i-250415',
@@ -869,15 +1035,16 @@ export const routinAiPreset: BuiltinProviderPreset = {
       category: 'image',
       type: 'openai-images',
       supportsVision: true,
-      supportsFunctionCall: false,
+      supportsFunctionCall: false
     },
     {
       id: 'claude-opus-4-6',
       name: 'Claude Opus 4.6',
-      icon: 'claude', type: 'anthropic',
+      icon: 'claude',
+      type: 'anthropic',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 5,
@@ -885,7 +1052,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheCreationPrice: 6.25,
       cacheHitPrice: 0.5,
       supportsThinking: true,
-      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } },
+        forceTemperature: 1
+      }
     },
     {
       id: 'claude-sonnet-4-6',
@@ -894,14 +1064,18 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'anthropic',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 3,
       outputPrice: 15,
       cacheCreationPrice: 3.75,
       cacheHitPrice: 0.3,
-      supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } },
+        forceTemperature: 1
+      }
     },
     {
       id: 'claude-sonnet-4-5-20250929',
@@ -910,7 +1084,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'anthropic',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 3,
@@ -918,7 +1092,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheCreationPrice: 3.75,
       cacheHitPrice: 0.3,
       supportsThinking: true,
-      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } },
+        forceTemperature: 1
+      }
     },
     {
       id: 'claude-haiku-4-5-20251001',
@@ -942,23 +1119,32 @@ export const routinAiPreset: BuiltinProviderPreset = {
     },
     {
       id: 'claude-opus-4-5-20251101',
-      name: 'Claude Opus 4.5', icon: 'claude', type: 'anthropic',
-      enabled: true, contextLength: 200_000,
-      maxOutputTokens: 64_384, supportsVision: true,
+      name: 'Claude Opus 4.5',
+      icon: 'claude',
+      type: 'anthropic',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 64_000,
+      supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 5,
       outputPrice: 25,
       cacheCreationPrice: 6.25,
       cacheHitPrice: 0.5,
       supportsThinking: true,
-      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
-    }, {
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } },
+        forceTemperature: 1
+      }
+    },
+    {
       id: 'claude-sonnet-4-20250514',
       name: 'Claude Sonnet 4',
-      icon: 'claude', type: 'anthropic',
+      icon: 'claude',
+      type: 'anthropic',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 3,
@@ -966,8 +1152,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheCreationPrice: 3.75,
       cacheHitPrice: 0.3,
       supportsThinking: true,
-      thinkingConfig:
-      {
+      thinkingConfig: {
         bodyParams: {
           thinking: { type: 'enabled', budget_tokens: 10000 }
         },
@@ -981,7 +1166,7 @@ export const routinAiPreset: BuiltinProviderPreset = {
       type: 'anthropic',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 64_384,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 15,
@@ -989,7 +1174,10 @@ export const routinAiPreset: BuiltinProviderPreset = {
       cacheCreationPrice: 18.75,
       cacheHitPrice: 1.5,
       supportsThinking: true,
-      thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } }, forceTemperature: 1 }
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 10000 } },
+        forceTemperature: 1
+      }
     },
     {
       id: 'claude-3-5-haiku-20241022',
@@ -1001,9 +1189,15 @@ export const routinAiPreset: BuiltinProviderPreset = {
       maxOutputTokens: 8_192,
       supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 0.8, outputPrice: 4,
-      cacheCreationPrice: 1, cacheHitPrice: 0.08,
-      supportsThinking: true, thinkingConfig: { bodyParams: { thinking: { type: 'enabled', budget_tokens: 8000 } }, forceTemperature: 1 }
+      inputPrice: 0.8,
+      outputPrice: 4,
+      cacheCreationPrice: 1,
+      cacheHitPrice: 0.08,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled', budget_tokens: 8000 } },
+        forceTemperature: 1
+      }
     },
     // ── Qwen3 ──
     {
@@ -1108,7 +1302,47 @@ export const routinAiPreset: BuiltinProviderPreset = {
         bodyParams: { thinking: { type: 'enabled' } },
         disabledBodyParams: { thinking: { type: 'disabled' } }
       }
-    },
+    }
+  ]
+}
 
-  ],
+/** Model IDs for Routin 套餐（https://cn.routin.ai/plan/v1）：Codex 全系、GPT-5.4 系、Claude 全系 */
+const ROUTIN_AI_PLAN_MODEL_ORDER = [
+  'gpt-5-codex',
+  'gpt-5.1-codex',
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+  'gpt-5.2-codex',
+  'gpt-5.3-codex',
+  'gpt-5.3-codex-spark',
+  'gpt-5.4-nano',
+  'gpt-5.4-mini',
+  'gpt-5.4',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-20250514',
+  'claude-opus-4-20250514'
+] as const
+
+const routinAiModelById = new Map(routinAiPreset.defaultModels.map((m) => [m.id, m]))
+
+export const routinAiPlanPreset: BuiltinProviderPreset = {
+  builtinId: 'routin-ai-plan',
+  name: 'Routin AI（套餐）',
+  type: 'openai-chat',
+  defaultBaseUrl: 'https://cn.routin.ai/plan/v1',
+  homepage: 'https://routin.ai',
+  apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
+  defaultEnabled: true,
+  defaultModel: 'gpt-5.4',
+  defaultModels: ROUTIN_AI_PLAN_MODEL_ORDER.map((id) => {
+    const config = routinAiModelById.get(id)
+    if (!config) {
+      throw new Error(`routin-ai plan preset: missing model ${id}`)
+    }
+    return config
+  })
 }

@@ -66,16 +66,40 @@ export interface AgentInfo {
   description: string
   /** Lucide icon name */
   icon?: string
-  /** Comma-separated list of allowed tool names */
+  /** Allowed tool names. Supports '*' to expose all registered tools. */
+  tools: string[]
+  /** Legacy alias kept for compatibility with existing renderer code and saved files. */
   allowedTools: string[]
-  /** Max LLM iterations */
+  /** Tools explicitly denied for this agent. */
+  disallowedTools: string[]
+  /** Max LLM turns */
+  maxTurns: number
+  /** Legacy alias kept for compatibility with existing renderer code and saved files. */
   maxIterations: number
+  /** Optional initial task prefix */
+  initialPrompt?: string
+  /** Whether this agent is intended for background execution */
+  background?: boolean
   /** Optional model override */
   model?: string
   /** Optional temperature override */
   temperature?: number
   /** The system prompt (body after frontmatter) */
   systemPrompt: string
+}
+
+export interface AgentManageItem {
+  id: string
+  name: string
+  description: string
+  path: string
+  source: 'user'
+  editable: true
+}
+
+function isPathInsideDir(targetPath: string, baseDir: string): boolean {
+  const relative = path.relative(baseDir, targetPath)
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
 }
 
 /**
@@ -89,11 +113,16 @@ function parseAgentFile(content: string, filename: string): AgentInfo | null {
   const fmBlock = fmMatch[1]
   const body = content.slice(fmMatch[0].length).trimStart()
 
-  // Extract frontmatter fields
-  const getString = (key: string): string | undefined => {
+  const getRawValue = (key: string): string | undefined => {
     const m = fmBlock.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'))
     if (!m) return undefined
-    return m[1].trim().replace(/^["']|["']$/g, '')
+    return m[1].trim()
+  }
+
+  const getString = (key: string): string | undefined => {
+    const value = getRawValue(key)
+    if (value === undefined) return undefined
+    return value.replace(/^["']|["']$/g, '')
   }
 
   const getNumber = (key: string): number | undefined => {
@@ -103,6 +132,27 @@ function parseAgentFile(content: string, filename: string): AgentInfo | null {
     return isNaN(n) ? undefined : n
   }
 
+  const getBoolean = (key: string): boolean | undefined => {
+    const s = getString(key)
+    if (s === undefined) return undefined
+    if (s === 'true') return true
+    if (s === 'false') return false
+    return undefined
+  }
+
+  const getStringList = (key: string): string[] | undefined => {
+    const raw = getRawValue(key)
+    if (!raw) return undefined
+
+    const normalized = raw
+      .replace(/^\[(.*)\]$/, '$1')
+      .split(',')
+      .map((item) => item.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean)
+
+    return normalized.length > 0 ? normalized : undefined
+  }
+
   const name = getString('name')
   const description = getString('description')
   if (!name || !description) {
@@ -110,20 +160,59 @@ function parseAgentFile(content: string, filename: string): AgentInfo | null {
     return null
   }
 
-  const allowedToolsStr = getString('allowedTools') ?? 'Read, Glob, Grep, LS'
-  const allowedTools = allowedToolsStr.split(',').map((t) => t.trim()).filter(Boolean)
+  const tools = getStringList('tools') ??
+    getStringList('allowedTools') ?? ['Read', 'Glob', 'Grep', 'LS']
+  const disallowedTools = getStringList('disallowedTools') ?? []
+  const maxTurns = getNumber('maxTurns') ?? getNumber('maxIterations') ?? 0
 
   return {
     name,
     description,
     icon: getString('icon'),
-    allowedTools,
-    // 0 => unlimited iterations; explicit value in frontmatter still takes precedence
-    maxIterations: getNumber('maxIterations') ?? 0,
+    tools,
+    allowedTools: tools,
+    disallowedTools,
+    maxTurns,
+    maxIterations: maxTurns,
+    initialPrompt: getString('initialPrompt'),
+    background: getBoolean('background'),
     model: getString('model'),
     temperature: getNumber('temperature'),
-    systemPrompt: body || `You are ${name}, a specialized agent.`,
+    systemPrompt: body || `You are ${name}, a specialized agent.`
   }
+}
+
+function collectManageAgents(): AgentManageItem[] {
+  if (!fs.existsSync(AGENTS_DIR)) return []
+
+  const entries = fs.readdirSync(AGENTS_DIR, { withFileTypes: true })
+  const agents: AgentManageItem[] = []
+  for (const entry of entries) {
+    if (entry.isDirectory()) continue
+    if (!entry.name.endsWith('.md')) continue
+
+    try {
+      const agentPath = path.join(AGENTS_DIR, entry.name)
+      const content = fs.readFileSync(agentPath, 'utf-8')
+      const agent = parseAgentFile(content, entry.name)
+      if (!agent) continue
+
+      agents.push({
+        id: agentPath,
+        name: agent.name,
+        description: agent.description,
+        path: agentPath,
+        source: 'user',
+        editable: true
+      })
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return agents.sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+  )
 }
 
 export function registerAgentsHandlers(): void {
@@ -158,27 +247,113 @@ export function registerAgentsHandlers(): void {
   /**
    * agents:load — read and parse a specific agent .md file by name.
    */
-  ipcMain.handle('agents:load', async (_event, args: { name: string }): Promise<AgentInfo | { error: string }> => {
-    try {
-      if (!fs.existsSync(AGENTS_DIR)) {
-        return { error: `Agents directory not found` }
-      }
-      // Search for the agent file by name field (not filename)
-      const entries = fs.readdirSync(AGENTS_DIR, { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.isDirectory()) continue
-        if (!entry.name.endsWith('.md')) continue
-        try {
-          const content = fs.readFileSync(path.join(AGENTS_DIR, entry.name), 'utf-8')
-          const agent = parseAgentFile(content, entry.name)
-          if (agent && agent.name === args.name) return agent
-        } catch {
-          // Skip unreadable files
+  ipcMain.handle(
+    'agents:load',
+    async (_event, args: { name: string }): Promise<AgentInfo | { error: string }> => {
+      try {
+        if (!fs.existsSync(AGENTS_DIR)) {
+          return { error: `Agents directory not found` }
         }
+        // Search for the agent file by name field (not filename)
+        const entries = fs.readdirSync(AGENTS_DIR, { withFileTypes: true })
+        for (const entry of entries) {
+          if (entry.isDirectory()) continue
+          if (!entry.name.endsWith('.md')) continue
+          try {
+            const content = fs.readFileSync(path.join(AGENTS_DIR, entry.name), 'utf-8')
+            const agent = parseAgentFile(content, entry.name)
+            if (agent && agent.name === args.name) return agent
+          } catch {
+            // Skip unreadable files
+          }
+        }
+        return { error: `Agent "${args.name}" not found` }
+      } catch (err) {
+        return { error: String(err) }
       }
-      return { error: `Agent "${args.name}" not found` }
-    } catch (err) {
-      return { error: String(err) }
+    }
+  )
+
+  ipcMain.handle('agents:manage-list', async (): Promise<AgentManageItem[]> => {
+    try {
+      return collectManageAgents()
+    } catch {
+      return []
     }
   })
+
+  ipcMain.handle(
+    'agents:manage-read',
+    async (
+      _event,
+      args: { path: string }
+    ): Promise<
+      | {
+          id: string
+          name: string
+          description: string
+          path: string
+          source: 'user'
+          editable: true
+          content: string
+        }
+      | { error: string }
+    > => {
+      try {
+        const targetPath = args?.path?.trim()
+        if (!targetPath) return { error: 'Agent path is required' }
+        if (!isPathInsideDir(targetPath, AGENTS_DIR)) {
+          return { error: 'Agent path is outside the managed directory' }
+        }
+        if (!fs.existsSync(targetPath)) {
+          return { error: `Agent file not found: ${targetPath}` }
+        }
+
+        const content = fs.readFileSync(targetPath, 'utf-8')
+        const agent = parseAgentFile(content, path.basename(targetPath))
+        if (!agent) return { error: `Agent file is invalid: ${targetPath}` }
+
+        return {
+          id: targetPath,
+          name: agent.name,
+          description: agent.description,
+          path: targetPath,
+          source: 'user',
+          editable: true,
+          content
+        }
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'agents:manage-save',
+    async (
+      _event,
+      args: { path: string; content: string }
+    ): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const targetPath = args?.path?.trim()
+        if (!targetPath) return { success: false, error: 'Agent path is required' }
+        if (!isPathInsideDir(targetPath, AGENTS_DIR)) {
+          return { success: false, error: 'Agent path is outside the managed directory' }
+        }
+
+        const parsed = parseAgentFile(args.content, path.basename(targetPath))
+        if (!parsed) {
+          return {
+            success: false,
+            error: 'Agent markdown is invalid or missing required frontmatter'
+          }
+        }
+
+        fs.writeFileSync(targetPath, args.content, 'utf-8')
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: String(err) }
+      }
+    }
+  )
 }

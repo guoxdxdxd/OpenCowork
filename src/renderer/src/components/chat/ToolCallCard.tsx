@@ -23,6 +23,7 @@ import {
 import { cn } from '@renderer/lib/utils'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
 import type { ToolResultContent } from '@renderer/lib/api/types'
+import { decodeStructuredToolResult } from '@renderer/lib/tools/tool-result-format'
 import { MONO_FONT } from '@renderer/lib/constants'
 import { estimateTokens, formatTokens } from '@renderer/lib/format-tokens'
 import { useAgentStore } from '@renderer/stores/agent-store'
@@ -95,7 +96,7 @@ function ImageOutputBlock({ output }: { output: ToolResultContent }): React.JSX.
             <img
               src={src}
               alt="Tool output"
-              className="max-w-full max-h-72 rounded-md border object-contain bg-zinc-950"
+              className="max-h-72 max-w-full rounded-md border object-contain bg-muted/30 dark:bg-zinc-950"
             />
           </div>
         )
@@ -239,7 +240,9 @@ function ShellTextPane({
         <span
           className={cn(
             'inline-flex rounded px-1 py-0.5',
-            tone === 'error' ? 'bg-red-500/10 text-red-300/80' : 'bg-zinc-800/70 text-zinc-300/70'
+            tone === 'error'
+              ? 'bg-red-500/10 text-red-700/85 dark:text-red-300/80'
+              : 'bg-muted text-foreground/70 dark:bg-zinc-800/70 dark:text-zinc-300/70'
           )}
         >
           {title}
@@ -249,7 +252,9 @@ function ShellTextPane({
       <pre
         className={cn(
           'whitespace-pre-wrap break-words text-[11px]',
-          tone === 'error' ? 'text-red-200/85' : 'text-zinc-300/80'
+          tone === 'error'
+            ? 'text-red-700/85 dark:text-red-200/85'
+            : 'text-foreground/80 dark:text-zinc-300/80'
         )}
       >
         {displayed}
@@ -281,8 +286,13 @@ function BashOutputBlock({
 
   // Try to parse JSON output from shell tool (may contain stdout, stderr, exitCode, processId)
   const parsed = React.useMemo(() => {
-    try {
-      const obj = JSON.parse(output) as {
+    const obj = decodeStructuredToolResult(output)
+    if (
+      obj &&
+      !Array.isArray(obj) &&
+      ('stdout' in obj || 'output' in obj || 'exitCode' in obj || 'processId' in obj)
+    ) {
+      return obj as {
         stdout?: string
         stderr?: string
         exitCode?: number
@@ -290,15 +300,6 @@ function BashOutputBlock({
         processId?: string
         summary?: ShellOutputSummary
       }
-      if (
-        typeof obj === 'object' &&
-        obj !== null &&
-        ('stdout' in obj || 'output' in obj || 'exitCode' in obj || 'processId' in obj)
-      ) {
-        return obj
-      }
-    } catch {
-      /* not JSON */
     }
     return null
   }, [output])
@@ -347,7 +348,7 @@ function BashOutputBlock({
                 ? 'bg-blue-500/10 text-blue-400/70'
                 : process?.status === 'error'
                   ? 'bg-red-500/10 text-red-400/70'
-                  : 'bg-zinc-500/15 text-zinc-300/70'
+                  : 'bg-muted text-muted-foreground dark:bg-zinc-500/15 dark:text-zinc-300/70'
             )}
           >
             {statusText}
@@ -369,31 +370,33 @@ function BashOutputBlock({
       </div>
       <div
         ref={scrollRef}
-        className="rounded-md border bg-zinc-950 overflow-auto max-h-72 text-[11px] font-mono"
+        className="max-h-72 overflow-auto rounded-md border bg-muted/30 text-[11px] font-mono dark:bg-zinc-950"
         style={{ fontFamily: MONO_FONT }}
       >
         {text ? (
           <div className="px-3 py-2 space-y-2">
             {summary && (
               <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground/50">
-                <span className="rounded bg-zinc-800/80 px-1 py-0.5">{summary.mode ?? 'full'}</span>
+                <span className="rounded bg-muted px-1 py-0.5 dark:bg-zinc-800/80">
+                  {summary.mode ?? 'full'}
+                </span>
                 {summary.noisy && (
-                  <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-300/80">
+                  <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-700/85 dark:text-amber-300/80">
                     noise reduced
                   </span>
                 )}
                 {typeof summary.totalLines === 'number' && (
-                  <span className="rounded bg-zinc-800/60 px-1 py-0.5">
+                  <span className="rounded bg-muted/70 px-1 py-0.5 dark:bg-zinc-800/60">
                     {summary.totalLines} lines
                   </span>
                 )}
                 {typeof summary.errorLikeLines === 'number' && summary.errorLikeLines > 0 && (
-                  <span className="rounded bg-red-500/10 px-1 py-0.5 text-red-300/80">
+                  <span className="rounded bg-red-500/10 px-1 py-0.5 text-red-700/85 dark:text-red-300/80">
                     {summary.errorLikeLines} error-like
                   </span>
                 )}
                 {typeof summary.warningLikeLines === 'number' && summary.warningLikeLines > 0 && (
-                  <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-300/80">
+                  <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-700/85 dark:text-amber-300/80">
                     {summary.warningLikeLines} warning-like
                   </span>
                 )}
@@ -409,11 +412,13 @@ function BashOutputBlock({
                 />
               </>
             ) : (
-              <pre className="whitespace-pre-wrap break-words text-zinc-300/80">{displayed}</pre>
+              <pre className="whitespace-pre-wrap break-words text-foreground/80 dark:text-zinc-300/80">
+                {displayed}
+              </pre>
             )}
           </div>
         ) : (
-          <pre className="px-3 py-2 whitespace-pre-wrap break-words text-zinc-500/70">
+          <pre className="px-3 py-2 whitespace-pre-wrap break-words text-muted-foreground/70 dark:text-zinc-500/70">
             {t('toolCall.noOutputYet')}
           </pre>
         )}
@@ -543,11 +548,10 @@ function GrepOutputBlock({
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
   const parsed = React.useMemo(() => {
-    try {
-      return JSON.parse(output) as Array<{ file: string; line: number; text: string }>
-    } catch {
-      return null
-    }
+    const decoded = decodeStructuredToolResult(output)
+    return Array.isArray(decoded)
+      ? (decoded as Array<{ file: string; line: number; text: string }>)
+      : null
   }, [output])
 
   // Group by file - must be called before early return to maintain hook order
@@ -576,7 +580,7 @@ function GrepOutputBlock({
         <CopyBtn text={output} />
       </div>
       <div
-        className="rounded-md border bg-zinc-950 overflow-auto max-h-72 text-[11px] font-mono divide-y divide-zinc-800"
+        className="max-h-72 overflow-auto rounded-md border bg-muted/30 text-[11px] font-mono divide-y divide-border dark:bg-zinc-950 dark:divide-zinc-800"
         style={{ fontFamily: MONO_FONT }}
       >
         {groups.map(([file, matches]) => (
@@ -594,8 +598,10 @@ function GrepOutputBlock({
               {file.split(/[\\/]/).slice(-3).join('/')}
             </div>
             {matches.map((m, i) => (
-              <div key={i} className="flex gap-2 text-zinc-400">
-                <span className="select-none text-zinc-600 w-5 text-right shrink-0">{m.line}</span>
+              <div key={i} className="flex gap-2 text-foreground/70 dark:text-zinc-400">
+                <span className="w-5 shrink-0 select-none text-right text-muted-foreground/70 dark:text-zinc-600">
+                  {m.line}
+                </span>
                 <span className="truncate">
                   <HighlightText text={m.text} pattern={pattern} />
                 </span>
@@ -610,14 +616,14 @@ function GrepOutputBlock({
 
 function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
   const { t } = useTranslation('chat')
+  const maxVisibleItems = 200
   const parsed = React.useMemo(() => {
-    try {
-      return JSON.parse(output) as string[]
-    } catch {
-      return null
-    }
+    const decoded = decodeStructuredToolResult(output)
+    return Array.isArray(decoded) ? (decoded as string[]) : null
   }, [output])
   if (!parsed || !Array.isArray(parsed)) return <OutputBlock output={output} />
+  const visibleItems = parsed.slice(0, maxVisibleItems)
+  const hiddenCount = Math.max(0, parsed.length - visibleItems.length)
 
   return (
     <div>
@@ -628,10 +634,10 @@ function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
         <CopyBtn text={parsed.join('\n')} />
       </div>
       <div
-        className="rounded-md border bg-zinc-950 overflow-auto max-h-48 px-3 py-2 text-[11px] font-mono text-zinc-400 space-y-0.5"
+        className="max-h-48 overflow-auto rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-mono text-foreground/70 space-y-0.5 dark:bg-zinc-950 dark:text-zinc-400"
         style={{ fontFamily: MONO_FONT }}
       >
-        {parsed.map((p, i) => (
+        {visibleItems.map((p, i) => (
           <div
             key={i}
             className="truncate cursor-pointer hover:text-blue-400 transition-colors"
@@ -646,6 +652,11 @@ function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
             {p}
           </div>
         ))}
+        {hiddenCount > 0 && (
+          <div className="pt-1 text-[10px] text-muted-foreground/60">
+            Showing first {visibleItems.length} results, {hiddenCount} more hidden.
+          </div>
+        )}
       </div>
     </div>
   )
@@ -654,11 +665,10 @@ function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
 function LSOutputBlock({ output }: { output: string }): React.JSX.Element {
   const { t } = useTranslation('chat')
   const parsed = React.useMemo(() => {
-    try {
-      return JSON.parse(output) as Array<{ name: string; type: string; path: string }>
-    } catch {
-      return null
-    }
+    const decoded = decodeStructuredToolResult(output)
+    return Array.isArray(decoded)
+      ? (decoded as Array<{ name: string; type: string; path: string }>)
+      : null
   }, [output])
   if (!parsed || !Array.isArray(parsed)) return <OutputBlock output={output} />
 
@@ -678,7 +688,7 @@ function LSOutputBlock({ output }: { output: string }): React.JSX.Element {
         <CopyBtn text={parsed.map((e) => e.name).join('\n')} />
       </div>
       <div
-        className="rounded-md border bg-zinc-950 overflow-auto max-h-48 px-3 py-2 text-[11px] font-mono space-y-0.5"
+        className="max-h-48 overflow-auto rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-mono space-y-0.5 dark:bg-zinc-950"
         style={{ fontFamily: MONO_FONT }}
       >
         {dirs.map((e) => (
@@ -690,7 +700,7 @@ function LSOutputBlock({ output }: { output: string }): React.JSX.Element {
         {files.map((e) => (
           <div
             key={e.name}
-            className="flex items-center gap-1.5 text-zinc-400 cursor-pointer hover:text-blue-400 transition-colors"
+            className="flex cursor-pointer items-center gap-1.5 text-foreground/70 transition-colors hover:text-blue-400 dark:text-zinc-400"
             title={`Click to insert: ${e.path || e.name}`}
             onClick={() => {
               const short = (e.path || e.name).split(/[\\/]/).slice(-2).join('/')
@@ -740,17 +750,14 @@ function TaskCreateInputBlock({
 function TaskListOutputBlock({ output }: { output: string }): React.JSX.Element {
   const { t } = useTranslation('chat')
   const parsed = React.useMemo(() => {
-    try {
-      const data = JSON.parse(output)
-      if (data.tasks && Array.isArray(data.tasks))
-        return data.tasks as Array<{
-          id: string
-          subject: string
-          status: string
-          owner?: string | null
-        }>
-    } catch {
-      /* not JSON */
+    const data = decodeStructuredToolResult(output)
+    if (data && !Array.isArray(data) && Array.isArray(data.tasks)) {
+      return data.tasks as Array<{
+        id: string
+        subject: string
+        status: string
+        owner?: string | null
+      }>
     }
     return null
   }, [output])
@@ -793,6 +800,10 @@ function TaskListOutputBlock({ output }: { output: string }): React.JSX.Element 
       </div>
     </div>
   )
+}
+
+function lineCount(text: string): number {
+  return text.length === 0 ? 0 : text.split('\n').length
 }
 
 function detectLang(filePath: string): string {
@@ -948,8 +959,8 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
           line.type === 'del'
             ? 'text-red-400/40'
             : line.type === 'add'
-              ? 'text-green-400/40'
-              : 'text-zinc-600'
+              ? 'text-green-600/50 dark:text-green-400/40'
+              : 'text-muted-foreground/70 dark:text-zinc-600'
         )}
       >
         {line.oldNum ?? line.newNum ?? ''}
@@ -957,9 +968,9 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
       <span
         className={cn(
           'px-1.5 flex-1 font-mono',
-          line.type === 'del' && 'text-red-300/80',
-          line.type === 'add' && 'text-green-300/80',
-          line.type === 'keep' && 'text-zinc-500'
+          line.type === 'del' && 'text-red-700/85 dark:text-red-300/80',
+          line.type === 'add' && 'text-green-700/85 dark:text-green-300/80',
+          line.type === 'keep' && 'text-foreground/70 dark:text-zinc-500'
         )}
         style={{ fontFamily: MONO_FONT, whiteSpace: 'pre-wrap' }}
       >
@@ -982,7 +993,7 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
         />
       </div>
       <div
-        className="rounded-md border bg-zinc-950 overflow-auto max-h-64 text-[11px] font-mono leading-relaxed"
+        className="max-h-64 overflow-auto rounded-md border bg-muted/30 text-[11px] font-mono leading-relaxed dark:bg-zinc-950"
         style={{ fontFamily: MONO_FONT }}
       >
         {chunks.map((chunk, ci) => {
@@ -995,7 +1006,7 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }): Rea
           return (
             <button
               key={`c${ci}`}
-              className="flex w-full items-center justify-center py-0.5 text-[9px] text-zinc-500/50 hover:text-zinc-400 hover:bg-zinc-800/30 transition-colors border-y border-zinc-800/30"
+              className="flex w-full items-center justify-center border-y border-border/50 py-0.5 text-[9px] text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground dark:border-zinc-800/30 dark:text-zinc-500/50 dark:hover:bg-zinc-800/30 dark:hover:text-zinc-400"
               onClick={() => setExpandedChunks((prev) => new Set([...prev, ci]))}
             >
               {t('toolCall.unchangedLines', { count: chunk.count })}
@@ -1053,7 +1064,7 @@ function StructuredInput({
       <div className="space-y-1.5">
         {description && <p className="text-xs text-muted-foreground/60 italic">{description}</p>}
         <div
-          className="rounded-md border bg-zinc-950 text-[11px] font-mono overflow-auto max-h-40"
+          className="max-h-40 overflow-auto rounded-md border bg-muted/30 text-[11px] font-mono dark:bg-zinc-950"
           style={{ fontFamily: MONO_FONT }}
         >
           <div className="flex items-start gap-1.5 px-3 py-2 text-green-400/80">
@@ -1089,6 +1100,106 @@ function StructuredInput({
             {limit && <span className="text-[10px] text-muted-foreground/40">limit: {limit}</span>}
           </div>
         )}
+      </div>
+    )
+  }
+
+  // Edit: lightweight preview until the diff is ready to render
+  if (name === 'Edit') {
+    const filePath = String(input.file_path ?? input.path ?? '')
+    const explanation = input.explanation ? String(input.explanation) : null
+    const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
+    const newStr = typeof input.new_string === 'string' ? input.new_string : ''
+    const hasCounts = oldStr.length > 0 || newStr.length > 0
+
+    return (
+      <div className="space-y-0.5">
+        {filePath && (
+          <div className="flex items-center gap-1.5 text-xs">
+            <FileCode className="size-3 text-amber-400" />
+            <span className="font-mono text-[11px] break-all" style={{ fontFamily: MONO_FONT }}>
+              {filePath}
+            </span>
+          </div>
+        )}
+        {explanation && (
+          <p className="pl-[18px] text-[11px] text-muted-foreground/60">{explanation}</p>
+        )}
+        {hasCounts && (
+          <div className="pl-[18px] text-[10px] text-muted-foreground/40">
+            -{lineCount(oldStr)} / +{lineCount(newStr)} lines
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Write: lightweight preview while content is still streaming/running
+  if (name === 'Write') {
+    const filePath = String(input.file_path ?? input.path ?? '')
+    const content = typeof input.content === 'string' ? input.content : null
+    const preview = typeof input.content_preview === 'string' ? input.content_preview : null
+    const lineTotal =
+      typeof input.content_lines === 'number'
+        ? input.content_lines
+        : content !== null
+          ? lineCount(content)
+          : null
+    const charTotal =
+      typeof input.content_chars === 'number'
+        ? input.content_chars
+        : content !== null
+          ? content.length
+          : null
+    const visiblePreview = content ?? preview
+
+    if (!content) {
+      return (
+        <div className="space-y-1">
+          {filePath && (
+            <div className="flex items-center gap-1.5 text-xs">
+              <FileCode className="size-3 text-green-400" />
+              <span className="font-mono text-[11px] break-all" style={{ fontFamily: MONO_FONT }}>
+                {filePath}
+              </span>
+            </div>
+          )}
+          {visiblePreview && (
+            <pre
+              className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-2 text-[11px] text-foreground/80 dark:bg-zinc-950 dark:text-zinc-300/80"
+              style={{ fontFamily: MONO_FONT }}
+            >
+              {visiblePreview}
+              {input.content_truncated ? '\n…' : ''}
+            </pre>
+          )}
+          {!filePath && (lineTotal !== null || charTotal !== null) && (
+            <div className="pl-[18px] text-[10px] text-muted-foreground/40">
+              {lineTotal !== null ? `${lineTotal} lines` : ''}
+              {lineTotal !== null && charTotal !== null ? ' · ' : ''}
+              {charTotal !== null ? `${charTotal} chars` : ''}
+            </div>
+          )}
+        </div>
+      )
+    }
+  }
+
+  // SavePlan: preview-only rendering, always prefer content_preview then content
+  if (name === 'SavePlan') {
+    const preview =
+      (typeof input.content_preview === 'string' && input.content_preview) ||
+      (typeof input.content === 'string' && input.content) ||
+      ''
+    if (!preview) return <></>
+    return (
+      <div className="space-y-1">
+        <pre
+          className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-2 text-[11px] text-foreground/80 dark:bg-zinc-950 dark:text-zinc-300/80"
+          style={{ fontFamily: MONO_FONT }}
+        >
+          {preview}
+        </pre>
       </div>
     )
   }
@@ -1413,6 +1524,14 @@ export function ToolCallCard({
   }, [shouldAutoExpand])
 
   const summary = inputSummary(name, input)
+  const showSettledEditDiff =
+    name === 'Edit' &&
+    status !== 'streaming' &&
+    status !== 'running' &&
+    !!input.old_string &&
+    !!input.new_string
+  const showSettledWriteContent =
+    name === 'Write' && status !== 'streaming' && status !== 'running' && !!input.content
   const elapsed =
     startedAt && completedAt ? ((completedAt - startedAt) / 1000).toFixed(1) + 's' : null
 
@@ -1434,8 +1553,17 @@ export function ToolCallCard({
                   .split(/[\\/]/)
                   .slice(-2)
                   .join('/')}
-                {typeof input.content === 'string' &&
-                  ` (${input.content.split('\n').length} lines)`}
+                {((typeof input.content === 'string' && lineCount(input.content)) ||
+                  (typeof input.content_lines === 'number' && input.content_lines)) &&
+                  ` (${typeof input.content_lines === 'number' ? input.content_lines : lineCount(String(input.content ?? ''))} lines)`}
+              </span>
+            ) : name === 'Edit' && (input.file_path || input.path) ? (
+              <span className="text-amber-400/70 text-[10px] animate-pulse">
+                编辑:{' '}
+                {String(input.file_path || input.path)
+                  .split(/[\\/]/)
+                  .slice(-2)
+                  .join('/')}
               </span>
             ) : (
               <span className="text-violet-400/70 text-[10px] animate-pulse">
@@ -1465,18 +1593,17 @@ export function ToolCallCard({
       {open && (
         <div className="mt-1.5 space-y-2 pl-5 min-w-0 overflow-hidden">
           {/* Diff view for Edit tool */}
-          {name === 'Edit' && !!input.old_string && !!input.new_string && (
+          {showSettledEditDiff && (
             <InlineDiff oldStr={String(input.old_string)} newStr={String(input.new_string)} />
           )}
           {/* Write: show content with syntax highlighting */}
-          {name === 'Write' && !!input.content && (
+          {showSettledWriteContent && name === 'Write' && (
             <div>
               <div className="mb-1 flex items-center gap-1.5">
                 <p className="text-xs font-medium text-muted-foreground">{t('toolCall.content')}</p>
                 <span className="text-[9px] text-muted-foreground/40 font-mono">
                   {detectLang(String(input.file_path ?? input.path ?? ''))} ·{' '}
                   {typeof input.content === 'string' ? input.content.split('\n').length : '?'} lines
-                  {status === 'streaming' && ' (streaming...)'}
                 </span>
                 <CopyBtn text={String(input.content)} />
               </div>
@@ -1502,8 +1629,8 @@ export function ToolCallCard({
           {name === 'TaskCreate' && !!input.subject && <TaskCreateInputBlock input={input} />}
           {/* Structured Input — tool-specific rendering */}
           {!(
-            (name === 'Edit' && !!input.old_string) ||
-            (name === 'Write' && !!input.content) ||
+            showSettledEditDiff ||
+            showSettledWriteContent ||
             (name === 'TaskCreate' && !!input.subject)
           ) && <StructuredInput name={name} input={input} />}
           {/* Output — tool-specific rendering */}
@@ -1544,7 +1671,10 @@ export function ToolCallCard({
               const s = outputAsString(output) ?? ''
               return (
                 <div className="flex items-center gap-1.5 text-xs">
-                  {s.includes('"success"') || s.includes('success') ? (
+                  {(() => {
+                    const parsed = decodeStructuredToolResult(s)
+                    return !!(parsed && !Array.isArray(parsed) && parsed.success === true)
+                  })() ? (
                     <>
                       <CheckCircle2 className="size-3 text-green-500" />
                       <span className="text-green-500/70">{t('toolCall.appliedSuccessfully')}</span>

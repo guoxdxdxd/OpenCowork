@@ -6,25 +6,31 @@ import {
   FolderOpen,
   AlertTriangle,
   FileUp,
+  FileCode2,
   Sparkles,
   X,
   Trash2,
   ImagePlus,
   ClipboardList,
   Globe,
-  Wand2
+  Wand2,
+  ChevronDown,
+  ChevronRight,
+  Pencil,
+  Command
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Textarea } from '@renderer/components/ui/textarea'
 import { Spinner } from '@renderer/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useProviderStore, modelSupportsVision } from '@renderer/stores/provider-store'
-import type { AIModelConfig } from '@renderer/lib/api/types'
+import type { AIModelConfig, UnifiedMessage } from '@renderer/lib/api/types'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { updateWebSearchToolRegistration } from '@renderer/lib/tools'
 import { useUIStore, type AppMode } from '@renderer/stores/ui-store'
 import { formatTokens } from '@renderer/lib/format-tokens'
 import { useDebouncedTokens } from '@renderer/hooks/use-estimated-tokens'
+import { usePromptRecommendation } from '@renderer/hooks/use-prompt-recommendation'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from 'react-i18next'
@@ -36,11 +42,33 @@ import {
   type EditableUserMessageDraft,
   type ImageAttachment
 } from '@renderer/lib/image-attachments'
+import {
+  createSelectFileToken,
+  getSelectFileMentionQuery,
+  selectFileTextToPlainText
+} from '@renderer/lib/select-file-tags'
+import {
+  deserializeEditorState,
+  documentHasFileReferences,
+  editorDocumentToPlainText,
+  ensureSelectedFile,
+  mergeSelectedFiles,
+  removeReferenceNode,
+  replaceEditorRange,
+  serializeEditorDocument,
+  type EditorDocumentNode,
+  type SelectedFileItem
+} from '@renderer/lib/select-file-editor'
 import { SkillsMenu } from './SkillsMenu'
 import { ModelSwitcher } from './ModelSwitcher'
+import { FileAwareEditor, type FileAwareEditorHandle } from './FileAwareEditor'
+import { listCommands, type CommandCatalogItem } from '@renderer/lib/commands/command-loader'
 import { useMcpStore } from '@renderer/stores/mcp-store'
 import {
+  clearPendingSessionMessages,
+  dispatchNextQueuedMessageForSession,
   getPendingSessionMessages,
+  isPendingSessionDispatchPaused,
   removePendingSessionMessage,
   subscribePendingSessionMessages,
   updatePendingSessionMessageDraft,
@@ -65,6 +93,9 @@ import {
   DialogHeader,
   DialogTitle
 } from '@renderer/components/ui/dialog'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { cn } from '@renderer/lib/utils'
+import { resolveProjectMemoryTextFile } from '@renderer/lib/agent/memory-files'
 
 function ContextRing(): React.JSX.Element | null {
   const chatView = useUIStore((s) => s.chatView)
@@ -148,9 +179,10 @@ function ContextRing(): React.JSX.Element | null {
   )
 }
 
-function ActiveMcpsBadge(): React.JSX.Element | null {
+function ActiveMcpsBadge({ projectId }: { projectId?: string | null }): React.JSX.Element | null {
   const { t } = useTranslation('chat')
-  const activeMcpIds = useMcpStore((s) => s.activeMcpIds)
+  const activeMcpIdsByProject = useMcpStore((s) => s.activeMcpIdsByProject)
+  const activeMcpIds = activeMcpIdsByProject[projectId ?? '__global__'] ?? []
   const servers = useMcpStore((s) => s.servers)
   const serverTools = useMcpStore((s) => s.serverTools)
   if (activeMcpIds.length === 0) return null
@@ -177,28 +209,65 @@ function ActiveMcpsBadge(): React.JSX.Element | null {
 
 const placeholderKeys: Record<AppMode, string> = {
   chat: 'input.placeholder',
+  clarify: 'input.placeholderClarify',
   cowork: 'input.placeholderCowork',
-  code: 'input.placeholderCode'
+  code: 'input.placeholderCode',
+  acp: 'input.placeholderAcp'
 }
 
-interface InputHistoryEntry {
-  text: string
-  images: ImageAttachment[]
+const defaultRecommendationKeys: Record<AppMode, string> = {
+  chat: 'input.recommendationDefaultChat',
+  clarify: 'input.recommendationDefaultClarify',
+  cowork: 'input.recommendationDefaultCowork',
+  code: 'input.recommendationDefaultCode',
+  acp: 'input.recommendationDefaultCode'
 }
 
-interface InputHistoryDraft {
-  text: string
-  images: ImageAttachment[]
-  selectedSkill: string | null
+interface FileSearchItem {
+  name: string
+  path: string
 }
 
 const EMPTY_QUEUED_MESSAGES: PendingSessionMessageItem[] = []
-const INPUT_HISTORY_LIMIT = 30
-const PENDING_HISTORY_KEY = '__pending_session__'
+const EMPTY_SESSION_MESSAGES: UnifiedMessage[] = []
+const INTERNAL_FILE_DRAG_MIME = 'application/x-opencowork-file-paths'
 const MIN_INPUT_HEIGHT = 120
+const HOME_INPUT_MIN_HEIGHT = 220
+const DEFAULT_SESSION_INPUT_HEIGHT = 160
 const MAX_INPUT_HEIGHT = 500
 const MIN_MESSAGE_LIST_HEIGHT = 120
+const EDITOR_MIN_HEIGHT = 60
 const FALLBACK_MAX_VIEWPORT_RATIO = 0.6
+const MAX_SLASH_COMMAND_RESULTS = 8
+
+function getSlashCommandQuery(text: string): string | null {
+  const normalized = text.trimStart()
+  const match = normalized.match(/^\/([^\s]*)$/)
+  return match ? (match[1] ?? '') : null
+}
+
+function scoreSlashCommand(name: string, query: string): number {
+  const normalizedName = name.toLowerCase()
+  const normalizedQuery = query.trim().toLowerCase()
+
+  if (!normalizedQuery) return 0
+  if (normalizedName === normalizedQuery) return 0
+  if (normalizedName.startsWith(normalizedQuery)) return 1
+
+  const containsIndex = normalizedName.indexOf(normalizedQuery)
+  if (containsIndex >= 0) return 10 + containsIndex
+
+  let cursor = 0
+  let gapScore = 0
+  for (const char of normalizedQuery) {
+    const nextIndex = normalizedName.indexOf(char, cursor)
+    if (nextIndex < 0) return Number.POSITIVE_INFINITY
+    gapScore += nextIndex - cursor
+    cursor = nextIndex + 1
+  }
+
+  return 100 + gapScore
+}
 
 function areQueuedMessagesEqual(
   left: PendingSessionMessageItem[],
@@ -212,6 +281,8 @@ function areQueuedMessagesEqual(
     if (leftMsg.id !== rightMsg.id) return false
     if (leftMsg.text !== rightMsg.text) return false
     if (leftMsg.createdAt !== rightMsg.createdAt) return false
+    if (leftMsg.command?.name !== rightMsg.command?.name) return false
+    if (leftMsg.command?.content !== rightMsg.command?.content) return false
     if (leftMsg.images.length !== rightMsg.images.length) return false
     for (let j = 0; j < leftMsg.images.length; j += 1) {
       if (leftMsg.images[j].id !== rightMsg.images[j].id) return false
@@ -220,8 +291,18 @@ function areQueuedMessagesEqual(
   return true
 }
 
+function summarizeQueuedMessage(text: string): string {
+  const normalized = selectFileTextToPlainText(text).replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized
+}
+
 interface InputAreaProps {
-  onSend: (text: string, images?: ImageAttachment[]) => void
+  onSend: (
+    text: string,
+    images?: ImageAttachment[],
+    options?: { longRunningMode?: boolean }
+  ) => void
   onStop?: () => void
   onSelectFolder?: () => void
   isStreaming?: boolean
@@ -240,9 +321,30 @@ export function InputArea({
   disabled = false
 }: InputAreaProps): React.JSX.Element {
   const { t } = useTranslation('chat')
-  const [text, setText] = React.useState('')
-  const debouncedTokens = useDebouncedTokens(text)
+  const chatView = useUIStore((s) => s.chatView)
+  const isHomeComposer = chatView === 'home'
+  const usesExpandedComposerHeight = chatView === 'home' || chatView === 'project'
+  const minComposerHeight = usesExpandedComposerHeight ? HOME_INPUT_MIN_HEIGHT : MIN_INPUT_HEIGHT
+  const [documentNodes, setDocumentNodes] = React.useState<EditorDocumentNode[]>([])
+  const [selectedFiles, setSelectedFiles] = React.useState<SelectedFileItem[]>([])
+  const [highlightedFileId, setHighlightedFileId] = React.useState<string | null>(null)
+  const [editorSelection, setEditorSelection] = React.useState({ start: 0, end: 0 })
+  const text = React.useMemo(
+    () => editorDocumentToPlainText(documentNodes, selectedFiles),
+    [documentNodes, selectedFiles]
+  )
+  const finalSerializedText = React.useMemo(
+    () => serializeEditorDocument(documentNodes, selectedFiles),
+    [documentNodes, selectedFiles]
+  )
+  const debouncedTokens = useDebouncedTokens(finalSerializedText)
   const [selectedSkill, setSelectedSkill] = React.useState<string | null>(null)
+  const [slashCommands, setSlashCommands] = React.useState<CommandCatalogItem[]>([])
+  const [slashCommandsLoading, setSlashCommandsLoading] = React.useState(false)
+  const [selectedSlashIndex, setSelectedSlashIndex] = React.useState(0)
+  const [fileSearchResults, setFileSearchResults] = React.useState<FileSearchItem[]>([])
+  const [fileSearchLoading, setFileSearchLoading] = React.useState(false)
+  const [selectedFileSearchIndex, setSelectedFileSearchIndex] = React.useState(0)
   const [attachedImages, setAttachedImages] = React.useState<ImageAttachment[]>([])
   const [isOptimizing, setIsOptimizing] = React.useState(false)
   const [, setOptimizingText] = React.useState('')
@@ -252,14 +354,30 @@ export function InputArea({
   const [showOptimizationDialog, setShowOptimizationDialog] = React.useState(false)
   const [selectedOptionIndex, setSelectedOptionIndex] = React.useState(0)
   const currentLanguage = useSettingsStore((state) => state.language)
+  const clarifyAutoAcceptRecommended = useSettingsStore(
+    (state) => state.clarifyAutoAcceptRecommended
+  )
   const contentScrollRef = React.useRef<HTMLDivElement>(null)
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null)
+  const editorRef = React.useRef<FileAwareEditorHandle | null>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const queueFileInputRef = React.useRef<HTMLInputElement>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
-  const [inputHeight, setInputHeight] = React.useState<number | null>(null)
-  const dragRef = React.useRef<{ startY: number; startH: number; maxH: number } | null>(null)
+  const [inputHeight, setInputHeight] = React.useState<number | null>(() =>
+    chatView === 'session' ? DEFAULT_SESSION_INPUT_HEIGHT : null
+  )
+  const [autoInputHeight, setAutoInputHeight] = React.useState<number>(() => minComposerHeight)
+  const dragRef = React.useRef<{
+    startY: number
+    startH: number
+    minH: number
+    maxH: number
+  } | null>(null)
   const containerRef = React.useRef<HTMLDivElement>(null)
+  const imagePreviewRef = React.useRef<HTMLDivElement>(null)
+  const bottomToolbarRef = React.useRef<HTMLDivElement>(null)
+  const textRef = React.useRef(text)
+  const documentRef = React.useRef(documentNodes)
+  const selectedFilesRef = React.useRef(selectedFiles)
 
   const getMaxInputHeight = React.useCallback(() => {
     const container = containerRef.current
@@ -284,6 +402,63 @@ export function InputArea({
       Math.min(MAX_INPUT_HEIGHT, Math.floor(window.innerHeight * FALLBACK_MAX_VIEWPORT_RATIO))
     )
   }, [])
+  const [autoMaxInputHeight, setAutoMaxInputHeight] = React.useState(() =>
+    Math.max(
+      MIN_INPUT_HEIGHT,
+      Math.min(MAX_INPUT_HEIGHT, Math.floor(window.innerHeight * FALLBACK_MAX_VIEWPORT_RATIO))
+    )
+  )
+
+  const getMinInputHeight = React.useCallback(() => {
+    const container = containerRef.current
+    const editorMetrics = editorRef.current?.getScrollMetrics()
+    const imagePreviewHeight = imagePreviewRef.current?.offsetHeight ?? 0
+    const bottomToolbarHeight = bottomToolbarRef.current?.offsetHeight ?? 0
+    const explicitChromeHeight = imagePreviewHeight + bottomToolbarHeight + 28
+
+    if (!container || !editorMetrics) {
+      return Math.max(minComposerHeight, explicitChromeHeight + EDITOR_MIN_HEIGHT)
+    }
+
+    const chromeHeight = Math.max(0, container.offsetHeight - editorMetrics.clientHeight)
+    return Math.max(
+      minComposerHeight,
+      Math.ceil(Math.max(chromeHeight, explicitChromeHeight) + EDITOR_MIN_HEIGHT)
+    )
+  }, [minComposerHeight])
+
+  React.useEffect(() => {
+    const updateAutoMaxInputHeight = (): void => {
+      setAutoMaxInputHeight(getMaxInputHeight())
+    }
+
+    updateAutoMaxInputHeight()
+
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => {
+            updateAutoMaxInputHeight()
+          })
+    const container = containerRef.current
+    const root = rootRef.current
+    const messageListEl = root?.parentElement?.querySelector(
+      '[data-message-list]'
+    ) as HTMLElement | null
+
+    if (observer && container) {
+      observer.observe(container)
+    }
+    if (observer && messageListEl) {
+      observer.observe(messageListEl)
+    }
+
+    window.addEventListener('resize', updateAutoMaxInputHeight)
+    return () => {
+      window.removeEventListener('resize', updateAutoMaxInputHeight)
+      observer?.disconnect()
+    }
+  }, [getMaxInputHeight])
 
   React.useEffect(() => {
     const onMouseMove = (e: MouseEvent): void => {
@@ -291,7 +466,7 @@ export function InputArea({
       const delta = dragRef.current.startY - e.clientY
       const newH = Math.min(
         dragRef.current.maxH,
-        Math.max(MIN_INPUT_HEIGHT, dragRef.current.startH + delta)
+        Math.max(dragRef.current.minH, dragRef.current.startH + delta)
       )
       setInputHeight(newH)
     }
@@ -312,35 +487,46 @@ export function InputArea({
 
   React.useEffect(() => {
     if (inputHeight === null) return
-    const handleResize = (): void => {
+    const clampInputHeight = (): void => {
+      const minH = getMinInputHeight()
       const maxH = getMaxInputHeight()
       setInputHeight((prev) => {
         if (prev === null) return prev
-        return Math.min(prev, maxH)
+        return Math.min(Math.max(prev, minH), maxH)
       })
     }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [inputHeight, getMaxInputHeight])
+    clampInputHeight()
+    window.addEventListener('resize', clampInputHeight)
+    return () => window.removeEventListener('resize', clampInputHeight)
+  }, [getMaxInputHeight, getMinInputHeight, inputHeight])
 
   const handleDragStart = React.useCallback(
     (e: React.MouseEvent) => {
       const el = containerRef.current
       if (!el) return
-      dragRef.current = { startY: e.clientY, startH: el.offsetHeight, maxH: getMaxInputHeight() }
+      dragRef.current = {
+        startY: e.clientY,
+        startH: el.offsetHeight,
+        minH: getMinInputHeight(),
+        maxH: getMaxInputHeight()
+      }
       document.body.style.cursor = 'row-resize'
       document.body.style.userSelect = 'none'
     },
-    [getMaxInputHeight]
+    [getMaxInputHeight, getMinInputHeight]
   )
-  const [sentHistory, setSentHistory] = React.useState<InputHistoryEntry[]>([])
-  const [historyCursor, setHistoryCursor] = React.useState<number | null>(null)
-  const historyDraftRef = React.useRef<InputHistoryDraft | null>(null)
-  const historyBySessionRef = React.useRef<Record<string, InputHistoryEntry[]>>({})
   const prevSessionIdRef = React.useRef<string | null>(null)
-  /** Per-session input draft (text + images + skill) */
+  /** Per-session input draft (text + images + skill + files) */
   const draftBySessionRef = React.useRef<
-    Record<string, { text: string; images: ImageAttachment[]; skill: string | null }>
+    Record<
+      string,
+      {
+        text: string
+        images: ImageAttachment[]
+        skill: string | null
+        selectedFiles: SelectedFileItem[]
+      }
+    >
   >({})
 
   const activeProvider = useProviderStore((s) => {
@@ -362,14 +548,33 @@ export function InputArea({
     updateWebSearchToolRegistration(newEnabled)
   }, [])
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
+  const openFilePreview = useUIStore((s) => s.openFilePreview)
   const mode = useUIStore((s) => s.mode)
-  const { activeSessionId, hasMessages, clearSessionMessages } = useChatStore(
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const activeSshConnectionId = useChatStore((s) => {
+    const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
+    const projectId = activeSession?.projectId ?? s.activeProjectId
+    const activeProject = s.projects.find((project) => project.id === projectId)
+    return activeSession?.sshConnectionId ?? activeProject?.sshConnectionId ?? null
+  })
+  const [homeLongRunningMode, setHomeLongRunningMode] = useLocalState(false)
+  const {
+    activeSessionId,
+    hasMessages,
+    clearSessionMessages,
+    sessionMessages,
+    longRunningMode,
+    setSessionLongRunningMode
+  } = useChatStore(
     useShallow((s) => {
       const activeSession = s.sessions.find((sess) => sess.id === s.activeSessionId)
       return {
         activeSessionId: s.activeSessionId,
         hasMessages: (activeSession?.messageCount ?? 0) > 0,
-        clearSessionMessages: s.clearSessionMessages
+        clearSessionMessages: s.clearSessionMessages,
+        sessionMessages: activeSession?.messages ?? EMPTY_SESSION_MESSAGES,
+        longRunningMode: activeSession?.longRunningMode ?? false,
+        setSessionLongRunningMode: s.setSessionLongRunningMode
       }
     })
   )
@@ -390,9 +595,100 @@ export function InputArea({
     getQueuedMessagesSnapshot,
     () => EMPTY_QUEUED_MESSAGES
   )
+  const isQueueDispatchPaused = React.useSyncExternalStore(
+    subscribePendingSessionMessages,
+    () => (activeSessionId ? isPendingSessionDispatchPaused(activeSessionId) : false),
+    () => false
+  )
   const [editingQueueItemId, setEditingQueueItemId] = React.useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = React.useState('')
   const [editingQueueImages, setEditingQueueImages] = React.useState<ImageAttachment[]>([])
+  const queueExpandedBySessionRef = React.useRef<Record<string, boolean>>({})
+  const previousQueueSizeBySessionRef = React.useRef<Record<string, number>>({})
+  const [isQueueExpanded, setIsQueueExpanded] = React.useState(false)
+  const [queueClearConfirmOpen, setQueueClearConfirmOpen] = React.useState(false)
+  const [autoAcceptCountdown, setAutoAcceptCountdown] = React.useState<number | null>(null)
+  const [isWorkspaceAgentsMissing, setIsWorkspaceAgentsMissing] = React.useState(false)
+
+  React.useLayoutEffect(() => {
+    if (inputHeight === null) return
+    const minH = getMinInputHeight()
+    const maxH = getMaxInputHeight()
+    setInputHeight((prev) => {
+      if (prev === null) return prev
+      if (prev >= minH && prev <= maxH) return prev
+      return Math.min(Math.max(prev, minH), maxH)
+    })
+  }, [
+    attachedImages.length,
+    selectedSkill,
+    queuedMessages.length,
+    isQueueExpanded,
+    getMaxInputHeight,
+    getMinInputHeight,
+    inputHeight
+  ])
+
+  const syncAutoInputHeight = React.useCallback(() => {
+    if (inputHeight !== null) return
+    const container = containerRef.current
+    const editorMetrics = editorRef.current?.getScrollMetrics()
+    if (!container || !editorMetrics) return
+
+    const chromeHeight = Math.max(0, container.offsetHeight - editorMetrics.clientHeight)
+    const minHeight = Math.max(minComposerHeight, Math.ceil(chromeHeight + EDITOR_MIN_HEIGHT))
+    const nextHeight = Math.max(
+      minHeight,
+      Math.min(
+        autoMaxInputHeight,
+        Math.ceil(chromeHeight + Math.max(EDITOR_MIN_HEIGHT, editorMetrics.scrollHeight))
+      )
+    )
+
+    setAutoInputHeight((prev) => (prev === nextHeight ? prev : nextHeight))
+  }, [autoMaxInputHeight, inputHeight, minComposerHeight])
+
+  React.useLayoutEffect(() => {
+    syncAutoInputHeight()
+  }, [
+    syncAutoInputHeight,
+    documentNodes,
+    selectedFiles,
+    attachedImages.length,
+    selectedSkill,
+    queuedMessages.length,
+    isQueueExpanded
+  ])
+
+  React.useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(() => {
+      if (inputHeight === null) {
+        syncAutoInputHeight()
+        return
+      }
+
+      const minH = getMinInputHeight()
+      const maxH = getMaxInputHeight()
+      setInputHeight((prev) => {
+        if (prev === null) return prev
+        return Math.min(Math.max(prev, minH), maxH)
+      })
+    })
+
+    const container = containerRef.current
+    const imagePreview = imagePreviewRef.current
+    const bottomToolbar = bottomToolbarRef.current
+
+    if (container) observer.observe(container)
+    if (imagePreview) observer.observe(imagePreview)
+    if (bottomToolbar) observer.observe(bottomToolbar)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [getMaxInputHeight, getMinInputHeight, inputHeight, syncAutoInputHeight])
 
   const startEditQueuedMessage = React.useCallback((msg: PendingSessionMessageItem) => {
     setEditingQueueItemId(msg.id)
@@ -434,11 +730,13 @@ export function InputArea({
   const saveQueuedMessage = React.useCallback(
     (id: string) => {
       if (!activeSessionId) return
-      if (!queuedMessages.some((msg) => msg.id === id)) return
+      const targetMessage = queuedMessages.find((msg) => msg.id === id)
+      if (!targetMessage) return
 
       const nextDraft: EditableUserMessageDraft = {
         text: editingQueueText.trim(),
-        images: cloneImageAttachments(editingQueueImages)
+        images: cloneImageAttachments(editingQueueImages),
+        command: targetMessage.command
       }
 
       if (!hasEditableDraftContent(nextDraft)) {
@@ -457,143 +755,400 @@ export function InputArea({
     [activeSessionId, queuedMessages, editingQueueText, editingQueueImages]
   )
 
-  const getHistoryKey = React.useCallback(
-    () => activeSessionId ?? PENDING_HISTORY_KEY,
-    [activeSessionId]
-  )
-  const updateSessionHistory = React.useCallback(
-    (updater: (prev: InputHistoryEntry[]) => InputHistoryEntry[]) => {
-      const historyKey = getHistoryKey()
-      const prevHistory = historyBySessionRef.current[historyKey] ?? []
-      const nextHistory = updater(prevHistory)
-      historyBySessionRef.current[historyKey] = nextHistory
-      setSentHistory(nextHistory)
-    },
-    [getHistoryKey]
-  )
-  const clearHistoryNavigation = React.useCallback(() => {
-    if (historyCursor !== null) {
-      setHistoryCursor(null)
-      historyDraftRef.current = null
-    }
-  }, [historyCursor])
-  const resizeTextarea = React.useCallback(() => {
-    const el = textareaRef.current
-    if (!el) return
-    // Ensure we disable field-sizing: content to control height manually
-    el.style.setProperty('field-sizing', 'fixed')
-    if (inputHeight) {
-      el.style.height = '100%'
+  const toggleQueueExpanded = React.useCallback(() => {
+    setIsQueueExpanded((prev) => {
+      const next = !prev
+      if (activeSessionId) {
+        queueExpandedBySessionRef.current[activeSessionId] = next
+      }
+      return next
+    })
+  }, [activeSessionId])
+
+  const clearQueuedMessagesForActiveSession = React.useCallback(() => {
+    if (!activeSessionId) return
+    const cleared = clearPendingSessionMessages(activeSessionId)
+    if (cleared === 0) return
+    setQueueClearConfirmOpen(false)
+    cancelEditQueuedMessage()
+    toast.success(t('input.queueCleared', { defaultValue: '已清空排队消息' }))
+  }, [activeSessionId, cancelEditQueuedMessage, t])
+
+  const handleClearQueuedMessages = React.useCallback(() => {
+    if (queuedMessages.length <= 1) {
+      clearQueuedMessagesForActiveSession()
       return
     }
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-  }, [inputHeight])
+    setQueueClearConfirmOpen(true)
+  }, [clearQueuedMessagesForActiveSession, queuedMessages.length])
+
+  const resumeQueuedMessages = React.useCallback(() => {
+    if (!activeSessionId) return
+    dispatchNextQueuedMessageForSession(activeSessionId)
+  }, [activeSessionId])
 
   React.useEffect(() => {
-    resizeTextarea()
-  }, [inputHeight, resizeTextarea])
+    textRef.current = text
+  }, [text])
+  React.useEffect(() => {
+    documentRef.current = documentNodes
+  }, [documentNodes])
+  React.useEffect(() => {
+    selectedFilesRef.current = selectedFiles
+  }, [selectedFiles])
+
+  React.useEffect(() => {
+    if (!highlightedFileId) return
+    const timer = window.setTimeout(() => {
+      setHighlightedFileId((current) => (current === highlightedFileId ? null : current))
+    }, 1600)
+    return () => window.clearTimeout(timer)
+  }, [highlightedFileId])
+
+  const applyEditorStateFromSerializedText = React.useCallback(
+    (nextText: string, baseFiles: SelectedFileItem[] = selectedFilesRef.current) => {
+      const nextState = deserializeEditorState(nextText, workingFolder, baseFiles)
+      setDocumentNodes(nextState.document)
+      setSelectedFiles(nextState.selectedFiles)
+    },
+    [workingFolder]
+  )
+
+  const setText = React.useCallback(
+    (value: string | ((prev: string) => string)) => {
+      const previousText = textRef.current
+      const nextText = typeof value === 'function' ? value(previousText) : value
+      applyEditorStateFromSerializedText(nextText, selectedFilesRef.current)
+    },
+    [applyEditorStateFromSerializedText]
+  )
+
   const focusInputAtEnd = React.useCallback(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.focus()
-    const cursor = el.value.length
-    el.setSelectionRange(cursor, cursor)
+    editorRef.current?.focusAtEnd()
   }, [])
-  const applyHistoryEntry = React.useCallback(
-    (entry: InputHistoryEntry) => {
-      setText(entry.text)
-      setAttachedImages(cloneImageAttachments(entry.images))
-      setSelectedSkill(null)
+
+  const hasFileReferences = React.useMemo(() => selectedFiles.length > 0, [selectedFiles])
+
+  const replaceSelectionWithText = React.useCallback(
+    (
+      replacement: string,
+      selection: { start: number; end: number } = editorSelection,
+      cursorOffset = 0,
+      nextSelectedFiles?: SelectedFileItem[]
+    ) => {
+      const replacementState = deserializeEditorState(
+        replacement,
+        workingFolder,
+        nextSelectedFiles ?? selectedFilesRef.current
+      )
+      const candidateFiles = mergeSelectedFiles(
+        nextSelectedFiles ?? selectedFilesRef.current,
+        replacementState.selectedFiles
+      )
+      const nextDocument = replaceEditorRange(
+        documentRef.current,
+        selectedFilesRef.current,
+        selection.start,
+        selection.end,
+        replacementState.document
+      )
+      const referencedFileIds = new Set(
+        nextDocument
+          .filter(
+            (node): node is Extract<EditorDocumentNode, { type: 'file' }> => node.type === 'file'
+          )
+          .map((node) => node.fileId)
+      )
+      const nextFiles = candidateFiles.filter((file) => referencedFileIds.has(file.id))
+      const nextCursor =
+        selection.start +
+        editorDocumentToPlainText(replacementState.document, candidateFiles).length +
+        cursorOffset
+
+      setDocumentNodes(nextDocument)
+      setSelectedFiles(nextFiles)
       requestAnimationFrame(() => {
-        resizeTextarea()
+        editorRef.current?.focus()
+        editorRef.current?.setSelectionOffsets(nextCursor, nextCursor)
+        setEditorSelection({ start: nextCursor, end: nextCursor })
+      })
+    },
+    [editorSelection, workingFolder]
+  )
+
+  const shouldRecommendInit =
+    mode !== 'chat' &&
+    Boolean(workingFolder?.trim()) &&
+    !activeSshConnectionId &&
+    isWorkspaceAgentsMissing
+  const recommendationFallback = shouldRecommendInit
+    ? t('input.recommendationInitWorkspace')
+    : t(defaultRecommendationKeys[mode])
+  const shouldAutoAcceptRecommendation =
+    mode === 'clarify' && clarifyAutoAcceptRecommended && !disabled && !isOptimizing && !isStreaming
+  const getCaretAtEnd = React.useCallback(() => {
+    return editorSelection.start === editorSelection.end && editorSelection.end === text.length
+  }, [editorSelection.end, editorSelection.start, text.length])
+  const {
+    suggestionText,
+    effectivePlaceholder,
+    acceptSuggestion,
+    handleFocus: handleRecommendationFocus,
+    handleBlur: handleRecommendationBlur,
+    handleSelectionChange: handleRecommendationSelectionChange,
+    handleCompositionStart: handleRecommendationCompositionStart,
+    handleCompositionEnd: handleRecommendationCompositionEnd
+  } = usePromptRecommendation({
+    mode,
+    sessionId: activeSessionId,
+    text,
+    recentMessages: sessionMessages,
+    selectedSkill,
+    images: attachedImages,
+    disabled: disabled || isOptimizing,
+    isStreaming,
+    fallbackSuggestion: recommendationFallback,
+    getCaretAtEnd
+  })
+  const activeFileMention = React.useMemo(() => {
+    if (editorSelection.start === editorSelection.end) {
+      const selectionMention = getSelectFileMentionQuery(text, editorSelection.end)
+      if (selectionMention) return selectionMention
+    }
+
+    return getSelectFileMentionQuery(text, text.length)
+  }, [editorSelection.end, editorSelection.start, text])
+  const fileQuery = activeFileMention?.query.trim() ?? ''
+  const fileMenuOpen = Boolean(activeFileMention)
+  const slashQuery = React.useMemo(() => getSlashCommandQuery(text), [text])
+  const filteredSlashCommands = React.useMemo(() => {
+    const query = slashQuery ?? ''
+    return slashCommands
+      .map((command) => ({ command, score: scoreSlashCommand(command.name, query) }))
+      .filter((item) => Number.isFinite(item.score))
+      .sort((left, right) => {
+        if (left.score !== right.score) return left.score - right.score
+        return left.command.name.localeCompare(right.command.name, undefined, {
+          sensitivity: 'base'
+        })
+      })
+      .slice(0, MAX_SLASH_COMMAND_RESULTS)
+      .map((item) => item.command)
+  }, [slashCommands, slashQuery])
+  const slashMenuOpen = slashQuery !== null
+
+  React.useEffect(() => {
+    if (!slashMenuOpen) {
+      setSelectedSlashIndex(0)
+      setSlashCommandsLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setSlashCommandsLoading(true)
+
+    void listCommands()
+      .then((commands) => {
+        if (cancelled) return
+        setSlashCommands(commands)
+      })
+      .finally(() => {
+        if (cancelled) return
+        setSlashCommandsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [slashMenuOpen, slashQuery])
+
+  React.useEffect(() => {
+    setSelectedSlashIndex(0)
+  }, [slashQuery])
+
+  React.useEffect(() => {
+    setSelectedFileSearchIndex(0)
+  }, [fileQuery])
+
+  React.useEffect(() => {
+    if (!fileMenuOpen) {
+      setFileSearchResults([])
+      setFileSearchLoading(false)
+      return
+    }
+
+    if (!workingFolder) {
+      setFileSearchResults([])
+      setFileSearchLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setFileSearchLoading(true)
+
+    const timer = window.setTimeout(() => {
+      void ipcClient
+        .invoke('fs:search-files', {
+          path: workingFolder,
+          query: fileQuery,
+          limit: 20
+        })
+        .then((result) => {
+          if (cancelled) return
+          if (Array.isArray(result)) {
+            setFileSearchResults(result as FileSearchItem[])
+            return
+          }
+          setFileSearchResults([])
+        })
+        .finally(() => {
+          if (cancelled) return
+          setFileSearchLoading(false)
+        })
+    }, 120)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [fileMenuOpen, fileQuery, workingFolder])
+
+  const insertSelectedFile = React.useCallback(
+    (filePath: string) => {
+      setSelectedSkill(null)
+
+      const { files: nextFiles, file } = ensureSelectedFile(
+        selectedFilesRef.current,
+        filePath,
+        workingFolder
+      )
+      if (!file) return
+
+      const mention = activeFileMention ?? {
+        start: editorSelection.start,
+        end: editorSelection.end
+      }
+      const suffix =
+        text.slice(mention.end).startsWith(' ') ||
+        text.slice(mention.end).startsWith('\n') ||
+        mention.end >= text.length
+          ? ''
+          : ' '
+
+      replaceSelectionWithText(
+        `${createSelectFileToken(file.sendPath)}${suffix}`,
+        mention,
+        0,
+        nextFiles
+      )
+    },
+    [
+      activeFileMention,
+      editorSelection.end,
+      editorSelection.start,
+      replaceSelectionWithText,
+      text,
+      workingFolder
+    ]
+  )
+
+  const insertSlashCommand = React.useCallback(
+    (commandName: string) => {
+      setSelectedSkill(null)
+      applyEditorStateFromSerializedText(`/${commandName} `, selectedFiles)
+      requestAnimationFrame(() => {
         focusInputAtEnd()
       })
     },
-    [focusInputAtEnd, resizeTextarea]
-  )
-  const restoreDraftFromHistory = React.useCallback(() => {
-    const draft = historyDraftRef.current
-    setText(draft?.text ?? '')
-    setAttachedImages(cloneImageAttachments(draft?.images ?? []))
-    setSelectedSkill(draft?.selectedSkill ?? null)
-    historyDraftRef.current = null
-    requestAnimationFrame(() => {
-      resizeTextarea()
-      focusInputAtEnd()
-    })
-  }, [focusInputAtEnd, resizeTextarea])
-  const navigateHistory = React.useCallback(
-    (direction: 'up' | 'down') => {
-      if (sentHistory.length === 0) return
-      if (direction === 'up') {
-        if (historyCursor === null) {
-          historyDraftRef.current = {
-            text,
-            images: cloneImageAttachments(attachedImages),
-            selectedSkill
-          }
-          const latest = sentHistory.length - 1
-          setHistoryCursor(latest)
-          applyHistoryEntry(sentHistory[latest])
-          return
-        }
-        const next = Math.max(historyCursor - 1, 0)
-        if (next !== historyCursor) {
-          setHistoryCursor(next)
-          applyHistoryEntry(sentHistory[next])
-        }
-        return
-      }
-      if (historyCursor === null) return
-      const next = historyCursor + 1
-      if (next >= sentHistory.length) {
-        setHistoryCursor(null)
-        restoreDraftFromHistory()
-        return
-      }
-      setHistoryCursor(next)
-      applyHistoryEntry(sentHistory[next])
-    },
-    [
-      historyCursor,
-      sentHistory,
-      text,
-      attachedImages,
-      selectedSkill,
-      applyHistoryEntry,
-      restoreDraftFromHistory
-    ]
+    [applyEditorStateFromSerializedText, focusInputAtEnd, selectedFiles]
   )
   const hasApiKey = !!activeProvider?.apiKey || activeProvider?.requiresApiKey === false
   const needsWorkingFolder = mode !== 'chat' && !workingFolder
   const planMode = useUIStore((s) => s.planMode)
-  const togglePlanMode = React.useCallback(() => {
-    const store = useUIStore.getState()
-    if (store.planMode) {
-      store.exitPlanMode()
-    } else {
-      store.enterPlanMode()
-    }
-  }, [])
 
-  // Auto-focus textarea when not streaming or when switching sessions
+  React.useEffect(() => {
+    let cancelled = false
+
+    if (mode === 'chat' || !workingFolder?.trim() || activeSshConnectionId) {
+      setIsWorkspaceAgentsMissing(false)
+      return
+    }
+
+    setIsWorkspaceAgentsMissing(false)
+
+    void resolveProjectMemoryTextFile(ipcClient, workingFolder, 'AGENTS.md').then(
+      ({ missingFile }) => {
+        if (cancelled) return
+        setIsWorkspaceAgentsMissing(missingFile)
+      }
+    )
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeSshConnectionId, mode, workingFolder])
+
   React.useEffect(() => {
     if (!isStreaming && !disabled) {
-      textareaRef.current?.focus()
+      editorRef.current?.focus()
     }
-  }, [isStreaming, disabled, activeSessionId])
+  }, [isStreaming, disabled])
 
   React.useEffect(() => {
-    if (!activeSessionId) return
-    void useChatStore.getState().loadRecentSessionMessages(activeSessionId)
-  }, [activeSessionId])
+    if (!shouldAutoAcceptRecommendation || !suggestionText || !text.trim()) {
+      setAutoAcceptCountdown(null)
+      return
+    }
+
+    setAutoAcceptCountdown(8)
+
+    const intervalId = window.setInterval(() => {
+      setAutoAcceptCountdown((prev) => {
+        if (prev === null) return null
+        return prev > 1 ? prev - 1 : 0
+      })
+    }, 1000)
+
+    const timeoutId = window.setTimeout(() => {
+      const acceptedSuggestion = acceptSuggestion()
+      if (!acceptedSuggestion) return
+      applyEditorStateFromSerializedText(acceptedSuggestion, selectedFiles)
+      setAutoAcceptCountdown(null)
+      requestAnimationFrame(() => {
+        focusInputAtEnd()
+        handleRecommendationSelectionChange()
+      })
+    }, 8000)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.clearTimeout(timeoutId)
+    }
+  }, [
+    acceptSuggestion,
+    applyEditorStateFromSerializedText,
+    focusInputAtEnd,
+    handleRecommendationSelectionChange,
+    selectedFiles,
+    shouldAutoAcceptRecommendation,
+    suggestionText,
+    text
+  ])
 
   React.useEffect(() => {
     setEditingQueueItemId(null)
     setEditingQueueText('')
     setEditingQueueImages([])
-  }, [activeSessionId])
+    setQueueClearConfirmOpen(false)
+    if (!activeSessionId) {
+      setIsQueueExpanded(false)
+      return
+    }
+    setIsQueueExpanded(
+      queueExpandedBySessionRef.current[activeSessionId] ?? queuedMessages.length > 0
+    )
+    previousQueueSizeBySessionRef.current[activeSessionId] = queuedMessages.length
+  }, [activeSessionId, queuedMessages.length])
 
   React.useEffect(() => {
     if (!editingQueueItemId) return
@@ -604,39 +1159,52 @@ export function InputArea({
   }, [queuedMessages, editingQueueItemId])
 
   React.useEffect(() => {
+    if (!isStreaming) {
+      cancelEditQueuedMessage()
+    }
+  }, [isStreaming, cancelEditQueuedMessage])
+
+  React.useEffect(() => {
+    if (!activeSessionId) return
+    const previousSize = previousQueueSizeBySessionRef.current[activeSessionId] ?? 0
+    if (queuedMessages.length > previousSize) {
+      queueExpandedBySessionRef.current[activeSessionId] = true
+      setIsQueueExpanded(true)
+    } else if (queuedMessages.length === 0) {
+      queueExpandedBySessionRef.current[activeSessionId] = false
+      setIsQueueExpanded(false)
+      setQueueClearConfirmOpen(false)
+    }
+    previousQueueSizeBySessionRef.current[activeSessionId] = queuedMessages.length
+  }, [activeSessionId, queuedMessages.length])
+
+  React.useEffect(() => {
     const prevSessionId = prevSessionIdRef.current
 
     // Save current draft to the previous session before switching
     if (prevSessionId) {
       draftBySessionRef.current[prevSessionId] = {
-        text,
+        text: finalSerializedText,
         images: cloneImageAttachments(attachedImages),
-        skill: selectedSkill
+        skill: selectedSkill,
+        selectedFiles: selectedFiles.map((file) => ({ ...file }))
+      }
+      // Cap stored drafts to prevent unbounded memory growth
+      const draftKeys = Object.keys(draftBySessionRef.current)
+      if (draftKeys.length > 20) {
+        const toRemove = draftKeys.slice(0, draftKeys.length - 20)
+        for (const key of toRemove) {
+          delete draftBySessionRef.current[key]
+        }
       }
     }
 
     // Restore draft from the new session (or clear)
     const draft = activeSessionId ? draftBySessionRef.current[activeSessionId] : undefined
-    setText(draft?.text ?? '')
+    applyEditorStateFromSerializedText(draft?.text ?? '', draft?.selectedFiles ?? [])
     setAttachedImages(draft?.images ? cloneImageAttachments(draft.images) : [])
     setSelectedSkill(draft?.skill ?? null)
-    requestAnimationFrame(() => resizeTextarea())
 
-    if (!prevSessionId && activeSessionId) {
-      const pendingHistory = historyBySessionRef.current[PENDING_HISTORY_KEY]
-      if (
-        pendingHistory &&
-        pendingHistory.length > 0 &&
-        !historyBySessionRef.current[activeSessionId]
-      ) {
-        historyBySessionRef.current[activeSessionId] = pendingHistory
-        delete historyBySessionRef.current[PENDING_HISTORY_KEY]
-      }
-    }
-    const historyKey = activeSessionId ?? PENDING_HISTORY_KEY
-    setSentHistory(historyBySessionRef.current[historyKey] ?? [])
-    setHistoryCursor(null)
-    historyDraftRef.current = null
     prevSessionIdRef.current = activeSessionId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId])
@@ -644,175 +1212,353 @@ export function InputArea({
   // Consume pendingInsertText from FileTree clicks
   const pendingInsert = useUIStore((s) => s.pendingInsertText)
   React.useEffect(() => {
-    if (pendingInsert) {
-      clearHistoryNavigation()
-      setText((prev) => {
-        const prefix = prev && !prev.endsWith(' ') && !prev.endsWith('\n') ? ' ' : ''
-        return `${prev}${prefix}${pendingInsert}`
-      })
-      useUIStore.getState().setPendingInsertText(null)
-      requestAnimationFrame(() => {
-        resizeTextarea()
-        focusInputAtEnd()
-      })
+    if (!pendingInsert) return
+
+    const selection = editorRef.current?.getSelectionOffsets() ?? {
+      start: text.length,
+      end: text.length
     }
-  }, [pendingInsert, clearHistoryNavigation, focusInputAtEnd, resizeTextarea])
+    const pendingPlainText = selectFileTextToPlainText(pendingInsert)
+    const needsPrefix =
+      selection.start === selection.end &&
+      selection.start > 0 &&
+      !/\s$/.test(text.slice(0, selection.start)) &&
+      pendingPlainText.length > 0 &&
+      !/^\s/.test(pendingPlainText)
+
+    replaceSelectionWithText(`${needsPrefix ? ' ' : ''}${pendingInsert}`, selection)
+    useUIStore.getState().setPendingInsertText(null)
+  }, [pendingInsert, replaceSelectionWithText, text])
 
   // --- Image helpers ---
-  const addImages = React.useCallback(
-    async (files: File[]) => {
-      const results = await Promise.all(files.map(fileToImageAttachment))
-      const valid = results.filter(Boolean) as ImageAttachment[]
-      if (valid.length > 0) {
-        clearHistoryNavigation()
-        setAttachedImages((prev) => [...prev, ...valid])
+  const addImages = React.useCallback(async (files: File[]) => {
+    const results = await Promise.all(files.map(fileToImageAttachment))
+    const valid = results.filter(Boolean) as ImageAttachment[]
+    if (valid.length > 0) {
+      setAttachedImages((prev) => [...prev, ...valid])
+    }
+  }, [])
+
+  const removeImage = React.useCallback((id: string) => {
+    setAttachedImages((prev) => prev.filter((img) => img.id !== id))
+  }, [])
+
+  const addFilesToEditor = React.useCallback(
+    (filePaths: string[], selection?: { start: number; end: number }) => {
+      const nextSelection = selection ??
+        editorRef.current?.getSelectionOffsets() ?? {
+          start: editorSelection.start,
+          end: editorSelection.end
+        }
+      const filesToInsert: SelectedFileItem[] = []
+      let mergedFiles = selectedFilesRef.current
+
+      for (const filePath of filePaths) {
+        const ensured = ensureSelectedFile(mergedFiles, filePath, workingFolder)
+        mergedFiles = ensured.files
+        if (ensured.file) {
+          filesToInsert.push(ensured.file)
+        }
       }
+
+      if (filesToInsert.length === 0) return
+
+      const replacement = filesToInsert
+        .map((file) => createSelectFileToken(file.sendPath))
+        .filter(Boolean)
+        .join('\n')
+
+      replaceSelectionWithText(replacement, nextSelection, 0, mergedFiles)
     },
-    [clearHistoryNavigation]
+    [editorSelection.end, editorSelection.start, replaceSelectionWithText, workingFolder]
   )
 
-  const removeImage = React.useCallback(
-    (id: string) => {
-      clearHistoryNavigation()
-      setAttachedImages((prev) => prev.filter((img) => img.id !== id))
+  const handlePreviewFile = React.useCallback(
+    (fileId: string) => {
+      const file = selectedFilesRef.current.find((item) => item.id === fileId)
+      if (file) {
+        openFilePreview(file.previewPath)
+      }
     },
-    [clearHistoryNavigation]
+    [openFilePreview]
   )
+
+  const handleLocateFileReference = React.useCallback((fileId: string) => {
+    setHighlightedFileId(fileId)
+    editorRef.current?.scrollToReference(fileId)
+    editorRef.current?.focus()
+  }, [])
+
+  const handleEditorSelectionChange = React.useCallback(
+    (selection: { start: number; end: number }) => {
+      setEditorSelection((current) =>
+        current.start === selection.start && current.end === selection.end ? current : selection
+      )
+      handleRecommendationSelectionChange()
+    },
+    [handleRecommendationSelectionChange]
+  )
+
+  const handleRemoveFileReference = React.useCallback((nodeId: string) => {
+    const currentDocument = documentRef.current
+    const targetNode = currentDocument.find(
+      (node): node is Extract<EditorDocumentNode, { type: 'file' }> =>
+        node.type === 'file' && node.id === nodeId
+    )
+    if (!targetNode) return
+
+    const nextDocument = removeReferenceNode(currentDocument, nodeId, selectedFilesRef.current)
+    const hasRemainingReferences = documentHasFileReferences(nextDocument, targetNode.fileId)
+    const nextFiles = hasRemainingReferences
+      ? selectedFilesRef.current
+      : selectedFilesRef.current.filter((file) => file.id !== targetNode.fileId)
+
+    setDocumentNodes(nextDocument)
+    setSelectedFiles(nextFiles)
+  }, [])
+
+  const handleEditorDocumentChange = React.useCallback((nextDocument: EditorDocumentNode[]) => {
+    const referencedFileIds = new Set(
+      nextDocument
+        .filter(
+          (node): node is Extract<EditorDocumentNode, { type: 'file' }> => node.type === 'file'
+        )
+        .map((node) => node.fileId)
+    )
+    setDocumentNodes(nextDocument)
+    setSelectedFiles((currentFiles) =>
+      currentFiles.filter((file) => referencedFileIds.has(file.id))
+    )
+  }, [])
+
+  const effectiveLongRunningMode = activeSessionId ? longRunningMode : homeLongRunningMode
+
+  const handleToggleLongRunningMode = React.useCallback(() => {
+    if (activeSessionId) {
+      setSessionLongRunningMode(activeSessionId, !longRunningMode)
+      return
+    }
+    setHomeLongRunningMode((current) => !current)
+  }, [activeSessionId, longRunningMode, setHomeLongRunningMode, setSessionLongRunningMode])
 
   const handleSend = (): void => {
-    const trimmed = text.trim()
-    if (!trimmed && attachedImages.length === 0) return
+    const serialized = finalSerializedText.trim()
+    if (!serialized && attachedImages.length === 0) return
     if (disabled || needsWorkingFolder) return
-    const message = selectedSkill ? `[Skill: ${selectedSkill}]\n${trimmed}` : trimmed
 
-    onSend(message, attachedImages.length > 0 ? attachedImages : undefined)
-    updateSessionHistory((prevHistory) => {
-      const nextHistory = [
-        ...prevHistory,
-        {
-          text: message,
-          images: cloneImageAttachments(attachedImages)
-        }
-      ]
-      return nextHistory.length > INPUT_HISTORY_LIMIT
-        ? nextHistory.slice(nextHistory.length - INPUT_HISTORY_LIMIT)
-        : nextHistory
+    const hasLeadingSlashCommand = text.trimStart().startsWith('/')
+    const message =
+      selectedSkill && !hasLeadingSlashCommand
+        ? `[Skill: ${selectedSkill}]\n${serialized}`
+        : serialized
+
+    onSend(message, attachedImages.length > 0 ? attachedImages : undefined, {
+      longRunningMode: effectiveLongRunningMode
     })
-    setHistoryCursor(null)
-    historyDraftRef.current = null
-    setText('')
+
+    setDocumentNodes([])
+    setSelectedFiles([])
+    setHighlightedFileId(null)
+    setEditorSelection({ start: 0, end: 0 })
     setAttachedImages([])
     setSelectedSkill(null)
-    // Reset textarea height
-    if (textareaRef.current) {
-      if (inputHeight) {
-        textareaRef.current.style.height = '100%'
-      } else {
-        textareaRef.current.style.height = 'auto'
-      }
-    }
+    requestAnimationFrame(() => {
+      editorRef.current?.setSelectionOffsets(0, 0)
+    })
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.nativeEvent.isComposing) return
-    if (isOptimizing) return // Disable input during optimization
-    if (
-      !e.altKey &&
-      !e.ctrlKey &&
-      !e.metaKey &&
-      !e.shiftKey &&
-      (e.key === 'ArrowUp' || e.key === 'ArrowDown')
-    ) {
-      const target = e.currentTarget
-      const selectionStart = target.selectionStart ?? 0
-      const selectionEnd = target.selectionEnd ?? 0
-      const isCollapsed = selectionStart === selectionEnd
-      if (isCollapsed && e.key === 'ArrowUp' && selectionStart === 0) {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (e.nativeEvent.isComposing || isOptimizing) return
+
+    if (fileMenuOpen) {
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
         e.preventDefault()
-        navigateHistory('up')
+        setSelectedFileSearchIndex((prev) =>
+          fileSearchResults.length === 0 ? 0 : (prev + 1) % fileSearchResults.length
+        )
         return
       }
-      if (isCollapsed && e.key === 'ArrowDown' && selectionStart === target.value.length) {
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') {
         e.preventDefault()
-        navigateHistory('down')
+        setSelectedFileSearchIndex((prev) =>
+          fileSearchResults.length === 0
+            ? 0
+            : (prev - 1 + fileSearchResults.length) % fileSearchResults.length
+        )
+        return
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'Tab' || e.key === 'Enter')) {
+        const selectedFile = fileSearchResults[selectedFileSearchIndex]
+        if (selectedFile) {
+          e.preventDefault()
+          insertSelectedFile(selectedFile.path)
+          return
+        }
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'Escape') {
+        e.preventDefault()
+        const nextCursor = activeFileMention?.start ?? 0
+        editorRef.current?.focus()
+        editorRef.current?.setSelectionOffsets(nextCursor, nextCursor)
+        setEditorSelection({ start: nextCursor, end: nextCursor })
+        handleRecommendationSelectionChange()
         return
       }
     }
+
+    if (slashMenuOpen) {
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedSlashIndex((prev) =>
+          filteredSlashCommands.length === 0 ? 0 : (prev + 1) % filteredSlashCommands.length
+        )
+        return
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedSlashIndex((prev) =>
+          filteredSlashCommands.length === 0
+            ? 0
+            : (prev - 1 + filteredSlashCommands.length) % filteredSlashCommands.length
+        )
+        return
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'Tab' || e.key === 'Enter')) {
+        const selectedCommand = filteredSlashCommands[selectedSlashIndex]
+        if (selectedCommand) {
+          e.preventDefault()
+          insertSlashCommand(selectedCommand.name)
+          return
+        }
+      }
+    }
+
+    if (!e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === 'Tab') {
+      const acceptedSuggestion = acceptSuggestion()
+      if (acceptedSuggestion) {
+        e.preventDefault()
+        applyEditorStateFromSerializedText(acceptedSuggestion, selectedFiles)
+        requestAnimationFrame(() => {
+          focusInputAtEnd()
+          handleRecommendationSelectionChange()
+        })
+        return
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
-      return
     }
   }
 
-  // Auto-resize textarea
-  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
-    if (isOptimizing) return // Disable input during optimization
-    clearHistoryNavigation()
-    setText(e.target.value)
-    if (inputHeight) return
-    const el = e.target
-    // Ensure we disable field-sizing: content to control height manually
-    el.style.setProperty('field-sizing', 'fixed')
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-  }
-
-  // Paste handler for images
   const handlePaste = React.useCallback(
-    (e: React.ClipboardEvent): void => {
-      if (!supportsVision) return
+    (e: React.ClipboardEvent<HTMLDivElement>): void => {
       const items = Array.from(e.clipboardData.items)
-      const imageFiles = items
-        .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.includes(item.type))
-        .map((item) => item.getAsFile())
-        .filter(Boolean) as File[]
+      const imageFiles = supportsVision
+        ? (items
+            .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.includes(item.type))
+            .map((item) => item.getAsFile())
+            .filter(Boolean) as File[])
+        : []
+
       if (imageFiles.length > 0) {
         e.preventDefault()
-        addImages(imageFiles)
+        void addImages(imageFiles)
+        return
       }
+
+      const plainText = e.clipboardData.getData('text/plain')
+      if (!plainText) return
+
+      e.preventDefault()
+      const selection = editorRef.current?.getSelectionOffsets() ?? editorSelection
+      replaceSelectionWithText(plainText, selection)
     },
-    [supportsVision, addImages]
+    [addImages, editorSelection, replaceSelectionWithText, supportsVision]
   )
 
-  // Drag-and-drop: images go to attachments, other files insert paths
-  const handleDrop = (e: React.DragEvent<HTMLTextAreaElement>): void => {
-    const files = e.dataTransfer?.files
-    if (files && files.length > 0) {
-      e.preventDefault()
-      const fileArr = Array.from(files)
+  const getDraggedFilePaths = React.useCallback((dataTransfer: DataTransfer | null): string[] => {
+    if (!dataTransfer) return []
+    const payload = dataTransfer.getData(INTERNAL_FILE_DRAG_MIME)
+    if (!payload) return []
+
+    try {
+      const parsed = JSON.parse(payload)
+      if (!Array.isArray(parsed)) return []
+      return parsed.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    } catch {
+      return []
+    }
+  }, [])
+
+  const handleDropFiles = React.useCallback(
+    (fileList: FileList | null) => {
+      if (!fileList || fileList.length === 0) return
+      const fileArr = Array.from(fileList)
       const imageFiles = supportsVision
         ? fileArr.filter((f) => ACCEPTED_IMAGE_TYPES.includes(f.type))
         : []
       const otherFiles = supportsVision
         ? fileArr.filter((f) => !ACCEPTED_IMAGE_TYPES.includes(f.type))
         : fileArr
-      if (imageFiles.length > 0) addImages(imageFiles)
-      if (otherFiles.length > 0) {
-        const paths = otherFiles.map((f) => (f as File & { path: string }).path).filter(Boolean)
-        if (paths.length > 0) {
-          const insertion = paths.join('\n')
-          setText((prev) => (prev ? `${prev}\n${insertion}` : insertion))
-        }
+
+      if (imageFiles.length > 0) {
+        void addImages(imageFiles)
       }
-    }
-  }
+
+      const paths = otherFiles
+        .map((f) => (f as File & { path?: string }).path)
+        .filter((filePath): filePath is string => Boolean(filePath))
+
+      if (paths.length > 0) {
+        addFilesToEditor(paths)
+      }
+    },
+    [addFilesToEditor, addImages, supportsVision]
+  )
 
   const [dragging, setDragging] = useLocalState(false)
 
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>): void => {
-    e.preventDefault()
-    setDragging(true)
-  }
+  const handleDragOver = React.useCallback(
+    (e: React.DragEvent<HTMLDivElement>): void => {
+      const transfer = e.dataTransfer
+      const types = Array.from(transfer?.types ?? [])
+      const canHandle = types.includes('Files') || types.includes(INTERNAL_FILE_DRAG_MIME)
+      if (!canHandle) return
+      e.preventDefault()
+      if (transfer) {
+        transfer.dropEffect = 'copy'
+      }
+      setDragging(true)
+    },
+    [setDragging]
+  )
 
-  const handleDragLeave = (): void => {
-    setDragging(false)
-  }
+  const handleDragLeave = React.useCallback(
+    (e: React.DragEvent<HTMLDivElement>): void => {
+      const nextTarget = e.relatedTarget as Node | null
+      if (nextTarget && e.currentTarget.contains(nextTarget)) return
+      setDragging(false)
+    },
+    [setDragging]
+  )
 
-  const handleDropWrapped = (e: React.DragEvent<HTMLDivElement>): void => {
-    setDragging(false)
-    handleDrop(e as unknown as React.DragEvent<HTMLTextAreaElement>)
-  }
+  const handleDropWrapped = React.useCallback(
+    (e: React.DragEvent<HTMLDivElement>): void => {
+      const draggedPaths = getDraggedFilePaths(e.dataTransfer)
+      const hasNativeFiles = (e.dataTransfer?.files?.length ?? 0) > 0
+      if (draggedPaths.length === 0 && !hasNativeFiles) return
+      e.preventDefault()
+      setDragging(false)
+      if (draggedPaths.length > 0) {
+        addFilesToEditor(draggedPaths)
+        return
+      }
+      handleDropFiles(e.dataTransfer?.files ?? null)
+    },
+    [addFilesToEditor, getDraggedFilePaths, handleDropFiles, setDragging]
+  )
 
   // Optimize prompt handler
   const handleOptimizePrompt = React.useCallback(async () => {
@@ -905,19 +1651,21 @@ export function InputArea({
       console.log('[Optimizer] Cleanup')
       setIsOptimizing(false)
     }
-  }, [text, isOptimizing])
+  }, [text, isOptimizing, currentLanguage])
 
-  const handleSelectOption = React.useCallback((content: string) => {
-    setText(content)
-    setOptimizationOptions([])
-    setOptimizingText('')
-    setSelectedOptionIndex(0)
-    setShowOptimizationDialog(false)
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`
-    }
-  }, [])
+  const handleSelectOption = React.useCallback(
+    (content: string) => {
+      setText(content)
+      setOptimizationOptions([])
+      setOptimizingText('')
+      setSelectedOptionIndex(0)
+      setShowOptimizationDialog(false)
+      requestAnimationFrame(() => {
+        focusInputAtEnd()
+      })
+    },
+    [focusInputAtEnd, setText]
+  )
 
   const handleCancelOptimization = React.useCallback(() => {
     setOptimizationOptions([])
@@ -927,7 +1675,11 @@ export function InputArea({
   }, [])
 
   return (
-    <div ref={rootRef} className="px-4 py-3 pb-4">
+    <div
+      ref={rootRef}
+      data-tour="composer"
+      className={isHomeComposer ? 'px-0 py-0' : 'px-4 py-3 pb-4'}
+    >
       {/* API key warning */}
       {!hasApiKey && (
         <button
@@ -982,154 +1734,266 @@ export function InputArea({
         </div>
       )}
 
-      <div className="mx-auto max-w-3xl">
+      <div className={isHomeComposer ? 'mx-auto max-w-4xl' : 'mx-auto max-w-3xl'}>
         <div
           ref={containerRef}
-          className={`relative rounded-lg border bg-background shadow-lg transition-shadow focus-within:shadow-xl focus-within:ring-1 focus-within:ring-ring/20 flex flex-col ${dragging ? 'ring-2 ring-primary/50' : ''}`}
-          style={inputHeight ? { height: inputHeight } : undefined}
+          className={cn(
+            'relative rounded-lg border bg-background shadow-lg transition-shadow focus-within:shadow-xl focus-within:ring-1 focus-within:ring-ring/20 flex flex-col',
+            fileMenuOpen || slashMenuOpen ? 'overflow-visible' : 'overflow-hidden',
+            dragging && 'ring-2 ring-primary/50'
+          )}
+          style={
+            inputHeight !== null
+              ? { height: inputHeight }
+              : { height: autoInputHeight, maxHeight: autoMaxInputHeight }
+          }
         >
           {/* Top drag handle */}
-          <div className="h-1.5 cursor-row-resize rounded-t-lg" onMouseDown={handleDragStart} />
-          {/* Queued message list (while current run is processing) */}
+          {!isHomeComposer && (
+            <div className="h-1.5 cursor-row-resize rounded-t-lg" onMouseDown={handleDragStart} />
+          )}
+          {/* Queued message list */}
           {queuedMessages.length > 0 && (
-            <div className="px-3 pt-3 pb-1">
-              <div className="mb-2 flex items-center justify-between rounded-md border border-primary/20 bg-primary/5 px-2.5 py-1.5">
-                <span className="text-xs font-medium text-primary">
-                  {t('input.queueTitle', { defaultValue: '排队消息' })} · {queuedMessages.length}
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {t('input.queueHint', { defaultValue: '当前任务结束后按顺序发送' })}
-                </span>
-              </div>
-              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-                {queuedMessages.map((msg) => {
-                  const isEditing = editingQueueItemId === msg.id
-                  return (
-                    <div
-                      key={msg.id}
-                      className="rounded-md border border-border/60 bg-muted/30 px-2.5 py-2"
+            <div className="shrink-0 px-3 pt-3 pb-1">
+              <div className="overflow-hidden rounded-xl border border-border/60 bg-muted/20 shadow-sm">
+                <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    onClick={toggleQueueExpanded}
+                  >
+                    {isQueueExpanded ? (
+                      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                    )}
+                    <ClipboardList className="size-3.5 shrink-0 text-primary/80" />
+                    <span className="truncate text-xs font-medium text-foreground">
+                      {t('input.queueTitle', { defaultValue: '排队消息' })}
+                    </span>
+                    <span className="rounded-full border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {queuedMessages.length}
+                    </span>
+                    <span className="truncate text-[10px] text-muted-foreground/80">
+                      {isQueueDispatchPaused
+                        ? t('input.queuePausedHint', {
+                            defaultValue: '已暂停，点击继续发送'
+                          })
+                        : t('input.queueRunningHint', {
+                            defaultValue: '当前任务结束后按顺序发送'
+                          })}
+                    </span>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {isQueueDispatchPaused && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 rounded-lg px-2 text-[10px]"
+                        onClick={resumeQueuedMessages}
+                      >
+                        <Send className="size-3" />
+                        {t('input.queueResume', { defaultValue: '继续发送' })}
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 gap-1 rounded-lg px-2 text-[10px] text-muted-foreground hover:text-destructive"
+                      onClick={handleClearQueuedMessages}
                     >
-                      <div className="mb-1 flex items-center justify-end">
-                        <div className="flex items-center gap-1">
-                          {isEditing ? (
-                            <>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={() => saveQueuedMessage(msg.id)}
-                              >
-                                {t('action.save', { ns: 'common', defaultValue: '保存' })}
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={cancelEditQueuedMessage}
-                              >
-                                {t('action.cancel', { ns: 'common' })}
-                              </Button>
-                            </>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 px-2 text-[10px]"
-                              onClick={() => startEditQueuedMessage(msg)}
-                            >
-                              {t('action.edit', { ns: 'common', defaultValue: '编辑' })}
-                            </Button>
-                          )}
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 px-2 text-[10px] text-destructive hover:text-destructive"
-                            onClick={() => removeQueuedMessage(msg.id)}
+                      <Trash2 className="size-3" />
+                      {t('action.clear', { ns: 'common' })}
+                    </Button>
+                  </div>
+                </div>
+
+                {isQueueExpanded && (
+                  <div className="border-t border-border/50 px-3 py-2">
+                    <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                      {queuedMessages.map((msg) => {
+                        const isEditing = editingQueueItemId === msg.id
+                        const summaryText = summarizeQueuedMessage(msg.text)
+                        const commandLabel = msg.command ? `/${msg.command.name}` : ''
+                        return (
+                          <div
+                            key={msg.id}
+                            className="rounded-lg border border-border/60 bg-background/80 px-3 py-2 shadow-sm"
                           >
-                            {t('action.delete', { ns: 'common', defaultValue: '删除' })}
-                          </Button>
-                        </div>
-                      </div>
-                      {isEditing ? (
-                        <div className="space-y-2">
-                          <Textarea
-                            value={editingQueueText}
-                            onChange={(e) => setEditingQueueText(e.target.value)}
-                            className="min-h-[56px] max-h-36 resize-none border-border/70 bg-background text-xs"
-                            rows={2}
-                          />
-                          {editingQueueImages.length > 0 && (
-                            <div className="flex gap-2 overflow-x-auto pb-1">
-                              {editingQueueImages.map((img) => (
-                                <div key={img.id} className="relative group/img shrink-0">
-                                  <img
-                                    src={img.dataUrl}
-                                    alt=""
-                                    className="size-12 rounded-md border border-border/60 object-cover shadow-sm"
-                                  />
-                                  <button
-                                    type="button"
-                                    className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm opacity-0 transition-opacity group-hover/img:opacity-100"
-                                    onClick={() => removeQueuedImage(img.id)}
-                                  >
-                                    <X className="size-2.5" />
-                                  </button>
+                            {isEditing ? (
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[10px] font-medium text-muted-foreground">
+                                    {t('input.queueEditing', { defaultValue: '编辑排队消息' })}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={() => saveQueuedMessage(msg.id)}
+                                    >
+                                      {t('action.save', { ns: 'common' })}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={cancelEditQueuedMessage}
+                                    >
+                                      {t('action.cancel', { ns: 'common' })}
+                                    </Button>
+                                  </div>
                                 </div>
-                              ))}
-                            </div>
-                          )}
-                          <div className="flex items-center justify-between gap-2">
-                            {editingQueueImages.length > 0 ? (
-                              <p className="text-[10px] text-muted-foreground">
-                                {t('input.queueImageCount', {
-                                  defaultValue: '{{count}} 张图片',
-                                  count: editingQueueImages.length
-                                })}
-                              </p>
+                                {msg.command && (
+                                  <div className="rounded-md border border-violet-500/20 bg-violet-500/5 px-2.5 py-1.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                                    /{msg.command.name}
+                                  </div>
+                                )}
+                                <Textarea
+                                  value={editingQueueText}
+                                  onChange={(e) => setEditingQueueText(e.target.value)}
+                                  className="min-h-[56px] max-h-36 resize-none border-border/70 bg-background text-xs"
+                                  rows={2}
+                                />
+                                {editingQueueImages.length > 0 && (
+                                  <div className="flex gap-2 overflow-x-auto pb-1">
+                                    {editingQueueImages.map((img) => (
+                                      <div key={img.id} className="relative group/img shrink-0">
+                                        <img
+                                          src={img.dataUrl}
+                                          alt=""
+                                          className="size-12 rounded-md border border-border/60 object-cover shadow-sm"
+                                        />
+                                        <button
+                                          type="button"
+                                          className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm opacity-0 transition-opacity group-hover/img:opacity-100"
+                                          onClick={() => removeQueuedImage(img.id)}
+                                        >
+                                          <X className="size-2.5" />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="flex items-center justify-between gap-2">
+                                  {editingQueueImages.length > 0 ? (
+                                    <p className="text-[10px] text-muted-foreground">
+                                      {t('input.queueImageCount', {
+                                        defaultValue: '{{count}} 张图片',
+                                        count: editingQueueImages.length
+                                      })}
+                                    </p>
+                                  ) : (
+                                    <span />
+                                  )}
+                                  {supportsVision && (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 gap-1 px-2 text-[10px]"
+                                      onClick={() => queueFileInputRef.current?.click()}
+                                    >
+                                      <ImagePlus className="size-3" />
+                                      {t('input.attachImages')}
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
                             ) : (
-                              <span />
-                            )}
-                            {supportsVision && (
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-6 gap-1 px-2 text-[10px]"
-                                onClick={() => queueFileInputRef.current?.click()}
-                              >
-                                <ImagePlus className="size-3" />
-                                {t('input.attachImages')}
-                              </Button>
+                              <div className="flex items-start gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-xs leading-5 text-foreground/90">
+                                    {summaryText ||
+                                      commandLabel ||
+                                      t('input.queueImageOnly', { defaultValue: '[仅图片]' })}
+                                  </div>
+                                  {commandLabel && summaryText && (
+                                    <div className="mt-1 text-[10px] text-violet-700 dark:text-violet-300">
+                                      {commandLabel}
+                                    </div>
+                                  )}
+                                  {msg.images.length > 0 && (
+                                    <div className="mt-1 flex items-center gap-1.5">
+                                      <span className="rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                        {t('input.queueImageCount', {
+                                          defaultValue: '{{count}} 张图片',
+                                          count: msg.images.length
+                                        })}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                                    onClick={() => startEditQueuedMessage(msg)}
+                                    title={t('action.edit', { ns: 'common', defaultValue: '编辑' })}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-destructive"
+                                    onClick={() => removeQueuedMessage(msg.id)}
+                                    title={t('action.delete', { ns: 'common' })}
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                  </Button>
+                                </div>
+                              </div>
                             )}
                           </div>
-                        </div>
-                      ) : (
-                        <div className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words pr-1 text-xs leading-relaxed">
-                          {msg.text || t('input.queueImageOnly', { defaultValue: '[仅图片]' })}
-                        </div>
-                      )}
-                      {!isEditing && msg.images.length > 0 && (
-                        <p className="mt-1 text-[10px] text-muted-foreground">
-                          {t('input.queueImageCount', {
-                            defaultValue: '{{count}} 张图片',
-                            count: msg.images.length
-                          })}
-                        </p>
-                      )}
+                        )
+                      })}
                     </div>
-                  )
-                })}
+                  </div>
+                )}
               </div>
+
+              <AlertDialog open={queueClearConfirmOpen} onOpenChange={setQueueClearConfirmOpen}>
+                <AlertDialogContent size="sm">
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {t('input.queueClearConfirmTitle', { defaultValue: '清空排队消息？' })}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t('input.queueClearConfirmDesc', {
+                        defaultValue: '这将删除当前会话中 {{count}} 条待发送消息。',
+                        count: queuedMessages.length
+                      })}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel size="sm">
+                      {t('action.cancel', { ns: 'common' })}
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      size="sm"
+                      onClick={clearQueuedMessagesForActiveSession}
+                    >
+                      {t('action.clear', { ns: 'common' })}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
           )}
 
           {/* Skill tag */}
           {selectedSkill && (
-            <div className="px-3 pt-3 pb-0">
+            <div className="shrink-0 px-3 pt-3 pb-0">
               <span className="inline-flex items-center gap-1.5 rounded-md bg-violet-500/10 border border-violet-500/20 px-2.5 py-1 text-xs font-medium text-violet-600 dark:text-violet-400">
                 <Sparkles className="size-3" />
                 {selectedSkill}
@@ -1146,7 +2010,10 @@ export function InputArea({
 
           {/* Image preview strip */}
           {attachedImages.length > 0 && (
-            <div className="flex gap-2 px-3 pt-3 pb-1 overflow-x-auto">
+            <div
+              ref={imagePreviewRef}
+              className="shrink-0 flex gap-2 overflow-x-auto px-3 pt-3 pb-1"
+            >
               {attachedImages.map((img) => (
                 <div key={img.id} className="relative group/img shrink-0">
                   <img
@@ -1168,7 +2035,7 @@ export function InputArea({
 
           {/* Optimizing indicator - only show spinner, hide text */}
           {isOptimizing && (
-            <div className="px-3 pt-3 pb-1">
+            <div className="shrink-0 px-3 pt-3 pb-1">
               <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2">
                 <div className="flex items-center gap-2">
                   <Spinner className="size-3.5 text-blue-600 dark:text-blue-400" />
@@ -1267,7 +2134,16 @@ export function InputArea({
 
           {/* Text input area */}
           <div
-            className={`relative px-3 flex-1 min-h-0 flex flex-col ${selectedSkill || attachedImages.length > 0 ? 'pt-1.5' : 'pt-3'}`}
+            className={cn(
+              'relative flex min-h-0 flex-1 flex-col px-3',
+              isHomeComposer
+                ? selectedSkill || attachedImages.length > 0
+                  ? 'pt-1.5'
+                  : 'pt-5'
+                : selectedSkill || attachedImages.length > 0
+                  ? 'pt-1.5'
+                  : 'pt-3'
+            )}
             onDrop={handleDropWrapped}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -1280,17 +2156,172 @@ export function InputArea({
                 </span>
               </div>
             )}
-            <Textarea
-              ref={textareaRef}
-              value={text}
-              onChange={handleInput}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={t(placeholderKeys[mode] ?? 'input.placeholder')}
-              className="min-h-[60px] w-full resize-none border-0 bg-background dark:bg-background p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1"
-              rows={1}
-              disabled={disabled || isOptimizing}
-            />
+            <div className="relative flex-1 min-h-0 overflow-visible">
+              {shouldAutoAcceptRecommendation &&
+                autoAcceptCountdown !== null &&
+                suggestionText &&
+                !hasFileReferences && (
+                  <div className="pointer-events-none absolute right-2 top-2 z-20 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
+                    {autoAcceptCountdown}s
+                  </div>
+                )}
+              <FileAwareEditor
+                ref={editorRef}
+                document={documentNodes}
+                files={selectedFiles}
+                disabled={disabled || isOptimizing}
+                placeholder={
+                  effectivePlaceholder ??
+                  (shouldRecommendInit
+                    ? t('input.placeholderInitWorkspace')
+                    : t(placeholderKeys[mode] ?? 'input.placeholder'))
+                }
+                suggestionText={suggestionText}
+                showSuggestion={Boolean(
+                  suggestionText &&
+                  text.length > 0 &&
+                  !hasFileReferences &&
+                  !activeFileMention &&
+                  !slashMenuOpen
+                )}
+                highlightedFileId={highlightedFileId}
+                onDocumentChange={handleEditorDocumentChange}
+                onSelectionChange={handleEditorSelectionChange}
+                onFocus={handleRecommendationFocus}
+                onBlur={handleRecommendationBlur}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onCompositionStart={handleRecommendationCompositionStart}
+                onCompositionEnd={() => {
+                  handleRecommendationCompositionEnd()
+                }}
+                onReferencePreview={handlePreviewFile}
+                onReferenceLocate={handleLocateFileReference}
+                onReferenceDelete={handleRemoveFileReference}
+                className={cn(
+                  'w-full',
+                  isHomeComposer && (selectedSkill || attachedImages.length > 0)
+                    ? 'h-auto'
+                    : 'h-full'
+                )}
+              />
+              {fileMenuOpen && (
+                <div className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border border-border/70 bg-popover shadow-xl">
+                  <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+                    <Command className="size-3.5" />
+                    <span>{t('input.fileSuggestions', { defaultValue: '文件建议' })}</span>
+                    <span className="ml-auto rounded-full border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px]">
+                      @{fileQuery || ''}
+                    </span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-1.5">
+                    {!workingFolder ? (
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-3 text-left text-xs text-amber-600 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                        onMouseDown={(event) => {
+                          event.preventDefault()
+                          onSelectFolder?.()
+                        }}
+                      >
+                        <FolderOpen className="size-3.5 shrink-0" />
+                        <span>
+                          {t('input.noWorkingFolderSelected', { defaultValue: '请先选择工作目录' })}
+                        </span>
+                      </button>
+                    ) : fileSearchLoading ? (
+                      <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+                        <Spinner className="size-3.5" />
+                        <span>{t('input.loadingFiles', { defaultValue: '搜索文件中...' })}</span>
+                      </div>
+                    ) : fileSearchResults.length === 0 ? (
+                      <div className="px-2 py-3 text-xs text-muted-foreground">
+                        {t('input.noFilesFound', { defaultValue: '没有匹配的文件' })}
+                      </div>
+                    ) : (
+                      fileSearchResults.map((file, index) => {
+                        const isSelected = index === selectedFileSearchIndex
+                        return (
+                          <button
+                            key={file.path}
+                            type="button"
+                            className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              isSelected
+                                ? 'bg-accent text-accent-foreground'
+                                : 'hover:bg-muted/50 text-foreground'
+                            }`}
+                            onMouseDown={(event) => {
+                              event.preventDefault()
+                              insertSelectedFile(file.path)
+                            }}
+                          >
+                            <FileCode2 className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">{file.name}</div>
+                              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                                {file.path}
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+              {slashMenuOpen && (
+                <div className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border border-border/70 bg-popover shadow-xl">
+                  <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+                    <Command className="size-3.5" />
+                    <span>{t('input.commandSuggestions', { defaultValue: '命令建议' })}</span>
+                    <span className="ml-auto rounded-full border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px]">
+                      /{slashQuery ?? ''}
+                    </span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-1.5">
+                    {slashCommandsLoading ? (
+                      <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+                        <Spinner className="size-3.5" />
+                        <span>{t('input.loadingCommands', { defaultValue: '加载命令中...' })}</span>
+                      </div>
+                    ) : filteredSlashCommands.length === 0 ? (
+                      <div className="px-2 py-3 text-xs text-muted-foreground">
+                        {t('input.noCommandsFound', { defaultValue: '没有匹配的命令' })}
+                      </div>
+                    ) : (
+                      filteredSlashCommands.map((command, index) => {
+                        const isSelected = index === selectedSlashIndex
+                        return (
+                          <button
+                            key={command.name}
+                            type="button"
+                            className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              isSelected
+                                ? 'bg-accent text-accent-foreground'
+                                : 'hover:bg-muted/50 text-foreground'
+                            }`}
+                            onMouseDown={(event) => {
+                              event.preventDefault()
+                              insertSlashCommand(command.name)
+                            }}
+                          >
+                            <Command className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">/{command.name}</div>
+                              {command.summary && (
+                                <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
+                                  {command.summary}
+                                </div>
+                              )}
+                            </div>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Hidden file input for queue image upload */}
@@ -1322,13 +2353,21 @@ export function InputArea({
           />
 
           {/* Bottom toolbar */}
-          <div className="flex items-center justify-between gap-2 px-2 pb-2 mt-1">
+          <div
+            ref={bottomToolbarRef}
+            className={cn(
+              'relative z-20 mt-1 shrink-0 flex items-center justify-between gap-2 px-2 pb-2',
+              isHomeComposer && 'border-t border-border/50 px-4 pb-3.5 pt-2.5'
+            )}
+          >
             {/* Left tools */}
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto pr-1">
-              <ModelSwitcher />
+              <div className={cn(isHomeComposer && 'mr-1')}>
+                <ModelSwitcher />
+              </div>
 
               {/* Web search toggle */}
-              {mode !== 'chat' && (
+              {mode !== 'chat' && webSearchEnabled && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1358,36 +2397,41 @@ export function InputArea({
                   <SkillsMenu
                     onSelectSkill={(name) => {
                       setSelectedSkill(name)
-                      textareaRef.current?.focus()
+                      editorRef.current?.focus()
+                    }}
+                    onSelectCommand={(name) => {
+                      insertSlashCommand(name)
                     }}
                     disabled={disabled || isStreaming}
+                    projectId={activeProjectId}
                   />
-                  <ActiveMcpsBadge />
+                  <ActiveMcpsBadge projectId={activeProjectId} />
                 </>
               )}
 
-              {/* Plan mode toggle */}
               {mode !== 'chat' && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="ghost"
-                      className={`h-8 rounded-lg px-2 gap-1 transition-colors ${
-                        planMode
-                          ? 'text-violet-600 dark:text-violet-400 bg-violet-500/10 hover:bg-violet-500/20'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                      onClick={togglePlanMode}
+                      size="icon"
+                      className={cn(
+                        'size-8 rounded-lg transition-colors',
+                        effectiveLongRunningMode
+                          ? 'bg-primary/12 text-primary hover:bg-primary/18'
+                          : 'text-muted-foreground hover:text-foreground',
+                        isHomeComposer && 'rounded-full hover:bg-white/5'
+                      )}
+                      onClick={handleToggleLongRunningMode}
                       disabled={disabled || isStreaming}
                     >
-                      <ClipboardList className="size-4" />
-                      {planMode && <span className="text-[10px] font-medium">Plan</span>}
+                      <Sparkles className="size-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {planMode
-                      ? t('input.exitPlanMode', { defaultValue: 'Exit Plan Mode' })
-                      : t('input.enterPlanMode', { defaultValue: 'Enter Plan Mode' })}
+                    {effectiveLongRunningMode
+                      ? t('input.longRunningModeOn', { defaultValue: '长时间运行模式：开启' })
+                      : t('input.longRunningModeOff', { defaultValue: '长时间运行模式：关闭' })}
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -1399,7 +2443,10 @@ export function InputArea({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+                      className={cn(
+                        'size-8 rounded-lg text-muted-foreground hover:text-foreground',
+                        isHomeComposer && 'rounded-full hover:bg-white/5'
+                      )}
                       onClick={() => fileInputRef.current?.click()}
                       disabled={disabled}
                     >
@@ -1417,7 +2464,10 @@ export function InputArea({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+                      className={cn(
+                        'size-8 rounded-lg text-muted-foreground hover:text-foreground',
+                        isHomeComposer && 'rounded-full hover:bg-white/5'
+                      )}
                       onClick={onSelectFolder}
                     >
                       <FolderOpen className="size-4" />
@@ -1460,7 +2510,15 @@ export function InputArea({
                   <AlertDialogContent size="sm">
                     <AlertDialogHeader>
                       <AlertDialogTitle>{t('input.clearConfirmTitle')}</AlertDialogTitle>
-                      <AlertDialogDescription>{t('input.clearConfirmDesc')}</AlertDialogDescription>
+                      <AlertDialogDescription>
+                        {queuedMessages.length > 0
+                          ? t('input.clearConfirmDescWithQueue', {
+                              defaultValue:
+                                '这将删除此对话中的所有消息，并清空当前会话的 {{count}} 条待发送消息。此操作不可撤销。',
+                              count: queuedMessages.length
+                            })
+                          : t('input.clearConfirmDesc')}
+                      </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                       <AlertDialogCancel size="sm">
@@ -1469,7 +2527,11 @@ export function InputArea({
                       <AlertDialogAction
                         variant="destructive"
                         size="sm"
-                        onClick={() => activeSessionId && clearSessionMessages(activeSessionId)}
+                        onClick={() => {
+                          if (!activeSessionId) return
+                          clearSessionMessages(activeSessionId)
+                          clearPendingSessionMessages(activeSessionId)
+                        }}
                       >
                         {t('action.clear', { ns: 'common' })}
                       </AlertDialogAction>
@@ -1519,17 +2581,28 @@ export function InputArea({
                 <TooltipTrigger asChild>
                   <Button
                     size="sm"
-                    className="h-8 rounded-lg px-3 bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-sm"
+                    className={cn(
+                      'transition-all shadow-sm',
+                      isHomeComposer
+                        ? 'size-9 rounded-full bg-white p-0 text-black hover:bg-white/90 shadow-[0_10px_24px_-14px_rgba(255,255,255,0.65)]'
+                        : 'h-8 rounded-lg bg-primary px-3 text-primary-foreground hover:bg-primary/90'
+                    )}
                     onClick={handleSend}
                     disabled={
-                      (!text.trim() && attachedImages.length === 0) ||
+                      (!finalSerializedText.trim() && attachedImages.length === 0) ||
                       disabled ||
                       needsWorkingFolder ||
                       isOptimizing
                     }
                   >
-                    <span>{t('action.start', { ns: 'common' })}</span>
-                    <Send className="size-3.5 ml-1.5" />
+                    {isHomeComposer ? (
+                      <Send className="size-4" />
+                    ) : (
+                      <>
+                        <span>{t('action.start', { ns: 'common' })}</span>
+                        <Send className="ml-1.5 size-3.5" />
+                      </>
+                    )}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>

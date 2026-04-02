@@ -8,6 +8,7 @@ import type {
   RequestTiming,
   ImageBlock,
   ImageErrorCode,
+  ToolCallExtraContent
 } from '../api/types'
 import type { CompressionConfig } from './context-compression'
 
@@ -62,6 +63,7 @@ export interface AgentLoopConfig {
   /** Max loop iterations. Set <= 0 for unlimited iterations. */
   maxIterations: number
   provider: ProviderConfig
+  resolveProvider?: (messages: UnifiedMessage[]) => Promise<ProviderConfig>
   tools: ToolDefinition[]
   systemPrompt: string
   workingFolder?: string
@@ -89,18 +91,35 @@ export type AgentEvent =
   | {
       type: 'thinking_encrypted'
       thinkingEncryptedContent: string
-      thinkingEncryptedProvider: 'anthropic' | 'openai-responses'
+      thinkingEncryptedProvider: 'anthropic' | 'openai-responses' | 'google'
     }
   | { type: 'image_generated'; imageBlock: ImageBlock }
   | { type: 'image_error'; imageError: { code: ImageErrorCode; message: string } }
-  | { type: 'message_end'; usage?: TokenUsage; timing?: RequestTiming }
-  | { type: 'tool_use_streaming_start'; toolCallId: string; toolName: string }
+  | { type: 'message_end'; usage?: TokenUsage; timing?: RequestTiming; providerResponseId?: string }
+  | {
+      type: 'tool_use_streaming_start'
+      toolCallId: string
+      toolName: string
+      toolCallExtraContent?: ToolCallExtraContent
+    }
   | { type: 'tool_use_args_delta'; toolCallId: string; partialInput: Record<string, unknown> }
-  | { type: 'tool_use_generated'; toolUseBlock: { id: string; name: string; input: Record<string, unknown> } }
+  | {
+      type: 'tool_use_generated'
+      toolUseBlock: {
+        id: string
+        name: string
+        input: Record<string, unknown>
+        extraContent?: ToolCallExtraContent
+      }
+    }
   | { type: 'tool_call_start'; toolCall: ToolCallState }
   | { type: 'tool_call_approval_needed'; toolCall: ToolCallState }
   | { type: 'tool_call_result'; toolCall: ToolCallState }
-  | { type: 'iteration_end'; stopReason: string; toolResults?: { toolUseId: string; content: ToolResultContent; isError?: boolean }[] }
+  | {
+      type: 'iteration_end'
+      stopReason: string
+      toolResults?: { toolUseId: string; content: ToolResultContent; isError?: boolean }[]
+    }
   | { type: 'loop_end'; reason: 'completed' | 'max_iterations' | 'aborted' | 'error' }
   | { type: 'error'; error: Error }
   | { type: 'request_debug'; debugInfo: RequestDebugInfo }

@@ -13,7 +13,10 @@ export class OpenAIImagesRequestError extends Error {
   readonly code: OpenAIImagesRequestErrorCode
   readonly statusCode?: number
 
-  constructor(message: string, options: { code: OpenAIImagesRequestErrorCode; statusCode?: number }) {
+  constructor(
+    message: string,
+    options: { code: OpenAIImagesRequestErrorCode; statusCode?: number }
+  ) {
     super(message)
     this.name = 'OpenAIImagesRequestError'
     this.code = options.code
@@ -40,6 +43,54 @@ export interface GeneratedImage {
 
 function getBaseUrl(config: ProviderConfig): string {
   return (config.baseUrl || 'https://api.openai.com/v1').trim().replace(/\/+$/, '')
+}
+
+function applyRequestOverridesToJsonBody(
+  body: Record<string, unknown>,
+  config: ProviderConfig
+): Record<string, unknown> {
+  const next = { ...body }
+  const overrides = config.requestOverrides
+
+  if (overrides?.body) {
+    for (const [key, value] of Object.entries(overrides.body)) {
+      next[key] = value
+    }
+  }
+
+  if (overrides?.omitBodyKeys) {
+    for (const key of overrides.omitBodyKeys) {
+      delete next[key]
+    }
+  }
+
+  return next
+}
+
+function appendFormDataValue(formData: FormData, key: string, value: unknown): void {
+  if (value === undefined || value === null) return
+  if (value instanceof Blob) {
+    formData.append(key, value)
+    return
+  }
+  formData.append(key, String(value))
+}
+
+function applyRequestOverridesToFormData(formData: FormData, config: ProviderConfig): void {
+  const overrides = config.requestOverrides
+
+  if (overrides?.omitBodyKeys) {
+    for (const key of overrides.omitBodyKeys) {
+      formData.delete(key)
+    }
+  }
+
+  if (overrides?.body) {
+    for (const [key, value] of Object.entries(overrides.body)) {
+      formData.delete(key)
+      appendFormDataValue(formData, key, value)
+    }
+  }
 }
 
 function ensureApiKey(config: ProviderConfig): void {
@@ -77,7 +128,7 @@ function normalizeImageResults(items: OpenAiImageResponseItem[]): GeneratedImage
             mediaType = 'image/png'
           }
           // JPEG signature: FF D8 FF
-          else if (binary.charCodeAt(0) === 0xFF && binary.charCodeAt(1) === 0xD8) {
+          else if (binary.charCodeAt(0) === 0xff && binary.charCodeAt(1) === 0xd8) {
             mediaType = 'image/jpeg'
           }
           // WebP signature: RIFF....WEBP
@@ -132,20 +183,20 @@ function createRequestSignal(signal?: AbortSignal): {
         timeoutId = null
       }
       signal?.removeEventListener('abort', onParentAbort)
-    },
+    }
   }
 }
 
 function mapFetchError(error: unknown, didTimeout: boolean): OpenAIImagesRequestError {
   if (didTimeout) {
     return new OpenAIImagesRequestError('Image request timed out after 10 minutes', {
-      code: 'timeout',
+      code: 'timeout'
     })
   }
 
   if (error instanceof Error && error.name === 'AbortError') {
     return new OpenAIImagesRequestError('Image request was cancelled', {
-      code: 'request_aborted',
+      code: 'request_aborted'
     })
   }
 
@@ -162,7 +213,7 @@ function mapFetchError(error: unknown, didTimeout: boolean): OpenAIImagesRequest
 
   const message = error instanceof Error ? error.message : String(error)
   return new OpenAIImagesRequestError(message || 'Unknown image request error', {
-    code: 'unknown',
+    code: 'unknown'
   })
 }
 
@@ -176,10 +227,13 @@ export async function generateImagesFromText(params: {
   const { config, prompt, signal } = params
   ensureApiKey(config)
   const url = `${getBaseUrl(config)}/images/generations`
-  const body: Record<string, unknown> = {
-    model: config.model,
-    prompt,
-  }
+  const body = applyRequestOverridesToJsonBody(
+    {
+      model: config.model,
+      prompt
+    },
+    config
+  )
 
   const requestSignal = createRequestSignal(signal)
   let response: Response
@@ -190,10 +244,10 @@ export async function generateImagesFromText(params: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
         ...(config.organization ? { 'OpenAI-Organization': config.organization } : {}),
-        ...(config.project ? { 'OpenAI-Project': config.project } : {}),
+        ...(config.project ? { 'OpenAI-Project': config.project } : {})
       },
       body: JSON.stringify(body),
-      signal: requestSignal.signal,
+      signal: requestSignal.signal
     })
   } catch (error) {
     throw mapFetchError(error, requestSignal.didTimeout())
@@ -219,7 +273,7 @@ export async function generateImagesFromText(params: {
     console.error('[OpenAI Images] Generation failed:', errorMessage)
     throw new OpenAIImagesRequestError(errorMessage, {
       code: 'api_error',
-      statusCode: response.status,
+      statusCode: response.status
     })
   }
 
@@ -227,7 +281,7 @@ export async function generateImagesFromText(params: {
   const items = data.data ?? []
   if (items.length === 0) {
     throw new OpenAIImagesRequestError('Image generation returned no results', {
-      code: 'api_error',
+      code: 'api_error'
     })
   }
 
@@ -250,6 +304,7 @@ export async function editImageWithPrompt(params: {
   formData.append('model', config.model)
   formData.append('prompt', prompt)
   formData.append('image', dataUrlToBlob(image), 'image.png')
+  applyRequestOverridesToFormData(formData, config)
 
   const requestSignal = createRequestSignal(signal)
   let response: Response
@@ -259,10 +314,10 @@ export async function editImageWithPrompt(params: {
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
         ...(config.organization ? { 'OpenAI-Organization': config.organization } : {}),
-        ...(config.project ? { 'OpenAI-Project': config.project } : {}),
+        ...(config.project ? { 'OpenAI-Project': config.project } : {})
       },
       body: formData,
-      signal: requestSignal.signal,
+      signal: requestSignal.signal
     })
   } catch (error) {
     throw mapFetchError(error, requestSignal.didTimeout())
@@ -288,7 +343,7 @@ export async function editImageWithPrompt(params: {
     console.error('[OpenAI Images] Edit failed:', errorMessage)
     throw new OpenAIImagesRequestError(errorMessage, {
       code: 'api_error',
-      statusCode: response.status,
+      statusCode: response.status
     })
   }
 
@@ -296,7 +351,7 @@ export async function editImageWithPrompt(params: {
   const items = data.data ?? []
   if (items.length === 0) {
     throw new OpenAIImagesRequestError('Image edit returned no results', {
-      code: 'api_error',
+      code: 'api_error'
     })
   }
 

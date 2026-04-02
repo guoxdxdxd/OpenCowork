@@ -28,10 +28,15 @@ export interface CronJobEntry {
   enabled: boolean
   deleteAfterRun: boolean
   maxIterations: number
+  deletedAt: number | null
   lastFiredAt: number | null
   fireCount: number
   createdAt: number
   updatedAt: number
+  sourceSessionTitle: string | null
+  sourceProjectId: string | null
+  sourceProjectName: string | null
+  sourceProviderId: string | null
   /** Is this job currently scheduled (timer/cron active in main process) */
   scheduled: boolean
   /** Is a CronAgent currently executing for this job */
@@ -51,6 +56,18 @@ export interface CronRunEntry {
   toolCallCount: number
   outputSummary: string | null
   error: string | null
+  scheduledFor: number | null
+  jobNameSnapshot: string | null
+  promptSnapshot: string | null
+  sourceSessionIdSnapshot: string | null
+  sourceSessionTitleSnapshot: string | null
+  sourceProjectIdSnapshot: string | null
+  sourceProjectNameSnapshot: string | null
+  sourceProviderIdSnapshot: string | null
+  modelSnapshot: string | null
+  workingFolderSnapshot: string | null
+  deliveryModeSnapshot: string | null
+  deliveryTargetSnapshot: string | null
 }
 
 export interface CronAgentLogEntry {
@@ -76,11 +93,14 @@ interface CronStore {
   appendAgentLog: (entry: CronAgentLogEntry) => void
   clearAgentLogs: (jobId: string) => void
   setExecutionStarted: (jobId: string) => void
-  updateExecutionProgress: (jobId: string, progress: { iteration: number; toolCalls: number; currentStep?: string }) => void
+  updateExecutionProgress: (
+    jobId: string,
+    progress: { iteration: number; toolCalls: number; currentStep?: string }
+  ) => void
   clearExecutionState: (jobId: string) => void
 }
 
-const MAX_RUNS = 100
+const MAX_RUNS = 1000
 const MAX_AGENT_LOG_ENTRIES = 100
 
 export const useCronStore = create<CronStore>((set) => ({
@@ -103,7 +123,7 @@ export const useCronStore = create<CronStore>((set) => ({
     try {
       const result = await ipcClient.invoke(IPC.CRON_RUNS, {
         jobId,
-        limit: MAX_RUNS,
+        limit: MAX_RUNS
       })
       if (Array.isArray(result)) {
         set({ runs: result as CronRunEntry[] })
@@ -113,30 +133,26 @@ export const useCronStore = create<CronStore>((set) => ({
     }
   },
 
-  addJob: (job) =>
-    set((s) => ({ jobs: [job, ...s.jobs] })),
+  addJob: (job) => set((s) => ({ jobs: [job, ...s.jobs] })),
 
-  removeJob: (id) =>
-    set((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) })),
+  removeJob: (id) => set((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) })),
 
   updateJob: (id, patch) =>
     set((s) => ({ jobs: s.jobs.map((j) => (j.id === id ? { ...j, ...patch } : j)) })),
 
   recordRun: (run) =>
-    set((s) => {
-      if (!s.jobs.some((j) => j.id === run.jobId)) return {}
-      return { runs: [run, ...s.runs].slice(0, MAX_RUNS) }
-    }),
+    set((s) => ({
+      runs: [run, ...s.runs.filter((entry) => entry.id !== run.id)].slice(0, MAX_RUNS)
+    })),
 
   appendAgentLog: (entry) =>
     set((s) => {
-      if (!s.jobs.some((j) => j.id === entry.jobId)) return {}
       const prev = s.agentLogs[entry.jobId] ?? []
       return {
         agentLogs: {
           ...s.agentLogs,
-          [entry.jobId]: [...prev, entry].slice(-MAX_AGENT_LOG_ENTRIES),
-        },
+          [entry.jobId]: [...prev, entry].slice(-MAX_AGENT_LOG_ENTRIES)
+        }
       }
     }),
 
@@ -153,14 +169,12 @@ export const useCronStore = create<CronStore>((set) => ({
         j.id === jobId
           ? { ...j, executing: true, executionStartedAt: Date.now(), executionProgress: null }
           : j
-      ),
+      )
     })),
 
   updateExecutionProgress: (jobId, progress) =>
     set((s) => ({
-      jobs: s.jobs.map((j) =>
-        j.id === jobId ? { ...j, executionProgress: progress } : j
-      ),
+      jobs: s.jobs.map((j) => (j.id === jobId ? { ...j, executionProgress: progress } : j))
     })),
 
   clearExecutionState: (jobId) =>
@@ -169,6 +183,6 @@ export const useCronStore = create<CronStore>((set) => ({
         j.id === jobId
           ? { ...j, executing: false, executionStartedAt: null, executionProgress: null }
           : j
-      ),
-    })),
+      )
+    }))
 }))

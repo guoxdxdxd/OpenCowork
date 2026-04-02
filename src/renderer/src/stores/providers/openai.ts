@@ -199,6 +199,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -223,6 +224,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -247,6 +249,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -271,6 +274,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -295,6 +299,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -319,6 +324,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
@@ -340,16 +346,17 @@ export const openaiPreset: BuiltinProviderPreset = {
         reasoningEffortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
         defaultReasoningEffort: 'medium'
       },
-      responseSummary: 'detailed',
       enablePromptCache: true,
       enableSystemPromptCache: true,
+
       type: 'openai-responses'
     },
     {
-      id: "gpt-5.4",
-      name: "GPT 5.4",
+      id: 'gpt-5.4',
+      name: 'GPT 5.4',
       icon: 'openai',
       enabled: true,
+      serviceTier: 'priority',
       contextLength: 1_050_000,
       maxOutputTokens: 128_000,
       supportsVision: true,
@@ -358,11 +365,11 @@ export const openaiPreset: BuiltinProviderPreset = {
       outputPrice: 15,
       cacheHitPrice: 0.25,
       supportsThinking: true,
+      supportsComputerUse: true,
       thinkingConfig: {
-        bodyParams: {
-
-        },
-        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium'
+        bodyParams: {},
+        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
       },
       responseSummary: 'detailed',
       enablePromptCache: true,
@@ -548,7 +555,13 @@ export const openaiPreset: BuiltinProviderPreset = {
       cacheHitPrice: 0.075
     },
     // Speech & transcription
-    { id: 'gpt-4o-transcribe', name: 'GPT-4o Transcribe', icon: 'openai', enabled: true, category: 'speech' },
+    {
+      id: 'gpt-4o-transcribe',
+      name: 'GPT-4o Transcribe',
+      icon: 'openai',
+      enabled: true,
+      category: 'speech'
+    },
     {
       id: 'gpt-4o-mini-transcribe',
       name: 'GPT-4o Mini Transcribe',
@@ -567,7 +580,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 0.04,
-      outputPrice: 0.08,
+      outputPrice: 0.08
     },
     {
       id: 'dall-e-2',
@@ -579,7 +592,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 0.02,
-      outputPrice: 0.02,
+      outputPrice: 0.02
     },
     {
       id: 'gpt-image-1',
@@ -591,7 +604,7 @@ export const openaiPreset: BuiltinProviderPreset = {
       supportsVision: true,
       supportsFunctionCall: false,
       inputPrice: 0.04,
-      outputPrice: 0.08,
+      outputPrice: 0.08
     }
-  ],
+  ]
 }

@@ -6,7 +6,7 @@ import { useProviderStore } from '@renderer/stores/provider-store'
 import type {
   PluginProviderDescriptor,
   PluginInstance,
-  PluginIncomingEvent,
+  PluginIncomingEvent
 } from '@renderer/lib/channel/types'
 import { IPC } from '@renderer/lib/ipc/channels'
 
@@ -16,15 +16,15 @@ interface ChannelStore {
   selectedChannelId: string | null
   channelStatuses: Record<string, 'running' | 'stopped' | 'error'>
 
-  // Per-session activation (toggled via + menu)
-  activeChannelIds: string[]
+  // Per-project activation (toggled via + menu)
+  activeChannelIdsByProject: Record<string, string[]>
 
   // Init
   loadProviders: () => Promise<void>
   loadChannels: () => Promise<void>
 
   // CRUD
-  addChannel: (type: string, name: string, config: Record<string, string>, systemPrompt?: string) => Promise<string>
+  addChannel: (type: string, name: string, config: Record<string, string>) => Promise<string>
   updateChannel: (id: string, patch: Partial<PluginInstance>) => Promise<void>
   removeChannel: (id: string) => Promise<void>
   toggleChannelEnabled: (id: string) => Promise<void>
@@ -37,9 +37,10 @@ interface ChannelStore {
   // UI
   setSelectedChannel: (id: string | null) => void
 
-  // Per-session activation
-  toggleActiveChannel: (id: string) => void
-  clearActiveChannels: () => void
+  // Per-project activation
+  toggleActiveChannel: (id: string, projectId?: string | null) => void
+  clearActiveChannels: (projectId?: string | null) => void
+  getActiveChannelIds: (projectId?: string | null) => string[]
 
   // Channel sessions
   channelSessions: Record<string, unknown[]>
@@ -72,7 +73,7 @@ export function initChannelEventListener(): void {
     if (data.type === 'status_change') {
       const status = data.data as 'running' | 'stopped' | 'error'
       useChannelStore.setState((s) => ({
-        channelStatuses: { ...s.channelStatuses, [data.pluginId]: status },
+        channelStatuses: { ...s.channelStatuses, [data.pluginId]: status }
       }))
     }
     if (data.type === 'incoming_message') {
@@ -81,7 +82,7 @@ export function initChannelEventListener(): void {
     if (data.type === 'error') {
       console.error(`[Plugin:${data.pluginId}] Error:`, data.data)
       useChannelStore.setState((s) => ({
-        channelStatuses: { ...s.channelStatuses, [data.pluginId]: 'error' },
+        channelStatuses: { ...s.channelStatuses, [data.pluginId]: 'error' }
       }))
     }
   })
@@ -117,9 +118,7 @@ export function initChannelEventListener(): void {
       }
     }
 
-    window.dispatchEvent(
-      new CustomEvent('plugin:auto-reply-task', { detail: task })
-    )
+    window.dispatchEvent(new CustomEvent('plugin:auto-reply-task', { detail: task }))
   })
 }
 
@@ -128,12 +127,14 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   providers: [],
   selectedChannelId: null,
   channelStatuses: {},
-  activeChannelIds: [],
+  activeChannelIdsByProject: {},
   channelSessions: {},
 
   loadProviders: async () => {
     try {
-      const providers = (await ipcClient.invoke(IPC.PLUGIN_LIST_PROVIDERS)) as PluginProviderDescriptor[]
+      const providers = (await ipcClient.invoke(
+        IPC.PLUGIN_LIST_PROVIDERS
+      )) as PluginProviderDescriptor[]
       set({ providers: Array.isArray(providers) ? providers : [] })
     } catch {
       set({ providers: [] })
@@ -144,17 +145,18 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     try {
       const plugins = (await ipcClient.invoke(IPC.PLUGIN_LIST)) as PluginInstance[]
       const arr = Array.isArray(plugins) ? plugins : []
-      console.log(`[ChannelStore] Loaded ${arr.length} plugins:`, arr.map((p) => `${p.type}(${p.id})`))
-      // Auto-activate all enabled plugins
-      const enabledIds = arr.filter((p) => p.enabled).map((p) => p.id)
-      set({ channels: arr, activeChannelIds: enabledIds })
+      console.log(
+        `[ChannelStore] Loaded ${arr.length} plugins:`,
+        arr.map((p) => `${p.type}(${p.id})`)
+      )
+      set({ channels: arr })
     } catch (err) {
       console.error('[ChannelStore] Failed to load plugins:', err)
       set({ channels: [] })
     }
   },
 
-  addChannel: async (type, name, config, systemPrompt) => {
+  addChannel: async (type, name, config) => {
     const id = nanoid()
     const desc = get().providers.find((p) => p.type === type)
     const tools = desc?.tools?.reduce<Record<string, boolean>>((acc, toolName) => {
@@ -166,15 +168,13 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       type,
       name,
       enabled: true,
-      userSystemPrompt: systemPrompt ?? '',
       config,
       createdAt: Date.now(),
-      ...(tools ? { tools } : {}),
+      ...(tools ? { tools } : {})
     }
     await ipcClient.invoke(IPC.PLUGIN_ADD, instance)
     set((s) => ({
-      channels: [...s.channels, instance],
-      activeChannelIds: [...s.activeChannelIds, id],
+      channels: [...s.channels, instance]
     }))
     return id
   },
@@ -193,7 +193,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
           next.model = null
         }
         return next
-      }),
+      })
     }))
 
     if ('providerId' in normalizedPatch || 'model' in normalizedPatch) {
@@ -222,6 +222,21 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         }
       }
     }
+
+    if ('projectId' in normalizedPatch) {
+      const boundProject = normalizedPatch.projectId
+        ? useChatStore.getState().projects.find((project) => project.id === normalizedPatch.projectId)
+        : undefined
+      useChatStore.setState((state) => {
+        for (const session of state.sessions) {
+          if (session.pluginId !== id) continue
+          session.projectId = boundProject?.id
+          session.workingFolder = boundProject?.workingFolder
+          session.sshConnectionId = boundProject?.sshConnectionId
+          delete session.promptSnapshot
+        }
+      })
+    }
   },
 
   removeChannel: async (id) => {
@@ -229,7 +244,12 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     set((s) => ({
       channels: s.channels.filter((p) => p.id !== id),
       selectedChannelId: s.selectedChannelId === id ? null : s.selectedChannelId,
-      activeChannelIds: s.activeChannelIds.filter((pid) => pid !== id),
+      activeChannelIdsByProject: Object.fromEntries(
+        Object.entries(s.activeChannelIdsByProject).map(([projectId, ids]) => [
+          projectId,
+          ids.filter((pid) => pid !== id)
+        ])
+      )
     }))
   },
 
@@ -238,18 +258,15 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     if (!plugin) return
     const enabled = !plugin.enabled
     await get().updateChannel(id, { enabled })
-    if (enabled) {
-      // Auto-activate when enabling
-      set((s) => ({
-        activeChannelIds: s.activeChannelIds.includes(id)
-          ? s.activeChannelIds
-          : [...s.activeChannelIds, id],
-      }))
-    } else {
+    if (!enabled) {
       await get().stopChannel(id)
-      // Deactivate when disabling
       set((s) => ({
-        activeChannelIds: s.activeChannelIds.filter((pid) => pid !== id),
+        activeChannelIdsByProject: Object.fromEntries(
+          Object.entries(s.activeChannelIdsByProject).map(([projectId, ids]) => [
+            projectId,
+            ids.filter((pid) => pid !== id)
+          ])
+        )
       }))
     }
   },
@@ -262,17 +279,17 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       }
       if (!res.success) {
         set((s) => ({
-          channelStatuses: { ...s.channelStatuses, [id]: 'error' },
+          channelStatuses: { ...s.channelStatuses, [id]: 'error' }
         }))
         return res.error ?? 'Unknown error'
       }
       set((s) => ({
-        channelStatuses: { ...s.channelStatuses, [id]: 'running' },
+        channelStatuses: { ...s.channelStatuses, [id]: 'running' }
       }))
       return undefined
     } catch (err) {
       set((s) => ({
-        channelStatuses: { ...s.channelStatuses, [id]: 'error' },
+        channelStatuses: { ...s.channelStatuses, [id]: 'error' }
       }))
       return err instanceof Error ? err.message : String(err)
     }
@@ -282,7 +299,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     try {
       await ipcClient.invoke(IPC.PLUGIN_STOP, id)
       set((s) => ({
-        channelStatuses: { ...s.channelStatuses, [id]: 'stopped' },
+        channelStatuses: { ...s.channelStatuses, [id]: 'stopped' }
       }))
     } catch {
       // ignore
@@ -296,7 +313,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         | 'stopped'
         | 'error'
       set((s) => ({
-        channelStatuses: { ...s.channelStatuses, [id]: status },
+        channelStatuses: { ...s.channelStatuses, [id]: status }
       }))
     } catch {
       // ignore
@@ -305,24 +322,42 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
 
   setSelectedChannel: (id) => set({ selectedChannelId: id }),
 
-  toggleActiveChannel: (id) => {
+  getActiveChannelIds: (projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
+    return get().activeChannelIdsByProject[resolvedProjectId] ?? []
+  },
+
+  toggleActiveChannel: (id, projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
     set((s) => {
-      const isActive = s.activeChannelIds.includes(id)
+      const currentIds = s.activeChannelIdsByProject[resolvedProjectId] ?? []
+      const isActive = currentIds.includes(id)
       return {
-        activeChannelIds: isActive
-          ? s.activeChannelIds.filter((pid) => pid !== id)
-          : [...s.activeChannelIds, id],
+        activeChannelIdsByProject: {
+          ...s.activeChannelIdsByProject,
+          [resolvedProjectId]: isActive
+            ? currentIds.filter((pid) => pid !== id)
+            : [...currentIds, id]
+        }
       }
     })
   },
 
-  clearActiveChannels: () => set({ activeChannelIds: [] }),
+  clearActiveChannels: (projectId) => {
+    const resolvedProjectId = projectId ?? useChatStore.getState().activeProjectId ?? '__global__'
+    set((s) => ({
+      activeChannelIdsByProject: {
+        ...s.activeChannelIdsByProject,
+        [resolvedProjectId]: []
+      }
+    }))
+  },
 
   loadChannelSessions: async (pluginId) => {
     try {
       const sessions = (await ipcClient.invoke(IPC.PLUGIN_SESSIONS_LIST, pluginId)) as unknown[]
       set((s) => ({
-        channelSessions: { ...s.channelSessions, [pluginId]: sessions },
+        channelSessions: { ...s.channelSessions, [pluginId]: sessions }
       }))
     } catch {
       // ignore
@@ -338,8 +373,8 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   },
 
   getActiveChannels: () => {
-    const { channels, activeChannelIds } = get()
+    const { channels } = get()
+    const activeChannelIds = get().getActiveChannelIds()
     return channels.filter((p) => activeChannelIds.includes(p.id))
-  },
+  }
 }))
-

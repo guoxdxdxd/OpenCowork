@@ -1,4 +1,12 @@
-import type { ProviderConfig, TokenUsage } from '../../api/types'
+import type {
+  ProviderConfig,
+  TokenUsage,
+  UnifiedMessage,
+  ToolUseBlock,
+  ImageBlock,
+  ImageErrorCode,
+  ToolCallExtraContent
+} from '../../api/types'
 import type { ToolCallState } from '../types'
 import type { ToolContext } from '../../tools/tool-types'
 
@@ -13,10 +21,16 @@ export interface SubAgentDefinition {
   icon?: string
   /** Focused system prompt for this SubAgent */
   systemPrompt: string
-  /** Names of tools this SubAgent is allowed to use (subset of registered tools) */
-  allowedTools: string[]
-  /** Max LLM iterations before forced stop */
-  maxIterations: number
+  /** Allowed tool names. Supports '*' to expose all currently registered tools. */
+  tools: string[]
+  /** Tools explicitly denied for this SubAgent even when tools='*'. */
+  disallowedTools: string[]
+  /** Max LLM turns before forced stop. <= 0 means unlimited. */
+  maxTurns: number
+  /** Optional initial task prefix appended before runtime input. */
+  initialPrompt?: string
+  /** Whether this agent definition is intended for background execution. */
+  background?: boolean
   /** Optional model override (e.g. use cheaper/faster model) */
   model?: string
   /** Optional temperature override */
@@ -53,8 +67,10 @@ export interface SubAgentRunConfig {
 
 export interface SubAgentResult {
   success: boolean
-  /** Final text output (the SubAgent's last text response) */
+  /** Final text output resolved from the sub-agent's actual assistant messages. */
   output: string
+  /** Whether a non-empty final result was captured. */
+  reportSubmitted?: boolean
   /** Number of tool calls executed */
   toolCallCount: number
   /** Number of LLM iterations */
@@ -68,8 +84,92 @@ export interface SubAgentResult {
 // --- SubAgent Events (yielded to parent/UI) ---
 
 export type SubAgentEvent =
-  | { type: 'sub_agent_start'; subAgentName: string; toolUseId: string; input: Record<string, unknown> }
-  | { type: 'sub_agent_tool_call'; subAgentName: string; toolUseId: string; toolCall: ToolCallState }
+  | {
+      type: 'sub_agent_start'
+      subAgentName: string
+      toolUseId: string
+      input: Record<string, unknown>
+      promptMessage: UnifiedMessage
+    }
+  | {
+      type: 'sub_agent_iteration'
+      subAgentName: string
+      toolUseId: string
+      iteration: number
+      assistantMessage: UnifiedMessage
+    }
   | { type: 'sub_agent_text_delta'; subAgentName: string; toolUseId: string; text: string }
-  | { type: 'sub_agent_iteration'; subAgentName: string; toolUseId: string; iteration: number }
+  | { type: 'sub_agent_thinking_delta'; subAgentName: string; toolUseId: string; thinking: string }
+  | {
+      type: 'sub_agent_thinking_encrypted'
+      subAgentName: string
+      toolUseId: string
+      thinkingEncryptedContent: string
+      thinkingEncryptedProvider: 'anthropic' | 'openai-responses' | 'google'
+    }
+  | {
+      type: 'sub_agent_tool_use_streaming_start'
+      subAgentName: string
+      toolUseId: string
+      toolCallId: string
+      toolName: string
+      toolCallExtraContent?: ToolCallExtraContent
+    }
+  | {
+      type: 'sub_agent_tool_use_args_delta'
+      subAgentName: string
+      toolUseId: string
+      toolCallId: string
+      partialInput: Record<string, unknown>
+    }
+  | {
+      type: 'sub_agent_tool_use_generated'
+      subAgentName: string
+      toolUseId: string
+      toolUseBlock: ToolUseBlock
+    }
+  | {
+      type: 'sub_agent_image_generated'
+      subAgentName: string
+      toolUseId: string
+      imageBlock: ImageBlock
+    }
+  | {
+      type: 'sub_agent_image_error'
+      subAgentName: string
+      toolUseId: string
+      imageError: { code: ImageErrorCode; message: string }
+    }
+  | {
+      type: 'sub_agent_message_end'
+      subAgentName: string
+      toolUseId: string
+      usage?: TokenUsage
+      providerResponseId?: string
+    }
+  | {
+      type: 'sub_agent_tool_result_message'
+      subAgentName: string
+      toolUseId: string
+      message: UnifiedMessage
+    }
+  | {
+      type: 'sub_agent_user_message'
+      subAgentName: string
+      toolUseId: string
+      message: UnifiedMessage
+    }
+  | {
+      type: 'sub_agent_report_update'
+      subAgentName: string
+      toolUseId: string
+      report: string
+      status: 'pending' | 'submitted' | 'retrying' | 'fallback' | 'missing'
+    }
+  | {
+      type: 'sub_agent_tool_call'
+      subAgentName: string
+      toolUseId: string
+      toolCall: ToolCallState
+    }
   | { type: 'sub_agent_end'; subAgentName: string; toolUseId: string; result: SubAgentResult }

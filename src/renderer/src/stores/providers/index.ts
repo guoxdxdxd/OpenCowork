@@ -1,6 +1,6 @@
 export type { BuiltinProviderPreset } from './types'
 
-import { routinAiPreset } from './routin-ai'
+import { routinAiPlanPreset, routinAiPreset } from './routin-ai'
 import { openaiPreset } from './openai'
 import { anthropicPreset } from './anthropic'
 import { googlePreset } from './google'
@@ -15,12 +15,14 @@ import { baiduCodingPreset, baiduPreset } from './baidu'
 import { siliconflowPreset } from './siliconflow'
 import { giteeAiPreset } from './gitee-ai'
 import { codexOAuthPreset } from './codex-oauth'
+import { copilotOAuthPreset } from './copilot-oauth'
 import { xiaomiPreset } from './xiaomi'
 import { bigmodelCodingPreset, bigmodelPreset } from './bigmodel'
 import type { BuiltinProviderPreset } from './types'
 
 export const builtinProviderPresets: BuiltinProviderPreset[] = [
   routinAiPreset,
+  routinAiPlanPreset,
   openaiPreset,
   anthropicPreset,
   googlePreset,
@@ -39,7 +41,8 @@ export const builtinProviderPresets: BuiltinProviderPreset[] = [
   siliconflowPreset,
   giteeAiPreset,
   codexOAuthPreset,
+  copilotOAuthPreset,
   xiaomiPreset,
   bigmodelCodingPreset,
-  bigmodelPreset,
+  bigmodelPreset
 ]

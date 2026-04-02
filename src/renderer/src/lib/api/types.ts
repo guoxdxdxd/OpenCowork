@@ -14,6 +14,8 @@ export interface RequestTiming {
 export interface TokenUsage {
   inputTokens: number
   outputTokens: number
+  /** Normalized non-cached input tokens used for pricing/display when available. */
+  billableInputTokens?: number
   /** Anthropic prompt caching: tokens written to cache */
   cacheCreationTokens?: number
   /** Anthropic prompt caching: tokens read from cache */
@@ -37,7 +39,13 @@ export interface TextBlock {
 
 export interface ImageBlock {
   type: 'image'
-  source: { type: 'base64' | 'url'; mediaType?: string; data?: string; url?: string }
+  source: {
+    type: 'base64' | 'url'
+    mediaType?: string
+    data?: string
+    url?: string
+    filePath?: string
+  }
 }
 
 export type ImageErrorCode = 'timeout' | 'network' | 'request_aborted' | 'api_error' | 'unknown'
@@ -48,11 +56,36 @@ export interface ImageErrorBlock {
   message: string
 }
 
+export type OpenAIComputerActionType =
+  | 'click'
+  | 'double_click'
+  | 'scroll'
+  | 'keypress'
+  | 'type'
+  | 'wait'
+  | 'screenshot'
+
+export interface ToolCallExtraContent {
+  google?: {
+    thought_signature?: string
+  }
+  openaiResponses?: {
+    computerUse?: {
+      kind: 'computer_use'
+      computerCallId: string
+      computerActionType: OpenAIComputerActionType
+      computerActionIndex: number
+      autoAddedScreenshot?: boolean
+    }
+  }
+}
+
 export interface ToolUseBlock {
   type: 'tool_use'
   id: string
   name: string
   input: Record<string, unknown>
+  extraContent?: ToolCallExtraContent
 }
 
 export type ToolResultContent = string | Array<TextBlock | ImageBlock>
@@ -70,7 +103,7 @@ export interface ThinkingBlock {
   /** Provider-issued encrypted/signature payload for reasoning continuity validation */
   encryptedContent?: string
   /** Which provider emitted encryptedContent (used to replay only to compatible APIs) */
-  encryptedContentProvider?: 'anthropic' | 'openai-responses'
+  encryptedContentProvider?: 'anthropic' | 'openai-responses' | 'google'
   startedAt?: number
   completedAt?: number
 }
@@ -91,6 +124,9 @@ export interface RequestDebugInfo {
   headers: Record<string, string>
   body?: string
   timestamp: number
+  providerId?: string
+  providerBuiltinId?: string
+  model?: string
 }
 
 export interface UnifiedMessage {
@@ -100,6 +136,8 @@ export interface UnifiedMessage {
   createdAt: number
   usage?: TokenUsage
   debugInfo?: RequestDebugInfo
+  /** Provider-native response ID for follow-up requests such as OpenAI Responses previous_response_id. */
+  providerResponseId?: string
   /** Optional source marker for non-manual message insertion paths. */
   source?: 'team' | 'queued'
 }
@@ -125,16 +163,18 @@ export interface StreamEvent {
   text?: string
   thinking?: string
   thinkingEncryptedContent?: string
-  thinkingEncryptedProvider?: 'anthropic' | 'openai-responses'
+  thinkingEncryptedProvider?: 'anthropic' | 'openai-responses' | 'google'
   toolCallId?: string
   toolName?: string
   argumentsDelta?: string
   toolCallInput?: Record<string, unknown>
+  toolCallExtraContent?: ToolCallExtraContent
   imageBlock?: ImageBlock
   imageError?: { code: ImageErrorCode; message: string }
   stopReason?: string
   usage?: TokenUsage
   timing?: RequestTiming
+  providerResponseId?: string
   error?: { type: string; message: string }
   debugInfo?: RequestDebugInfo
 }
@@ -164,7 +204,7 @@ export interface ToolDefinition {
 
 // --- Thinking / Reasoning Config ---
 
-export type ReasoningEffortLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type ReasoningEffortLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'
 
 export interface ThinkingConfig {
   /** Extra key-value pairs merged into the request body when thinking is enabled */
@@ -185,10 +225,18 @@ export interface ThinkingConfig {
 
 // --- AI Provider Management ---
 
-export type ProviderType = 'anthropic' | 'openai-chat' | 'openai-responses' | 'openai-images'
+export type ProviderType =
+  | 'anthropic'
+  | 'openai-chat'
+  | 'openai-responses'
+  | 'openai-images'
+  | 'gemini'
+  | 'vertex-ai'
 export type ResponseSummary = 'auto' | 'concise' | 'detailed'
 
 export type AuthMode = 'apiKey' | 'oauth' | 'channel'
+export type OAuthFlowType = 'authorization_code' | 'device_code'
+export type OAuthRequestMode = 'form' | 'json'
 
 export interface OAuthConfig {
   authorizeUrl: string
@@ -196,14 +244,25 @@ export interface OAuthConfig {
   clientId: string
   clientIdLocked?: boolean
   scope?: string
+  flowType?: OAuthFlowType
+  /** Base GitHub / OAuth host, used to derive endpoints when individual URLs are not overridden */
+  host?: string
+  /** API host used for token exchange endpoints (e.g. https://api.github.com or GHE api/v3) */
+  apiHost?: string
+  /** Device code endpoint for OAuth device flow */
+  deviceCodeUrl?: string
+  /** Copilot / provider-specific token exchange endpoint used after OAuth login */
+  tokenExchangeUrl?: string
   /** Use system proxy for OAuth token exchanges */
   useSystemProxy?: boolean
   includeScopeInTokenRequest?: boolean
-  tokenRequestMode?: 'form' | 'json'
+  tokenRequestMode?: OAuthRequestMode
   tokenRequestHeaders?: Record<string, string>
-  refreshRequestMode?: 'form' | 'json'
+  refreshRequestMode?: OAuthRequestMode
   refreshRequestHeaders?: Record<string, string>
   refreshScope?: string
+  deviceCodeRequestMode?: OAuthRequestMode
+  deviceCodeRequestHeaders?: Record<string, string>
   redirectPath?: string
   redirectPort?: number
   extraParams?: Record<string, string>
@@ -217,6 +276,15 @@ export interface OAuthToken {
   scope?: string
   tokenType?: string
   accountId?: string
+  idToken?: string
+  copilotAccessToken?: string
+  copilotTokenType?: string
+  copilotExpiresAt?: number
+  copilotRefreshAt?: number
+  copilotApiUrl?: string
+  copilotChatEnabled?: boolean
+  copilotSku?: string
+  copilotTelemetry?: string
 }
 
 export interface ChannelConfig {
@@ -251,6 +319,10 @@ export interface AIModelConfig {
   /** Icon key for model-level icon (e.g. 'openai', 'claude', 'gemini', 'deepseek') */
   icon?: string
   contextLength?: number
+  /** Allow context compression to use the model's full configured context length when it exceeds 200K */
+  enableExtendedContextCompression?: boolean
+  /** Full context compression trigger ratio, clamped to 0.3 ~ 0.9 */
+  contextCompressionThreshold?: number
   maxOutputTokens?: number
   /** Price per million input tokens (USD) */
   inputPrice?: number
@@ -260,22 +332,32 @@ export interface AIModelConfig {
   cacheCreationPrice?: number
   /** Price per million tokens for cache hit/read (USD) */
   cacheHitPrice?: number
+  /** GitHub Copilot premium request multiplier */
+  premiumRequestMultiplier?: number
+  /** Plans that commonly expose this model in Copilot */
+  availablePlans?: string[]
   /** Whether the model supports image/vision input */
   supportsVision?: boolean
   /** Whether the model supports function/tool calling */
   supportsFunctionCall?: boolean
   /** Whether the model supports toggleable thinking/reasoning mode */
   supportsThinking?: boolean
+  /** Whether the model supports OpenAI Computer Use via the Responses API */
+  supportsComputerUse?: boolean
+  /** Whether Computer Use is enabled for this model */
+  enableComputerUse?: boolean
   /** Configuration describing how to enable thinking for this model */
   thinkingConfig?: ThinkingConfig
   /** OpenAI Responses: summary of reasoning (auto/concise/detailed) */
   responseSummary?: ResponseSummary
-  /** OpenAI Responses: enable prompt caching with session-based key */
+  /** OpenAI-compatible endpoints: enable prompt caching with the app-global cache key */
   enablePromptCache?: boolean
   /** Anthropic: enable system prompt caching */
   enableSystemPromptCache?: boolean
   /** Optional request overrides applied only to this model */
   requestOverrides?: RequestOverrides
+  /** OpenAI-compatible service tier (e.g. priority). Effective when fast mode is enabled. */
+  serviceTier?: 'priority'
 }
 
 export interface RequestOverrides {
@@ -335,6 +417,7 @@ export interface ProviderConfig {
   apiKey: string
   baseUrl?: string
   model: string
+  category?: ModelCategory
   /** Provider ID (used for quota tracking and UI bindings) */
   providerId?: string
   /** Built-in provider ID (for preset-based mapping) */
@@ -354,12 +437,14 @@ export interface ProviderConfig {
   thinkingConfig?: ThinkingConfig
   /** Selected reasoning effort level (when model supports reasoningEffortLevels) */
   reasoningEffort?: ReasoningEffortLevel
-  /** Current session ID — used for prompt_cache_key on OpenAI endpoints */
+  /** Current session ID — used for request correlation and Responses transport continuity */
   sessionId?: string
   /** OpenAI Responses: summary of reasoning (auto/concise/detailed) */
   responseSummary?: ResponseSummary
   /** OpenAI Responses: enable prompt caching with session-based key */
   enablePromptCache?: boolean
+  /** Whether OpenAI Computer Use should be enabled for this request */
+  computerUseEnabled?: boolean
   /** Anthropic: enable system prompt caching */
   enableSystemPromptCache?: boolean
   /** Custom User-Agent header (e.g. Moonshot套餐 requires 'RooCode/3.48.0') */

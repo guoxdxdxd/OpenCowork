@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import {
   Settings,
   BrainCircuit,
+  BarChart3,
   Info,
   Server,
-  MessageSquare,
   Cable,
   Loader2,
   Github,
@@ -15,23 +15,24 @@ import {
   HardDriveUpload,
   Trash2,
   Globe,
+  ArrowRightLeft,
   Wand2,
   BookOpen,
   Save,
   RefreshCw,
-  Puzzle
+  Puzzle,
+  PanelLeftOpen
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { AnimatePresence } from 'motion/react'
 import { useUIStore, type SettingsTab } from '@renderer/stores/ui-store'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
-import { formatTokens } from '@renderer/lib/format-tokens'
-import { useDebouncedTokens } from '@renderer/hooks/use-estimated-tokens'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { Button } from '@renderer/components/ui/button'
+import { Badge } from '@renderer/components/ui/badge'
 import { Input } from '@renderer/components/ui/input'
 import { Textarea } from '@renderer/components/ui/textarea'
 import { Separator } from '@renderer/components/ui/separator'
@@ -47,20 +48,67 @@ import {
   SelectValue
 } from '@renderer/components/ui/select'
 import { FadeIn, SlideIn } from '@renderer/components/animate-ui'
-import { useProviderStore } from '@renderer/stores/provider-store'
-import { ProviderPanel } from './ProviderPanel'
+import {
+  isProviderAvailableForModelSelection,
+  useProviderStore
+} from '@renderer/stores/provider-store'
+import { ModelManagementPanel, ProviderPanel } from './ProviderPanel'
 import { ChannelPanel } from './PluginPanel'
 import { AppPluginPanel } from './AppPluginPanel'
 import { McpPanel } from './McpPanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { SkillsMarketPanel } from './SkillsMarketPanel'
+import { AnalyticsOverview } from './AnalyticsOverview'
+import { MigrationPanel } from './MigrationPanel'
 import { ModelIcon, ProviderIcon } from './provider-icons'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
-import { readTextFile, resolveGlobalMemoryPath } from '@renderer/lib/agent/memory-files'
+import {
+  joinFsPath,
+  readTextFile,
+  resolveGlobalMemoryHomePath
+} from '@renderer/lib/agent/memory-files'
 import packageJson from '../../../../../package.json'
+import {
+  getUsageByModel,
+  getUsageByProvider,
+  getUsageDaily,
+  getUsageOverview,
+  getUsageTimeline,
+  listUsageEvents,
+  type UsageTimelineBucket
+} from '@renderer/lib/usage-analytics'
 
-const DEFAULT_GLOBAL_MEMORY_TEMPLATE = `# MEMORY.md
+const DEFAULT_GLOBAL_MEMORY_TEMPLATES = {
+  soul: `# SOUL.md
+
+This file defines your long-term identity, style, and behavior boundaries across OpenCowork sessions.
+
+## Core Truths
+- Be genuinely helpful, not performatively helpful
+- Be direct, grounded, and competent
+- Be resourceful before asking
+
+## Boundaries
+- Keep private things private
+- Ask before external or destructive actions
+- System and product safety rules outrank this file
+`,
+  user: `# USER.md
+
+This file captures durable user preferences and collaboration style.
+
+## Profile
+- Name:
+- What to call them:
+- Timezone:
+
+## Preferences
+- Preferred language:
+- Preferred answer style:
+- Things to avoid:
+`,
+  memory: `# MEMORY.md
 
 This file stores global durable memory shared across OpenCowork sessions.
 
@@ -76,7 +124,97 @@ This file stores global durable memory shared across OpenCowork sessions.
 ## Do Not Store
 - Secrets, API keys, credentials
 - Temporary debugging notes or one-off task context
+`,
+  daily: `# Daily Memory
+
+Use this file for short-term notes for today.
+
+- Decisions made today
+- Temporary context worth carrying into the next session
+- Follow-ups to review later and distill into MEMORY.md
 `
+} as const
+
+type GlobalMemoryTabId = keyof typeof DEFAULT_GLOBAL_MEMORY_TEMPLATES
+
+type GlobalMemoryFileState = {
+  id: GlobalMemoryTabId
+  titleKey: string
+  descriptionKey: string
+  filename: string
+  path: string
+  savedContent: string
+  draftContent: string
+  missingFile: boolean
+  lastSavedAt: number | null
+}
+
+const GLOBAL_MEMORY_FILE_META: Record<
+  GlobalMemoryTabId,
+  Pick<GlobalMemoryFileState, 'id' | 'titleKey' | 'descriptionKey'>
+> = {
+  soul: {
+    id: 'soul',
+    titleKey: 'memory.tabs.soul',
+    descriptionKey: 'memory.tabDescriptions.soul'
+  },
+  user: {
+    id: 'user',
+    titleKey: 'memory.tabs.user',
+    descriptionKey: 'memory.tabDescriptions.user'
+  },
+  memory: {
+    id: 'memory',
+    titleKey: 'memory.tabs.memory',
+    descriptionKey: 'memory.tabDescriptions.memory'
+  },
+  daily: {
+    id: 'daily',
+    titleKey: 'memory.tabs.daily',
+    descriptionKey: 'memory.tabDescriptions.daily'
+  }
+}
+
+function createInitialGlobalMemoryFiles(): Record<GlobalMemoryTabId, GlobalMemoryFileState> {
+  return {
+    soul: {
+      ...GLOBAL_MEMORY_FILE_META.soul,
+      filename: 'SOUL.md',
+      path: '',
+      savedContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.soul,
+      draftContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.soul,
+      missingFile: true,
+      lastSavedAt: null
+    },
+    user: {
+      ...GLOBAL_MEMORY_FILE_META.user,
+      filename: 'USER.md',
+      path: '',
+      savedContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.user,
+      draftContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.user,
+      missingFile: true,
+      lastSavedAt: null
+    },
+    memory: {
+      ...GLOBAL_MEMORY_FILE_META.memory,
+      filename: 'MEMORY.md',
+      path: '',
+      savedContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.memory,
+      draftContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.memory,
+      missingFile: true,
+      lastSavedAt: null
+    },
+    daily: {
+      ...GLOBAL_MEMORY_FILE_META.daily,
+      filename: '',
+      path: '',
+      savedContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.daily,
+      draftContent: DEFAULT_GLOBAL_MEMORY_TEMPLATES.daily,
+      missingFile: true,
+      lastSavedAt: null
+    }
+  }
+}
 
 function isMissingFileError(error: string): boolean {
   return error.includes('ENOENT')
@@ -143,6 +281,18 @@ const menuGroupDefs: Array<{
         icon: <BookOpen className="size-4" />,
         labelKey: 'memory.title',
         descKey: 'memory.subtitle'
+      },
+      {
+        id: 'analytics',
+        icon: <BarChart3 className="size-4" />,
+        labelKey: 'analytics.title',
+        descKey: 'analytics.subtitle'
+      },
+      {
+        id: 'migration',
+        icon: <ArrowRightLeft className="size-4" />,
+        labelKey: 'migration.title',
+        descKey: 'migration.subtitle'
       }
     ]
   },
@@ -154,6 +304,12 @@ const menuGroupDefs: Array<{
         icon: <Server className="size-4" />,
         labelKey: 'provider.title',
         descKey: 'provider.subtitle'
+      },
+      {
+        id: 'modelManagement',
+        icon: <Layers className="size-4" />,
+        labelKey: 'provider.modelManagement',
+        descKey: 'provider.modelManagementDesc'
       },
       {
         id: 'model',
@@ -171,12 +327,6 @@ const menuGroupDefs: Array<{
         icon: <Puzzle className="size-4" />,
         labelKey: 'plugin.title',
         descKey: 'plugin.subtitle'
-      },
-      {
-        id: 'channel',
-        icon: <MessageSquare className="size-4" />,
-        labelKey: 'channel.title',
-        descKey: 'channel.subtitle'
       },
       {
         id: 'mcp',
@@ -217,7 +367,6 @@ function GeneralPanel(): React.JSX.Element {
   const { t } = useTranslation('settings')
   const settings = useSettingsStore()
   const { setTheme } = useTheme()
-  const promptTokens = useDebouncedTokens(settings.systemPrompt)
   const currentVersion = normalizeVersion(packageJson.version ?? '0.0.0')
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
@@ -285,8 +434,12 @@ function GeneralPanel(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    if (!settings.autoUpdateEnabled) {
+      return
+    }
+
     void checkForUpdates()
-  }, [checkForUpdates])
+  }, [checkForUpdates, settings.autoUpdateEnabled])
 
   const updateAvailable = isNewerVersion(latestVersion, currentVersion)
 
@@ -426,6 +579,16 @@ function GeneralPanel(): React.JSX.Element {
             {latestVersion && <> · Latest v{latestVersion}</>}
           </span>
         </div>
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+          <div>
+            <label className="text-sm font-medium">{t('general.autoUpdate')}</label>
+            <p className="text-xs text-muted-foreground">{t('general.autoUpdateDesc')}</p>
+          </div>
+          <Switch
+            checked={settings.autoUpdateEnabled}
+            onCheckedChange={(checked) => settings.updateSettings({ autoUpdateEnabled: checked })}
+          />
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
@@ -474,6 +637,34 @@ function GeneralPanel(): React.JSX.Element {
           </p>
         )}
       </section>
+
+      {/* Network */}
+      <section className="space-y-3">
+        <div>
+          <label className="text-sm font-medium">{t('general.systemProxy')}</label>
+          <p className="text-xs text-muted-foreground">{t('general.systemProxyDesc')}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            type="text"
+            value={settings.systemProxyUrl}
+            onChange={(e) => settings.updateSettings({ systemProxyUrl: e.target.value })}
+            placeholder="http://127.0.0.1:7890"
+            className="max-w-lg text-xs"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => settings.updateSettings({ systemProxyUrl: '' })}
+          >
+            {t('general.appearance.reset')}
+          </Button>
+        </div>
+      </section>
+
+      <Separator />
 
       {/* Theme */}
       <section className="space-y-3">
@@ -603,6 +794,42 @@ function GeneralPanel(): React.JSX.Element {
 
       <Separator />
 
+      {/* Animation */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">{t('general.animations')}</label>
+            <p className="text-xs text-muted-foreground">{t('general.animationsDesc')}</p>
+          </div>
+          <Switch
+            checked={settings.animationsEnabled}
+            onCheckedChange={(checked) => settings.updateSettings({ animationsEnabled: checked })}
+          />
+        </div>
+      </section>
+
+      <Separator />
+
+      {/* Toolbar Default Collapse */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">{t('general.toolbarCollapsedByDefault')}</label>
+            <p className="text-xs text-muted-foreground">
+              {t('general.toolbarCollapsedByDefaultDesc')}
+            </p>
+          </div>
+          <Switch
+            checked={settings.toolbarCollapsedByDefault}
+            onCheckedChange={(checked) =>
+              settings.updateSettings({ toolbarCollapsedByDefault: checked })
+            }
+          />
+        </div>
+      </section>
+
+      <Separator />
+
       {/* Language */}
       <section className="space-y-3">
         <div>
@@ -629,26 +856,28 @@ function GeneralPanel(): React.JSX.Element {
 
       <Separator />
 
-      {/* System Prompt */}
+      {/* Tool Result Format */}
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <label className="text-sm font-medium">{t('general.systemPrompt')}</label>
-            <p className="text-xs text-muted-foreground">{t('general.systemPromptDesc')}</p>
-          </div>
-          {settings.systemPrompt && (
-            <span className="text-[10px] text-muted-foreground/50 tabular-nums">
-              {promptTokens > 0 ? `~${formatTokens(promptTokens)} tokens` : ''}
-            </span>
-          )}
+        <div>
+          <label className="text-sm font-medium">{t('general.toolResultFormat')}</label>
+          <p className="text-xs text-muted-foreground">{t('general.toolResultFormatDesc')}</p>
         </div>
-        <Textarea
-          placeholder={t('general.systemPromptPlaceholder')}
-          value={settings.systemPrompt}
-          onChange={(e) => settings.updateSettings({ systemPrompt: e.target.value })}
-          rows={4}
-          className="max-w-lg"
-        />
+        <Select
+          value={settings.toolResultFormat}
+          onValueChange={(v: 'toon' | 'json') => settings.updateSettings({ toolResultFormat: v })}
+        >
+          <SelectTrigger className="w-60 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="toon" className="text-xs">
+              {t('general.toolResultFormatToon')}
+            </SelectItem>
+            <SelectItem value="json" className="text-xs">
+              {t('general.toolResultFormatJson')}
+            </SelectItem>
+          </SelectContent>
+        </Select>
       </section>
 
       <Separator />
@@ -691,6 +920,82 @@ function GeneralPanel(): React.JSX.Element {
             {t('general.contextCompressionEnabled')}
           </p>
         )}
+      </section>
+
+      <Separator />
+
+      {/* Editor Workspace */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">{t('general.editorWorkspace')}</label>
+            <p className="text-xs text-muted-foreground">{t('general.editorWorkspaceDesc')}</p>
+          </div>
+          <Switch
+            checked={settings.editorWorkspaceEnabled}
+            onCheckedChange={(checked) =>
+              settings.updateSettings({
+                editorWorkspaceEnabled: checked,
+                editorRemoteLanguageServiceEnabled: checked
+                  ? settings.editorRemoteLanguageServiceEnabled
+                  : false
+              })
+            }
+          />
+        </div>
+        {settings.editorWorkspaceEnabled && (
+          <p className="text-xs text-muted-foreground/70">{t('general.editorWorkspaceEnabled')}</p>
+        )}
+      </section>
+
+      <Separator />
+
+      {/* Remote Language Service */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">
+              {t('general.editorRemoteLanguageService')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t('general.editorRemoteLanguageServiceDesc')}
+            </p>
+          </div>
+          <Switch
+            checked={settings.editorRemoteLanguageServiceEnabled}
+            disabled={!settings.editorWorkspaceEnabled}
+            onCheckedChange={(checked) =>
+              settings.updateSettings({ editorRemoteLanguageServiceEnabled: checked })
+            }
+          />
+        </div>
+        {settings.editorRemoteLanguageServiceEnabled && settings.editorWorkspaceEnabled && (
+          <p className="text-xs text-muted-foreground/70">
+            {t('general.editorRemoteLanguageServiceEnabled')}
+          </p>
+        )}
+      </section>
+
+      <Separator />
+
+      {/* Clarify Auto Accept Recommended */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">
+              {t('general.clarifyAutoAcceptRecommended')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t('general.clarifyAutoAcceptRecommendedDesc')}
+            </p>
+          </div>
+          <Switch
+            checked={settings.clarifyAutoAcceptRecommended}
+            onCheckedChange={(checked) =>
+              settings.updateSettings({ clarifyAutoAcceptRecommended: checked })
+            }
+          />
+        </div>
       </section>
 
       <Separator />
@@ -807,11 +1112,13 @@ function GeneralPanel(): React.JSX.Element {
               fastModel: 'claude-3-5-haiku-20241022',
               maxTokens: 32000,
               temperature: 0.7,
-              systemPrompt: '',
               theme: 'system',
               backgroundColor: '',
               fontFamily: '',
               fontSize: 16,
+              animationsEnabled: true,
+              toolbarCollapsedByDefault: false,
+              autoUpdateEnabled: true,
               apiKey: currentKey
             })
             setTheme('system')
@@ -827,58 +1134,119 @@ function GeneralPanel(): React.JSX.Element {
 
 function MemoryPanel(): React.JSX.Element {
   const { t } = useTranslation('settings')
-  const [memoryPath, setMemoryPath] = useState('')
-  const [savedContent, setSavedContent] = useState('')
-  const [draftContent, setDraftContent] = useState('')
+  const [memoryRootPath, setMemoryRootPath] = useState('')
+  const [activeTab, setActiveTab] = useState<GlobalMemoryTabId>('soul')
+  const [files, setFiles] = useState<Record<GlobalMemoryTabId, GlobalMemoryFileState>>(
+    createInitialGlobalMemoryFiles
+  )
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [missingFile, setMissingFile] = useState(false)
-  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
 
-  const hasUnsavedChanges = draftContent !== savedContent
+  const activeFile = files[activeTab]
+  const hasUnsavedChanges = activeFile.draftContent !== activeFile.savedContent
+  const canSave = activeFile.missingFile || hasUnsavedChanges
 
-  const loadGlobalMemory = useCallback(async () => {
+  const loadGlobalMemoryFiles = async (): Promise<void> => {
     setLoading(true)
     try {
-      const path = await resolveGlobalMemoryPath(ipcClient)
-      if (!path) {
+      const rootPath = await resolveGlobalMemoryHomePath(ipcClient)
+      if (!rootPath) {
         toast.error(t('memory.resolvePathFailed'))
-        setMemoryPath('')
-        setSavedContent('')
-        setDraftContent('')
-        setMissingFile(true)
+        setMemoryRootPath('')
         return
       }
 
-      setMemoryPath(path)
-      const { content, error } = await readTextFile(ipcClient, path)
-      if (error) {
-        if (isMissingFileError(error)) {
-          setSavedContent(DEFAULT_GLOBAL_MEMORY_TEMPLATE)
-          setDraftContent(DEFAULT_GLOBAL_MEMORY_TEMPLATE)
-          setMissingFile(true)
-          return
+      const today = new Date().toISOString().slice(0, 10)
+      const descriptors = {
+        soul: { filename: 'SOUL.md', path: joinFsPath(rootPath, 'SOUL.md') },
+        user: { filename: 'USER.md', path: joinFsPath(rootPath, 'USER.md') },
+        memory: { filename: 'MEMORY.md', path: joinFsPath(rootPath, 'MEMORY.md') },
+        daily: {
+          filename: `memory/${today}.md`,
+          path: joinFsPath(rootPath, 'memory', `${today}.md`)
         }
+      } as const
 
-        toast.error(t('memory.loadFailed', { error }))
-        return
-      }
+      setMemoryRootPath(rootPath)
 
-      const normalized = content ?? ''
-      setSavedContent(normalized)
-      setDraftContent(normalized)
-      setMissingFile(false)
+      const nextEntries = await Promise.all(
+        (Object.keys(descriptors) as GlobalMemoryTabId[]).map(async (id) => {
+          const descriptor = descriptors[id]
+          const { content, error } = await readTextFile(ipcClient, descriptor.path)
+
+          if (error && !isMissingFileError(error)) {
+            throw new Error(`${descriptor.filename}: ${error}`)
+          }
+
+          const normalized =
+            error && isMissingFileError(error)
+              ? DEFAULT_GLOBAL_MEMORY_TEMPLATES[id]
+              : (content ?? '')
+
+          return [
+            id,
+            {
+              ...GLOBAL_MEMORY_FILE_META[id],
+              filename: descriptor.filename,
+              path: descriptor.path,
+              savedContent: normalized,
+              draftContent: normalized,
+              missingFile: Boolean(error && isMissingFileError(error)),
+              lastSavedAt: null
+            }
+          ] as const
+        })
+      )
+
+      setFiles((prev) => {
+        const updated = { ...prev }
+        for (const [id, entry] of nextEntries) {
+          updated[id] = {
+            ...entry,
+            lastSavedAt: prev[id].lastSavedAt
+          }
+        }
+        return updated
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error(t('memory.loadFailed', { error: message }))
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }
 
   useEffect(() => {
-    void loadGlobalMemory()
-  }, [loadGlobalMemory])
+    void loadGlobalMemoryFiles()
+    // Only auto-load once when the panel mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const updateDraft = useCallback(
+    (value: string) => {
+      setFiles((prev) => ({
+        ...prev,
+        [activeTab]: {
+          ...prev[activeTab],
+          draftContent: value
+        }
+      }))
+    },
+    [activeTab]
+  )
+
+  const handleReset = useCallback(() => {
+    setFiles((prev) => ({
+      ...prev,
+      [activeTab]: {
+        ...prev[activeTab],
+        draftContent: prev[activeTab].savedContent
+      }
+    }))
+  }, [activeTab])
 
   const handleSave = useCallback(async () => {
-    if (!memoryPath) {
+    if (!activeFile.path) {
       toast.error(t('memory.resolvePathFailed'))
       return
     }
@@ -886,26 +1254,32 @@ function MemoryPanel(): React.JSX.Element {
     setSaving(true)
     try {
       const result = await ipcClient.invoke(IPC.FS_WRITE_FILE, {
-        path: memoryPath,
-        content: draftContent
+        path: activeFile.path,
+        content: activeFile.draftContent
       })
       const error = getIpcError(result)
       if (error) {
-        toast.error(t('memory.saveFailed', { error }))
+        toast.error(t('memory.saveFailed', { file: activeFile.filename, error }))
         return
       }
 
-      setSavedContent(draftContent)
-      setMissingFile(false)
-      setLastSavedAt(Date.now())
-      toast.success(t('memory.saved'))
+      setFiles((prev) => ({
+        ...prev,
+        [activeTab]: {
+          ...prev[activeTab],
+          savedContent: prev[activeTab].draftContent,
+          missingFile: false,
+          lastSavedAt: Date.now()
+        }
+      }))
+      toast.success(t('memory.saved', { file: activeFile.filename }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      toast.error(t('memory.saveFailed', { error: message }))
+      toast.error(t('memory.saveFailed', { file: activeFile.filename, error: message }))
     } finally {
       setSaving(false)
     }
-  }, [draftContent, memoryPath, t])
+  }, [activeFile.draftContent, activeFile.filename, activeFile.path, activeTab, t])
 
   return (
     <div className="space-y-8">
@@ -917,71 +1291,104 @@ function MemoryPanel(): React.JSX.Element {
       <section className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="space-y-1">
-            <p className="text-sm font-medium">{t('memory.pathLabel')}</p>
+            <p className="text-sm font-medium">{t('memory.rootPathLabel')}</p>
             <p className="break-all text-xs text-muted-foreground">
-              {memoryPath || t('memory.pathUnavailable')}
+              {memoryRootPath || t('memory.pathUnavailable')}
             </p>
           </div>
           <Button
             variant="outline"
             size="sm"
             className="h-8 text-xs"
-            onClick={() => void loadGlobalMemory()}
+            onClick={() => void loadGlobalMemoryFiles()}
             disabled={loading || saving}
           >
             <RefreshCw className={`mr-1.5 size-3.5 ${loading ? 'animate-spin' : ''}`} />
             {t('memory.reloadAction')}
           </Button>
         </div>
-        {missingFile && (
-          <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
-            {t('memory.missingFileHint')}
-          </p>
-        )}
         <p className="text-xs text-muted-foreground">{t('memory.effectiveHint')}</p>
       </section>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <label className="text-sm font-medium">{t('memory.editorLabel')}</label>
-          <span className="text-[11px] text-muted-foreground">
-            {hasUnsavedChanges
-              ? t('memory.unsavedChanges')
-              : lastSavedAt
-                ? t('memory.lastSavedAt', { time: new Date(lastSavedAt).toLocaleString() })
-                : t('memory.upToDate')}
-          </span>
+      <section className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          {(Object.keys(files) as GlobalMemoryTabId[]).map((id) => {
+            const entry = files[id]
+            const isActive = activeTab === id
+            return (
+              <Button
+                key={id}
+                type="button"
+                size="sm"
+                variant={isActive ? 'default' : 'outline'}
+                className="h-8 text-xs"
+                onClick={() => setActiveTab(id)}
+              >
+                {t(entry.titleKey)}
+              </Button>
+            )
+          })}
         </div>
-        <Textarea
-          value={draftContent}
-          onChange={(e) => setDraftContent(e.target.value)}
-          placeholder={t('memory.editorPlaceholder')}
-          rows={20}
-          className="min-h-[420px] font-mono text-xs leading-5"
-        />
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => void handleSave()}
-            disabled={saving || loading || !hasUnsavedChanges}
-          >
-            {saving ? (
-              <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-            ) : (
-              <Save className="mr-1.5 size-3.5" />
-            )}
-            {saving ? t('memory.savingAction') : t('memory.saveAction')}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => setDraftContent(savedContent)}
-            disabled={saving || loading || !hasUnsavedChanges}
-          >
-            {t('memory.resetAction')}
-          </Button>
+
+        <div className="rounded-lg border border-border/60 bg-background/60 p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">{t(activeFile.titleKey)}</label>
+              <p className="text-xs text-muted-foreground">{t(activeFile.descriptionKey)}</p>
+              <p className="break-all text-[11px] text-muted-foreground">
+                {activeFile.path || t('memory.pathUnavailable')}
+              </p>
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              {hasUnsavedChanges
+                ? t('memory.unsavedChanges')
+                : activeFile.lastSavedAt
+                  ? t('memory.lastSavedAt', {
+                      time: new Date(activeFile.lastSavedAt).toLocaleString()
+                    })
+                  : t('memory.upToDate')}
+            </span>
+          </div>
+
+          {activeFile.missingFile && (
+            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+              {t('memory.missingFileHint', { file: activeFile.filename })}
+            </p>
+          )}
+
+          <Textarea
+            value={activeFile.draftContent}
+            onChange={(e) => updateDraft(e.target.value)}
+            placeholder={t('memory.editorPlaceholder', {
+              file: activeFile.filename || t(activeFile.titleKey)
+            })}
+            rows={20}
+            className="min-h-[420px] font-mono text-xs leading-5"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => void handleSave()}
+              disabled={saving || loading || !canSave}
+            >
+              {saving ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <Save className="mr-1.5 size-3.5" />
+              )}
+              {saving ? t('memory.savingAction') : t('memory.saveAction')}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={handleReset}
+              disabled={saving || loading || !hasUnsavedChanges}
+            >
+              {t('memory.resetAction')}
+            </Button>
+          </div>
         </div>
       </section>
     </div>
@@ -990,10 +1397,436 @@ function MemoryPanel(): React.JSX.Element {
 
 // ─── Model Configuration Panel ───
 
+function AnalyticsPanel(): React.JSX.Element {
+  const { t, i18n } = useTranslation('settings')
+  const [rangeDays, setRangeDays] = useState<1 | 7 | 30>(7)
+  const [loading, setLoading] = useState(true)
+  const [selectedProviderId, setSelectedProviderId] = useState<string>('__all__')
+  const [selectedModelId, setSelectedModelId] = useState<string>('__all__')
+  const [selectedSourceKind, setSelectedSourceKind] = useState<string>('__all__')
+  const [overview, setOverview] = useState<Awaited<ReturnType<typeof getUsageOverview>> | null>(
+    null
+  )
+  const [timeline, setTimeline] = useState<Record<string, unknown>[]>([])
+  const [daily, setDaily] = useState<Record<string, unknown>[]>([])
+  const [models, setModels] = useState<Record<string, unknown>[]>([])
+  const [providers, setProviders] = useState<Record<string, unknown>[]>([])
+  const [details, setDetails] = useState<Record<string, unknown>[]>([])
+
+  const providerOptions = useMemo(
+    () =>
+      useProviderStore
+        .getState()
+        .providers.filter((provider) => provider.enabled)
+        .map((provider) => ({ id: provider.id, name: provider.name })),
+    []
+  )
+  const modelOptions = useMemo(
+    () =>
+      useProviderStore.getState().providers.flatMap((provider) =>
+        provider.models.map((model) => ({
+          id: model.id,
+          name: model.name,
+          providerId: provider.id
+        }))
+      ),
+    []
+  )
+  const sourceOptions = ['chat', 'agent', 'cron', 'plugin', 'draw', 'translate', 'team']
+  const timelineBucket: UsageTimelineBucket = rangeDays === 1 ? 'hour' : 'day'
+
+  const query = useMemo(() => {
+    const to = Date.now()
+    const fromDate = new Date(to)
+
+    if (rangeDays === 1) {
+      fromDate.setMinutes(0, 0, 0)
+      fromDate.setHours(fromDate.getHours() - 23)
+    } else {
+      fromDate.setHours(0, 0, 0, 0)
+      fromDate.setDate(fromDate.getDate() - (rangeDays - 1))
+    }
+
+    return {
+      from: fromDate.getTime(),
+      to,
+      limit: 50,
+      offset: 0,
+      providerId: selectedProviderId === '__all__' ? null : selectedProviderId,
+      modelId: selectedModelId === '__all__' ? null : selectedModelId,
+      sourceKind: selectedSourceKind === '__all__' ? null : selectedSourceKind
+    }
+  }, [rangeDays, selectedModelId, selectedProviderId, selectedSourceKind])
+
+  useEffect(() => {
+    let cancelled = false
+    const run = async (): Promise<void> => {
+      setLoading(true)
+      try {
+        const [nextOverview, nextTimeline, nextDaily, nextModels, nextProviders, nextDetails] =
+          await Promise.all([
+            getUsageOverview(query),
+            getUsageTimeline(query, timelineBucket),
+            getUsageDaily(query),
+            getUsageByModel(query),
+            getUsageByProvider(query),
+            listUsageEvents(query)
+          ])
+        if (cancelled) return
+        setOverview(nextOverview)
+        setTimeline(nextTimeline)
+        setDaily(nextDaily)
+        setModels(nextModels)
+        setProviders(nextProviders)
+        setDetails(nextDetails)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [query, timelineBucket])
+
+  const tokenLocale = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en-US'
+  const inputTokenLabel = t('analytics.billableInputTokens', {
+    defaultValue: tokenLocale === 'zh-CN' ? '计费输入 Token' : 'Billable Input Tokens'
+  })
+  const fmtInt = (value: unknown): string =>
+    new Intl.NumberFormat(tokenLocale).format(
+      typeof value === 'number' ? value : Number(value ?? 0)
+    )
+  const fmtTokenCompact = (value: unknown): string => {
+    const number = typeof value === 'number' ? value : Number(value ?? 0)
+    if (!Number.isFinite(number)) return '0'
+    return new Intl.NumberFormat(tokenLocale, {
+      notation: 'compact',
+      compactDisplay: 'short',
+      maximumFractionDigits: number >= 100000 ? 1 : 2
+    }).format(Math.max(0, number))
+  }
+  const getEffectiveInputTokens = (row: Record<string, unknown>): number => {
+    const billable = Number(row.billable_input_tokens ?? Number.NaN)
+    if (Number.isFinite(billable)) return Math.max(0, billable)
+    const input = Number(row.input_tokens ?? 0)
+    const cacheRead = Number(row.cache_read_tokens ?? 0)
+    return row.request_type === 'openai-responses' ? Math.max(0, input - cacheRead) : input
+  }
+  const renderTokenValue = (value: unknown, showRaw = false): React.JSX.Element => {
+    const compact = fmtTokenCompact(value)
+    const raw = fmtInt(value)
+    const shouldShowRaw = showRaw && compact !== raw
+    return (
+      <span title={`${raw} Token`} className="inline-flex flex-col tabular-nums leading-tight">
+        <span>{compact}</span>
+        {shouldShowRaw ? <span className="text-[11px] text-muted-foreground">{raw}</span> : null}
+      </span>
+    )
+  }
+  const fmtMoney = (value: unknown): string =>
+    typeof value === 'number' || typeof value === 'string'
+      ? Number(value || 0).toFixed(6)
+      : '0.000000'
+  const fmtMs = (value: unknown): string => {
+    const number = typeof value === 'number' ? value : Number(value ?? 0)
+    return Number.isFinite(number) && number > 0 ? `${Math.round(number)} ms` : '-'
+  }
+
+  const renderSimpleTable = (
+    title: string,
+    rows: Record<string, unknown>[],
+    columns: Array<{
+      key: string
+      label: string
+      render?: (row: Record<string, unknown>) => React.JSX.Element | string
+    }>
+  ): React.JSX.Element => (
+    <section className="space-y-3 rounded-xl border border-border/60 bg-background/60 p-4">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {rows.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{t('analytics.empty')}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border/60 text-left text-muted-foreground">
+                {columns.map((column) => (
+                  <th key={column.key} className="px-2 py-2 font-medium">
+                    {column.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${title}-${index}`} className="border-b border-border/30 last:border-0">
+                  {columns.map((column) => (
+                    <td key={column.key} className="px-2 py-2 align-top">
+                      {column.render ? column.render(row) : String(row[column.key] ?? '-')}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">{t('analytics.title')}</h2>
+          <p className="text-sm text-muted-foreground">{t('analytics.subtitle')}</p>
+        </div>
+        <div className="flex gap-2">
+          {([1, 7, 30] as const).map((days) => (
+            <Button
+              key={days}
+              size="sm"
+              variant={rangeDays === days ? 'default' : 'outline'}
+              className="h-8 text-xs"
+              onClick={() => setRangeDays(days)}
+            >
+              {days === 1
+                ? t('analytics.range24h')
+                : days === 7
+                  ? t('analytics.range7d')
+                  : t('analytics.range30d')}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <section className="grid gap-3 rounded-2xl border border-border/50 bg-muted/10 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] md:grid-cols-3 xl:grid-cols-3">
+        <div className="space-y-2">
+          <div className="text-xs text-muted-foreground">{t('analytics.provider')}</div>
+          <Select value={selectedProviderId} onValueChange={setSelectedProviderId}>
+            <SelectTrigger className="text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">{t('analytics.allProviders')}</SelectItem>
+              {providerOptions.map((provider) => (
+                <SelectItem key={provider.id} value={provider.id}>
+                  {provider.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <div className="text-xs text-muted-foreground">{t('analytics.model')}</div>
+          <Select value={selectedModelId} onValueChange={setSelectedModelId}>
+            <SelectTrigger className="text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">{t('analytics.allModels')}</SelectItem>
+              {modelOptions.map((model) => (
+                <SelectItem key={`${model.providerId}-${model.id}`} value={model.id}>
+                  {model.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <div className="text-xs text-muted-foreground">{t('analytics.source')}</div>
+          <Select value={selectedSourceKind} onValueChange={setSelectedSourceKind}>
+            <SelectTrigger className="text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">{t('analytics.allSources')}</SelectItem>
+              {sourceOptions.map((source) => (
+                <SelectItem key={source} value={source}>
+                  {source}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </section>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          Loading...
+        </div>
+      ) : (
+        <>
+          <AnalyticsOverview
+            overview={overview}
+            timeline={timeline}
+            rangeDays={rangeDays}
+            bucket={timelineBucket}
+            from={query.from}
+            to={query.to}
+            tokenLocale={tokenLocale}
+            inputTokenLabel={inputTokenLabel}
+          />
+
+          {renderSimpleTable(t('analytics.daily'), daily, [
+            { key: 'day', label: t('analytics.time') },
+            { key: 'request_count', label: t('analytics.requests') },
+            {
+              key: 'input_tokens',
+              label: inputTokenLabel,
+              render: (row) => renderTokenValue(getEffectiveInputTokens(row))
+            },
+            {
+              key: 'output_tokens',
+              label: t('analytics.outputTokens'),
+              render: (row) => renderTokenValue(row.output_tokens)
+            },
+            {
+              key: 'cache_creation_tokens',
+              label: t('analytics.cacheCreationTokens'),
+              render: (row) => renderTokenValue(row.cache_creation_tokens)
+            },
+            {
+              key: 'cache_read_tokens',
+              label: t('analytics.cacheReadTokens'),
+              render: (row) => renderTokenValue(row.cache_read_tokens)
+            },
+            {
+              key: 'total_cost_usd',
+              label: t('analytics.costUsd'),
+              render: (row) => `$${fmtMoney(row.total_cost_usd)}`
+            },
+            {
+              key: 'avg_ttft_ms',
+              label: t('analytics.avgTtft'),
+              render: (row) => fmtMs(row.avg_ttft_ms)
+            },
+            {
+              key: 'avg_total_ms',
+              label: t('analytics.avgTotal'),
+              render: (row) => fmtMs(row.avg_total_ms)
+            }
+          ])}
+
+          {renderSimpleTable(t('analytics.models'), models, [
+            { key: 'model_name', label: t('analytics.model') },
+            { key: 'provider_name', label: t('analytics.provider') },
+            { key: 'request_count', label: t('analytics.requests') },
+            {
+              key: 'input_tokens',
+              label: inputTokenLabel,
+              render: (row) => renderTokenValue(getEffectiveInputTokens(row))
+            },
+            {
+              key: 'output_tokens',
+              label: t('analytics.outputTokens'),
+              render: (row) => renderTokenValue(row.output_tokens)
+            },
+            {
+              key: 'cache_creation_tokens',
+              label: t('analytics.cacheCreationTokens'),
+              render: (row) => renderTokenValue(row.cache_creation_tokens)
+            },
+            {
+              key: 'cache_read_tokens',
+              label: t('analytics.cacheReadTokens'),
+              render: (row) => renderTokenValue(row.cache_read_tokens)
+            },
+            {
+              key: 'total_cost_usd',
+              label: t('analytics.costUsd'),
+              render: (row) => `$${fmtMoney(row.total_cost_usd)}`
+            }
+          ])}
+
+          {renderSimpleTable(t('analytics.providers'), providers, [
+            { key: 'provider_name', label: t('analytics.provider') },
+            { key: 'request_count', label: t('analytics.requests') },
+            {
+              key: 'input_tokens',
+              label: inputTokenLabel,
+              render: (row) => renderTokenValue(getEffectiveInputTokens(row))
+            },
+            {
+              key: 'output_tokens',
+              label: t('analytics.outputTokens'),
+              render: (row) => renderTokenValue(row.output_tokens)
+            },
+            {
+              key: 'cache_creation_tokens',
+              label: t('analytics.cacheCreationTokens'),
+              render: (row) => renderTokenValue(row.cache_creation_tokens)
+            },
+            {
+              key: 'cache_read_tokens',
+              label: t('analytics.cacheReadTokens'),
+              render: (row) => renderTokenValue(row.cache_read_tokens)
+            },
+            {
+              key: 'total_cost_usd',
+              label: t('analytics.costUsd'),
+              render: (row) => `$${fmtMoney(row.total_cost_usd)}`
+            }
+          ])}
+
+          {renderSimpleTable(t('analytics.details'), details, [
+            {
+              key: 'created_at',
+              label: t('analytics.time'),
+              render: (row) => new Date(Number(row.created_at ?? 0)).toLocaleString()
+            },
+            { key: 'provider_name', label: t('analytics.provider') },
+            { key: 'model_name', label: t('analytics.model') },
+            {
+              key: 'source_kind',
+              label: t('analytics.source'),
+              render: (row) => <Badge variant="secondary">{String(row.source_kind ?? '-')}</Badge>
+            },
+            {
+              key: 'input_tokens',
+              label: inputTokenLabel,
+              render: (row) => renderTokenValue(getEffectiveInputTokens(row))
+            },
+            {
+              key: 'output_tokens',
+              label: t('analytics.outputTokens'),
+              render: (row) => renderTokenValue(row.output_tokens)
+            },
+            {
+              key: 'cache_creation_tokens',
+              label: t('analytics.cacheCreationTokens'),
+              render: (row) => renderTokenValue(row.cache_creation_tokens)
+            },
+            {
+              key: 'cache_read_tokens',
+              label: t('analytics.cacheReadTokens'),
+              render: (row) => renderTokenValue(row.cache_read_tokens)
+            },
+            { key: 'ttft_ms', label: t('analytics.ttft'), render: (row) => fmtMs(row.ttft_ms) },
+            {
+              key: 'total_ms',
+              label: t('analytics.totalMs'),
+              render: (row) => fmtMs(row.total_ms)
+            },
+            {
+              key: 'total_cost_usd',
+              label: t('analytics.costUsd'),
+              render: (row) => `$${fmtMoney(row.total_cost_usd)}`
+            }
+          ])}
+        </>
+      )}
+    </div>
+  )
+}
+
 function ModelPanel(): React.JSX.Element {
   const { t } = useTranslation('settings')
   const settings = useSettingsStore()
   const providers = useProviderStore((s) => s.providers)
+  const mainModelSelectionMode = settings.mainModelSelectionMode
   const activeProviderId = useProviderStore((s) => s.activeProviderId)
   const activeModelId = useProviderStore((s) => s.activeModelId)
   const activeFastModelId = useProviderStore((s) => s.activeFastModelId)
@@ -1015,7 +1848,7 @@ function ModelPanel(): React.JSX.Element {
   const setActiveImageProvider = useProviderStore((s) => s.setActiveImageProvider)
   const setActiveImageModel = useProviderStore((s) => s.setActiveImageModel)
 
-  const enabledProviders = providers.filter((p) => p.enabled)
+  const enabledProviders = providers.filter((p) => isProviderAvailableForModelSelection(p))
   const chatProviderGroups = enabledProviders
     .map((provider) => ({
       provider,
@@ -1049,9 +1882,54 @@ function ModelPanel(): React.JSX.Element {
     if (!providerId || !modelId) return null
     return { providerId, modelId }
   }
+  const recommendationModeDefs: Array<{
+    mode: keyof typeof settings.promptRecommendationModels
+    labelKey: string
+    descKey: string
+  }> = [
+    {
+      mode: 'clarify',
+      labelKey: 'model.promptRecommendationModes.clarify',
+      descKey: 'model.promptRecommendationModesDesc.clarify'
+    },
+    {
+      mode: 'cowork',
+      labelKey: 'model.promptRecommendationModes.cowork',
+      descKey: 'model.promptRecommendationModesDesc.cowork'
+    },
+    {
+      mode: 'code',
+      labelKey: 'model.promptRecommendationModes.code',
+      descKey: 'model.promptRecommendationModesDesc.code'
+    }
+  ]
+  const updatePromptRecommendationModel = (
+    mode: keyof typeof settings.promptRecommendationModels,
+    value: string
+  ): void => {
+    settings.updateSettings({
+      promptRecommendationModels: {
+        ...settings.promptRecommendationModels,
+        [mode]:
+          value === '__fast__'
+            ? null
+            : value === '__disabled__'
+              ? 'disabled'
+              : parseModelValue(value)
+      }
+    })
+  }
 
   const activeModelValue =
     activeProvider && activeModelId ? buildModelValue(activeProvider.id, activeModelId) : ''
+  const newSessionDefaultModelValue = settings.newSessionDefaultModel
+    ? settings.newSessionDefaultModel.useGlobalActiveModel
+      ? '__global__'
+      : buildModelValue(
+          settings.newSessionDefaultModel.providerId,
+          settings.newSessionDefaultModel.modelId
+        )
+    : '__global__'
   const translationProvider =
     chatProviderGroups.find(
       ({ provider }) => provider.id === (activeTranslationProviderId ?? activeProviderId)
@@ -1096,36 +1974,54 @@ function ModelPanel(): React.JSX.Element {
         </div>
       ) : (
         <>
-          {/* Main Model */}
+          {/* New Session Default Model */}
           <section className="space-y-3">
             <div>
-              <label className="text-sm font-medium">{t('model.mainModel')}</label>
-              <p className="text-xs text-muted-foreground">{t('model.mainModelDesc')}</p>
+              <label className="text-sm font-medium">新建会话默认模型</label>
+              <p className="text-xs text-muted-foreground">
+                控制新建会话默认绑定的模型；选择跟随当前活动模型时，会沿用顶部当前选择。
+              </p>
             </div>
             {hasAnyEnabledModel ? (
               <Select
-                value={activeModelValue}
+                value={newSessionDefaultModelValue}
                 onValueChange={(value) => {
+                  if (value === '__global__') {
+                    settings.updateSettings({
+                      newSessionDefaultModel: {
+                        providerId: activeProviderId ?? '',
+                        modelId: activeModelId ?? '',
+                        useGlobalActiveModel: true
+                      }
+                    })
+                    return
+                  }
                   const parsed = parseModelValue(value)
                   if (!parsed) return
-                  if (parsed.providerId !== activeProviderId) {
-                    setActiveProvider(parsed.providerId)
-                  }
-                  setActiveModel(parsed.modelId)
+                  settings.updateSettings({
+                    newSessionDefaultModel: {
+                      providerId: parsed.providerId,
+                      modelId: parsed.modelId,
+                      useGlobalActiveModel: false
+                    }
+                  })
                 }}
               >
                 <SelectTrigger className="w-80 text-xs">
-                  <SelectValue placeholder={t('model.selectModel')} />
+                  <SelectValue placeholder="选择默认模型" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="__global__" className="text-xs">
+                    跟随当前活动模型
+                  </SelectItem>
                   {chatProviderGroups.map(({ provider, models }) => (
-                    <SelectGroup key={provider.id}>
+                    <SelectGroup key={`${provider.id}-new-session-default`}>
                       <SelectLabel className="text-[10px] uppercase tracking-wide">
                         {provider.name}
                       </SelectLabel>
                       {models.map((m) => (
                         <SelectItem
-                          key={`${provider.id}-${m.id}`}
+                          key={`${provider.id}-new-session-${m.id}`}
                           value={buildModelValue(provider.id, m.id)}
                           className="text-xs"
                         >
@@ -1148,6 +2044,100 @@ function ModelPanel(): React.JSX.Element {
                   ))}
                 </SelectContent>
               </Select>
+            ) : (
+              <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
+            )}
+          </section>
+
+          {/* Main Model */}
+          <section className="space-y-3">
+            <div>
+              <label className="text-sm font-medium">{t('model.mainModel')}</label>
+              <p className="text-xs text-muted-foreground">{t('model.mainModelDesc')}</p>
+            </div>
+            {hasAnyEnabledModel ? (
+              <div className="space-y-2">
+                <Select
+                  value={mainModelSelectionMode}
+                  onValueChange={(value) =>
+                    settings.updateSettings({
+                      mainModelSelectionMode: value === 'manual' ? 'manual' : 'auto'
+                    })
+                  }
+                >
+                  <SelectTrigger className="w-80 text-xs">
+                    <SelectValue placeholder={t('model.selectMainModelMode')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto" className="text-xs">
+                      {t('model.autoMode')}
+                    </SelectItem>
+                    <SelectItem value="manual" className="text-xs">
+                      {t('model.manualMode')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground/80">
+                  {mainModelSelectionMode === 'auto'
+                    ? t('model.autoModeDesc')
+                    : t('model.manualModeDesc')}
+                </p>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {mainModelSelectionMode === 'auto'
+                      ? t('model.autoMainCandidate')
+                      : t('model.manualMainCandidate')}
+                  </label>
+                  <p className="mt-1 text-xs text-muted-foreground/70">
+                    {t('model.manualMainCandidateDesc')}
+                  </p>
+                </div>
+                <Select
+                  value={activeModelValue}
+                  onValueChange={(value) => {
+                    const parsed = parseModelValue(value)
+                    if (!parsed) return
+                    if (parsed.providerId !== activeProviderId) {
+                      setActiveProvider(parsed.providerId)
+                    }
+                    setActiveModel(parsed.modelId)
+                  }}
+                >
+                  <SelectTrigger className="w-80 text-xs">
+                    <SelectValue placeholder={t('model.selectModel')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {chatProviderGroups.map(({ provider, models }) => (
+                      <SelectGroup key={provider.id}>
+                        <SelectLabel className="text-[10px] uppercase tracking-wide">
+                          {provider.name}
+                        </SelectLabel>
+                        {models.map((m) => (
+                          <SelectItem
+                            key={`${provider.id}-${m.id}`}
+                            value={buildModelValue(provider.id, m.id)}
+                            className="text-xs"
+                          >
+                            <div className="flex items-center gap-2">
+                              <ModelIcon
+                                icon={m.icon}
+                                modelId={m.id}
+                                providerBuiltinId={provider.builtinId}
+                                size={16}
+                                className="text-muted-foreground/70"
+                              />
+                              <div className="flex flex-col text-left">
+                                <span>{m.name}</span>
+                                <span className="text-[10px] text-muted-foreground/60">{m.id}</span>
+                              </div>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             ) : (
               <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
             )}
@@ -1211,6 +2201,84 @@ function ModelPanel(): React.JSX.Element {
                 ) : (
                   <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
                 )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
+            )}
+          </section>
+
+          <section className="space-y-3">
+            <div>
+              <label className="text-sm font-medium">{t('model.promptRecommendationTitle')}</label>
+              <p className="text-xs text-muted-foreground">{t('model.promptRecommendationDesc')}</p>
+            </div>
+            {chatProviderGroups.length > 0 ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                {recommendationModeDefs.map(({ mode, labelKey, descKey }) => {
+                  const binding = settings.promptRecommendationModels[mode]
+                  const value =
+                    binding === 'disabled'
+                      ? '__disabled__'
+                      : binding
+                        ? buildModelValue(binding.providerId, binding.modelId)
+                        : '__fast__'
+                  return (
+                    <div key={mode} className="rounded-lg border p-3 space-y-2">
+                      <div>
+                        <p className="text-sm font-medium">{t(labelKey)}</p>
+                        <p className="text-xs text-muted-foreground">{t(descKey)}</p>
+                      </div>
+                      <Select
+                        value={value}
+                        onValueChange={(nextValue) =>
+                          updatePromptRecommendationModel(mode, nextValue)
+                        }
+                      >
+                        <SelectTrigger className="w-full text-xs">
+                          <SelectValue placeholder={t('model.selectRecommendationModel')} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__fast__" className="text-xs">
+                            {t('model.useFastModelRecommendation')}
+                          </SelectItem>
+                          <SelectItem value="__disabled__" className="text-xs">
+                            {t('model.disableRecommendation')}
+                          </SelectItem>
+                          {chatProviderGroups.map(({ provider, models }) => (
+                            <SelectGroup key={`${provider.id}-recommendation-${mode}`}>
+                              <SelectLabel className="text-[10px] uppercase tracking-wide">
+                                {provider.name}
+                              </SelectLabel>
+                              {models.map((m) => (
+                                <SelectItem
+                                  key={`${provider.id}-${mode}-${m.id}`}
+                                  value={buildModelValue(provider.id, m.id)}
+                                  className="text-xs"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <ModelIcon
+                                      icon={m.icon}
+                                      modelId={m.id}
+                                      providerBuiltinId={provider.builtinId}
+                                      size={16}
+                                      className="text-muted-foreground/70"
+                                    />
+                                    <div className="flex flex-col text-left">
+                                      <span>{m.name}</span>
+                                      <span className="text-[10px] text-muted-foreground/60">
+                                        {m.id}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
@@ -1595,7 +2663,10 @@ function AboutPanel(): React.JSX.Element {
 const panelMap: Record<SettingsTab, () => React.JSX.Element> = {
   general: GeneralPanel,
   memory: MemoryPanel,
+  analytics: AnalyticsPanel,
+  migration: MigrationPanel,
   provider: ProviderPanel,
+  modelManagement: ModelManagementPanel,
   plugin: AppPluginPanel,
   channel: ChannelPanel,
   mcp: McpPanel,
@@ -1609,8 +2680,11 @@ export function SettingsPage(): React.JSX.Element {
   const { t } = useTranslation('settings')
   const settingsTab = useUIStore((s) => s.settingsTab)
   const setSettingsTab = useUIStore((s) => s.setSettingsTab)
+  const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen)
+  const toggleLeftSidebar = useUIStore((s) => s.toggleLeftSidebar)
 
-  const ActivePanel = panelMap[settingsTab]
+  const effectiveSettingsTab = settingsTab === 'channel' ? 'general' : settingsTab
+  const ActivePanel = panelMap[effectiveSettingsTab]
 
   return (
     <div className="flex h-screen w-full bg-background">
@@ -1637,14 +2711,16 @@ export function SettingsPage(): React.JSX.Element {
                   key={item.id}
                   onClick={() => setSettingsTab(item.id)}
                   className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-all duration-150 ${
-                    settingsTab === item.id
+                    effectiveSettingsTab === item.id
                       ? 'bg-accent text-accent-foreground font-medium'
                       : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
                   }`}
                 >
                   <span
                     className={`flex items-center justify-center size-5 ${
-                      settingsTab === item.id ? 'text-accent-foreground' : 'text-muted-foreground'
+                      effectiveSettingsTab === item.id
+                        ? 'text-accent-foreground'
+                        : 'text-muted-foreground'
                     }`}
                   >
                     {item.icon}
@@ -1661,22 +2737,45 @@ export function SettingsPage(): React.JSX.Element {
       </div>
 
       {/* Right Content */}
-      <div className="relative flex-1 flex flex-col min-w-0 overflow-hidden px-6 py-4">
+      <div className="relative flex-1 min-h-0 flex flex-col min-w-0 overflow-hidden px-6 py-4">
+        {!leftSidebarOpen && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="absolute left-6 top-4 z-20 size-8 rounded-lg border border-border/60 bg-background/80 backdrop-blur-sm"
+            onClick={toggleLeftSidebar}
+            title={t('page.title')}
+          >
+            <PanelLeftOpen className="size-4" />
+          </Button>
+        )}
+
         {/* Content */}
         <AnimatePresence mode="wait">
-          {settingsTab === 'provider' ||
-          settingsTab === 'plugin' ||
-          settingsTab === 'channel' ||
-          settingsTab === 'mcp' ? (
+          {effectiveSettingsTab === 'provider' ||
+          effectiveSettingsTab === 'modelManagement' ||
+          effectiveSettingsTab === 'plugin' ||
+          effectiveSettingsTab === 'mcp' ? (
             <div className="flex-1 min-h-0 min-w-0 overflow-hidden pb-4" key="full-panel">
-              <SlideIn key={settingsTab} direction="right" duration={0.25} className="h-full">
+              <SlideIn
+                key={effectiveSettingsTab}
+                direction="right"
+                duration={0.25}
+                className="h-full min-h-0"
+              >
                 <ActivePanel />
               </SlideIn>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto" key="scroll-panel">
-              <div className="mx-auto max-w-2xl px-8 pb-16">
-                <FadeIn key={settingsTab} duration={0.25}>
+              <div
+                className={
+                  effectiveSettingsTab === 'analytics'
+                    ? 'w-full max-w-none px-6 pb-16 pt-10'
+                    : 'mx-auto max-w-2xl px-8 pb-16 pt-10'
+                }
+              >
+                <FadeIn key={effectiveSettingsTab} duration={0.25} className="w-full">
                   <ActivePanel />
                 </FadeIn>
               </div>

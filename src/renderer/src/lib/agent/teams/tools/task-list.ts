@@ -1,4 +1,5 @@
 import type { ToolHandler } from '../../../tools/tool-types'
+import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool-result-format'
 import { useTeamStore } from '../../../../stores/team-store'
 
 export const taskListTool: ToolHandler = {
@@ -12,24 +13,22 @@ export const taskListTool: ToolHandler = {
         status: {
           type: 'string',
           enum: ['pending', 'in_progress', 'completed', 'all'],
-          description: 'Filter tasks by status. Defaults to "all".',
-        },
+          description: 'Filter tasks by status. Defaults to "all".'
+        }
       },
-      required: [],
-    },
+      required: []
+    }
   },
   execute: async (input) => {
     const team = useTeamStore.getState().activeTeam
     if (!team) {
-      return JSON.stringify({ error: 'No active team' })
+      return encodeToolError('No active team')
     }
 
     const filter = String(input.status ?? 'all')
-    const tasks = filter === 'all'
-      ? team.tasks
-      : team.tasks.filter((t) => t.status === filter)
+    const tasks = filter === 'all' ? team.tasks : team.tasks.filter((t) => t.status === filter)
 
-    return JSON.stringify({
+    return encodeStructuredToolResult({
       team_name: team.name,
       total: team.tasks.length,
       filtered: tasks.length,
@@ -38,9 +37,9 @@ export const taskListTool: ToolHandler = {
         subject: t.subject,
         status: t.status,
         owner: t.owner,
-        depends_on: t.dependsOn,
-      })),
+        depends_on: t.dependsOn
+      }))
     })
   },
-  requiresApproval: () => false,
+  requiresApproval: () => false
 }

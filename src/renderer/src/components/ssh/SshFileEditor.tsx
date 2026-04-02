@@ -4,18 +4,17 @@ import { Loader2, Save } from 'lucide-react'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { Button } from '@renderer/components/ui/button'
+import { CodeEditor } from '@renderer/components/editor/CodeEditor'
+import { createSshWorkspace, getParentPath } from '@renderer/lib/monaco/workspace'
+import { useSshStore } from '@renderer/stores/ssh-store'
+import { useUIStore } from '@renderer/stores/ui-store'
 import { toast } from 'sonner'
 import { cn } from '@renderer/lib/utils'
-import { useTheme } from 'next-themes'
-
-const MonacoEditor = React.lazy(async () => {
-  const mod = await import('@monaco-editor/react')
-  return { default: mod.default }
-})
 
 interface SshFileEditorProps {
   connectionId: string
   filePath: string
+  sessionId?: string
 }
 
 function tryParseReadError(value: string): string | null {
@@ -31,33 +30,32 @@ function tryParseReadError(value: string): string | null {
   return null
 }
 
-function guessLanguage(filePath: string): string {
-  const ext = filePath.lastIndexOf('.') >= 0 ? filePath.slice(filePath.lastIndexOf('.') + 1).toLowerCase() : ''
-  const map: Record<string, string> = {
-    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
-    json: 'json', md: 'markdown', css: 'css', scss: 'scss', less: 'less',
-    html: 'html', htm: 'html', xml: 'xml', svg: 'xml',
-    py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
-    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
-    sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell',
-    yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
-    sql: 'sql', graphql: 'graphql', dockerfile: 'dockerfile',
-    vue: 'html', svelte: 'html',
-  }
-  return map[ext] || 'plaintext'
-}
-
-export function SshFileEditor({ connectionId, filePath }: SshFileEditorProps): React.JSX.Element {
+export function SshFileEditor({
+  connectionId,
+  filePath,
+  sessionId
+}: SshFileEditorProps): React.JSX.Element {
   const { t } = useTranslation('ssh')
-  const { resolvedTheme } = useTheme()
   const [content, setContent] = React.useState('')
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [modified, setModified] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
   const suppressChangeRef = React.useRef(false)
-  const editorRef = React.useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null)
-  const saveRef = React.useRef<() => void>(() => {})
+
+  const explorerPath = useSshStore((s) => (sessionId ? s.fileExplorerPaths[sessionId] : undefined))
+  const connectionDefaultDirectory = useSshStore(
+    (s) => s.connections.find((connection) => connection.id === connectionId)?.defaultDirectory
+  )
+
+  const workspace = React.useMemo(
+    () =>
+      createSshWorkspace(
+        connectionId,
+        explorerPath ?? connectionDefaultDirectory ?? getParentPath(filePath)
+      ),
+    [connectionDefaultDirectory, connectionId, explorerPath, filePath]
+  )
 
   const fileName = React.useMemo(() => {
     const parts = filePath.split('/')
@@ -102,7 +100,11 @@ export function SshFileEditor({ connectionId, filePath }: SshFileEditorProps): R
     if (!modified || saving) return
     setSaving(true)
     try {
-      const result = await ipcClient.invoke(IPC.SSH_FS_WRITE_FILE, { connectionId, path: filePath, content })
+      const result = await ipcClient.invoke(IPC.SSH_FS_WRITE_FILE, {
+        connectionId,
+        path: filePath,
+        content
+      })
       if (result && typeof result === 'object' && 'error' in result) {
         throw new Error(String((result as { error?: string }).error ?? 'Save failed'))
       }
@@ -116,27 +118,21 @@ export function SshFileEditor({ connectionId, filePath }: SshFileEditorProps): R
     }
   }, [modified, saving, connectionId, filePath, content, t])
 
-  React.useEffect(() => {
-    saveRef.current = () => {
-      void handleSave()
-    }
-  }, [handleSave])
-
-  const handleEditorMount = React.useCallback((editor: import('monaco-editor').editor.IStandaloneCodeEditor, monaco: typeof import('monaco-editor')) => {
-    editorRef.current = editor
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      saveRef.current()
-    })
-  }, [])
-
-  const handleChange = React.useCallback((value: string | undefined) => {
+  const handleChange = React.useCallback((value: string) => {
     if (suppressChangeRef.current) {
       suppressChangeRef.current = false
       return
     }
-    setContent(value ?? '')
+    setContent(value)
     setModified(true)
   }, [])
+
+  const handleOpenFile = React.useCallback(
+    (targetPath: string) => {
+      useUIStore.getState().openFilePreview(targetPath, undefined, connectionId, sessionId)
+    },
+    [connectionId, sessionId]
+  )
 
   if (loading) {
     return (
@@ -157,7 +153,9 @@ export function SshFileEditor({ connectionId, filePath }: SshFileEditorProps): R
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-        <span className="truncate" title={filePath}>{fileName}</span>
+        <span className="truncate" title={filePath}>
+          {fileName}
+        </span>
         {modified && <span className="text-amber-500">●</span>}
         <div className="flex-1" />
         <Button
@@ -175,31 +173,14 @@ export function SshFileEditor({ connectionId, filePath }: SshFileEditorProps): R
         </Button>
       </div>
       <div className="flex-1 overflow-hidden">
-        <React.Suspense
-          fallback={
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              Loading editor...
-            </div>
-          }
-        >
-          <MonacoEditor
-            height="100%"
-            language={guessLanguage(filePath)}
-            theme={resolvedTheme === 'light' ? 'vs' : 'vs-dark'}
-            value={content}
-            onChange={handleChange}
-            onMount={handleEditorMount}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 13,
-              lineNumbers: 'on',
-              wordWrap: 'on',
-              scrollBeyondLastLine: false,
-              automaticLayout: true,
-              tabSize: 2,
-            }}
-          />
-        </React.Suspense>
+        <CodeEditor
+          filePath={filePath}
+          content={content}
+          onChange={handleChange}
+          onOpenFile={handleOpenFile}
+          onSave={handleSave}
+          workspace={workspace}
+        />
       </div>
     </div>
   )

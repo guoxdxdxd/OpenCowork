@@ -34,7 +34,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui
 import { ModelIcon, ProviderIcon } from '@renderer/components/settings/provider-icons'
 import { cn } from '@renderer/lib/utils'
 import { useUIStore } from '@renderer/stores/ui-store'
-import { useProviderStore } from '@renderer/stores/provider-store'
+import {
+  isProviderAvailableForModelSelection,
+  useProviderStore
+} from '@renderer/stores/provider-store'
 import { useTranslateStore } from '@renderer/stores/translate-store'
 import type { AgentStep } from '@renderer/stores/translate-store'
 
@@ -260,7 +263,7 @@ export function TranslatePage(): React.JSX.Element {
   )
 
   const enabledProviders = useMemo(
-    () => providers.filter((provider) => provider.enabled),
+    () => providers.filter((provider) => isProviderAvailableForModelSelection(provider)),
     [providers]
   )
 
@@ -543,7 +546,10 @@ export function TranslatePage(): React.JSX.Element {
             </div>
 
             {/* Source panel */}
-            <div className="flex flex-col border-b overflow-hidden" style={{ flex: '0 0 40%', minHeight: 0 }}>
+            <div
+              className="flex flex-col border-b overflow-hidden"
+              style={{ flex: '0 0 40%', minHeight: 0 }}
+            >
               <div className="flex items-center justify-between px-4 py-2 shrink-0 border-b bg-muted/5">
                 <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/50">
                   {t('translatePage.agentSourceLabel')}

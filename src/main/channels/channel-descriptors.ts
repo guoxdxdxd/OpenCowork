@@ -34,6 +34,8 @@ const FEISHU_PLUGIN_TOOLS = [
   'FeishuBitableDeleteRecords'
 ]
 
+const WEIXIN_PLUGIN_TOOLS = [...COMMON_PLUGIN_TOOLS, 'WeixinSendImage', 'WeixinSendFile']
+
 /** Built-in channel provider descriptors */
 export const CHANNEL_PROVIDERS: ChannelProviderDescriptor[] = [
   // ── China ──
@@ -149,6 +151,48 @@ export const CHANNEL_PROVIDERS: ChannelProviderDescriptor[] = [
         label: 'channel.qq.markdownSupport',
         type: 'text',
         placeholder: 'true / false'
+      }
+    ]
+  },
+  {
+    type: 'weixin-official',
+    displayName: '官方微信',
+    description: '官方微信绑定渠道（扫码登录 + 长轮询）',
+    icon: 'wechat',
+    builtin: true,
+    tools: WEIXIN_PLUGIN_TOOLS,
+    configSchema: [
+      {
+        key: 'baseUrl',
+        label: 'channel.weixin.baseUrl',
+        type: 'text',
+        required: false,
+        placeholder: 'https://ilinkai.weixin.qq.com'
+      },
+      {
+        key: 'routeTag',
+        label: 'channel.weixin.routeTag',
+        type: 'text',
+        required: false,
+        placeholder: 'optional'
+      },
+      {
+        key: 'token',
+        label: 'channel.weixin.token',
+        type: 'secret',
+        required: false
+      },
+      {
+        key: 'accountId',
+        label: 'channel.weixin.accountId',
+        type: 'text',
+        required: false
+      },
+      {
+        key: 'userId',
+        label: 'channel.weixin.userId',
+        type: 'text',
+        required: false
       }
     ]
   },

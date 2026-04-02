@@ -10,7 +10,7 @@ function getConfigPath(): string {
   return path.join(DATA_DIR, CONFIG_FILE)
 }
 
-function readConfig(): Record<string, unknown> {
+export function readConfig(): Record<string, unknown> {
   try {
     const filePath = getConfigPath()
     if (fs.existsSync(filePath)) {

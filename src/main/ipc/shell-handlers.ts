@@ -1,4 +1,5 @@
 import { ipcMain, shell, BrowserWindow } from 'electron'
+import { safeSendToWindow } from '../window-ipc'
 import { spawn } from 'child_process'
 
 const ANSI_ESCAPE_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]`, 'g')
@@ -6,6 +7,7 @@ const COMPACT_OUTPUT_CHAR_THRESHOLD = 6000
 const COMPACT_OUTPUT_LINE_THRESHOLD = 160
 const MAX_RETURNED_STDOUT_CHARS = 12000
 const MAX_RETURNED_STDERR_CHARS = 8000
+const MAX_LIVE_BUFFER_CHARS = 2_000_000
 const HEAD_LINE_COUNT = 8
 const TAIL_LINE_COUNT = 60
 const MAX_ERROR_LINE_COUNT = 30
@@ -235,7 +237,9 @@ export function registerShellHandlers(): void {
         let stderr = ''
         let killed = false
         let settled = false
+        let timeoutTimer: ReturnType<typeof setTimeout> | null = null
         let forceResolveTimer: ReturnType<typeof setTimeout> | null = null
+        let exitResolveTimer: ReturnType<typeof setTimeout> | null = null
 
         const child = spawn(cmd, {
           cwd: args.cwd || process.cwd(),
@@ -260,13 +264,22 @@ export function registerShellHandlers(): void {
           if (settled) return
           settled = true
           if (execId) runningShellProcesses.delete(execId)
+          if (timeoutTimer) {
+            clearTimeout(timeoutTimer)
+            timeoutTimer = null
+          }
           if (forceResolveTimer) {
             clearTimeout(forceResolveTimer)
             forceResolveTimer = null
           }
+          if (exitResolveTimer) {
+            clearTimeout(exitResolveTimer)
+            exitResolveTimer = null
+          }
           child.stdout?.removeAllListeners('data')
           child.stderr?.removeAllListeners('data')
           child.removeAllListeners('error')
+          child.removeAllListeners('exit')
           child.removeAllListeners('close')
           resolve(buildShellResult(payload))
         }
@@ -293,21 +306,38 @@ export function registerShellHandlers(): void {
         const sendChunk = (chunk: string, stream: ShellStream): void => {
           if (!execId) return
           const win = BrowserWindow.getAllWindows()[0]
-          if (win && !win.isDestroyed()) {
-            win.webContents.send('shell:output', { execId, chunk, stream })
+          if (win) {
+            safeSendToWindow(win, 'shell:output', { execId, chunk, stream })
           }
         }
 
         child.stdout?.on('data', (data: Buffer) => {
           const text = data.toString('utf8')
           stdout += text
+          if (stdout.length > MAX_LIVE_BUFFER_CHARS) {
+            stdout = stdout.slice(-MAX_LIVE_BUFFER_CHARS)
+          }
           sendChunk(text, 'stdout')
         })
 
         child.stderr?.on('data', (data: Buffer) => {
           const text = data.toString('utf8')
           stderr += text
+          if (stderr.length > MAX_LIVE_BUFFER_CHARS) {
+            stderr = stderr.slice(-MAX_LIVE_BUFFER_CHARS)
+          }
           sendChunk(text, 'stderr')
+        })
+
+        child.on('exit', (code) => {
+          if (settled || exitResolveTimer) return
+          exitResolveTimer = setTimeout(() => {
+            finalize({
+              exitCode: killed ? 1 : (code ?? 0),
+              stdout,
+              stderr
+            })
+          }, 120)
         })
 
         child.on('close', (code) => {
@@ -328,7 +358,7 @@ export function registerShellHandlers(): void {
         })
 
         // Safety: kill on timeout
-        setTimeout(() => {
+        timeoutTimer = setTimeout(() => {
           requestAbort()
         }, timeout)
       })

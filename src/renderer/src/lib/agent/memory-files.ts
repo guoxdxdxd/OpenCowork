@@ -6,6 +6,11 @@ interface ReadTextFileResult {
   error?: string
 }
 
+export const PROJECT_MEMORY_DIRNAME = '.agents'
+
+export type SessionMemoryScope = 'main' | 'shared'
+export type ProjectMemoryPathSource = 'agents-dir' | 'workspace-root'
+
 export interface GlobalMemorySnapshot {
   path?: string
   content?: string
@@ -13,14 +18,57 @@ export interface GlobalMemorySnapshot {
   updatedAt?: number
 }
 
-let cachedGlobalMemoryPath: string | undefined
-let cachedGlobalMemoryContent: string | undefined
-let watchedGlobalMemoryPath: string | undefined
-let watchedGlobalMemoryPathKey: string | undefined
-let globalMemoryWatchCleanup: (() => void) | null = null
-let globalMemoryVersion = 0
-let globalMemoryUpdatedAt: number | undefined
-const globalMemoryListeners = new Set<(snapshot: GlobalMemorySnapshot) => void>()
+export interface MemoryLayerEntry {
+  path: string
+  content?: string
+}
+
+export interface DailyMemoryEntry extends MemoryLayerEntry {
+  date: string
+  content: string
+}
+
+export interface LayeredMemorySnapshot {
+  globalHomePath?: string
+  projectRootPath?: string
+  agents?: MemoryLayerEntry
+  globalSoul?: MemoryLayerEntry
+  projectSoul?: MemoryLayerEntry
+  globalUser?: MemoryLayerEntry
+  projectUser?: MemoryLayerEntry
+  globalMemory?: MemoryLayerEntry
+  projectMemory?: MemoryLayerEntry
+  globalDailyMemory: DailyMemoryEntry[]
+  projectDailyMemory: DailyMemoryEntry[]
+  version: number
+  updatedAt?: number
+}
+
+export interface ProjectMemoryCandidatePaths {
+  preferredPath: string
+  fallbackPath: string
+}
+
+export interface ResolvedProjectMemoryFile {
+  path: string
+  content?: string
+  error?: string
+  missingFile: boolean
+  source: ProjectMemoryPathSource
+}
+
+let cachedGlobalHomePath: string | undefined
+let cachedLayeredSnapshot: LayeredMemorySnapshot = {
+  globalDailyMemory: [],
+  projectDailyMemory: [],
+  version: 0
+}
+let watchedLayerPath: string | undefined
+let watchedLayerPathKey: string | undefined
+let layeredMemoryWatchCleanup: (() => void) | null = null
+let layeredMemoryVersion = 0
+let layeredMemoryUpdatedAt: number | undefined
+const layeredMemoryListeners = new Set<(snapshot: LayeredMemorySnapshot) => void>()
 
 function parseReadError(raw: string): string | null {
   const trimmed = raw.trim()
@@ -49,6 +97,92 @@ function normalizeWatchPath(pathValue: string): string {
   return normalized
 }
 
+function toOptionalEntry(path: string, content?: string): MemoryLayerEntry | undefined {
+  return content?.trim() ? { path, content } : undefined
+}
+
+function buildDailyMemoryDates(now = new Date()): string[] {
+  const dates: string[] = []
+
+  for (let offset = 0; offset < 2; offset += 1) {
+    const date = new Date(now)
+    date.setDate(now.getDate() - offset)
+    dates.push(date.toISOString().slice(0, 10))
+  }
+
+  return dates
+}
+
+export function isMissingFileErrorMessage(error: string): boolean {
+  return /ENOENT|No such file/i.test(error)
+}
+
+async function loadDailyMemoryEntries(
+  ipc: IPCClient,
+  basePath: string | undefined
+): Promise<DailyMemoryEntry[]> {
+  if (!basePath) return []
+
+  const entries = await Promise.all(
+    buildDailyMemoryDates().map(async (date) => {
+      const path = joinFsPath(basePath, 'memory', `${date}.md`)
+      const content = await loadOptionalMemoryFile(ipc, path)
+      return {
+        date,
+        path,
+        content
+      }
+    })
+  )
+
+  return entries
+    .filter((entry) => entry.content?.trim())
+    .map((entry) => ({
+      date: entry.date,
+      path: entry.path,
+      content: entry.content ?? ''
+    }))
+}
+
+async function loadProjectDailyMemoryEntries(
+  ipc: IPCClient,
+  projectRootPath: string | undefined
+): Promise<DailyMemoryEntry[]> {
+  if (!projectRootPath) return []
+
+  const entries = await Promise.all(
+    buildDailyMemoryDates().map(async (date) => {
+      const resolved = await resolveProjectMemoryTextFile(
+        ipc,
+        projectRootPath,
+        'memory',
+        `${date}.md`
+      )
+      return {
+        date,
+        path: resolved.path,
+        content: resolved.error ? undefined : resolved.content
+      }
+    })
+  )
+
+  return entries
+    .filter((entry) => entry.content?.trim())
+    .map((entry) => ({
+      date: entry.date,
+      path: entry.path,
+      content: entry.content ?? ''
+    }))
+}
+
+function snapshotsEqual(a: LayeredMemorySnapshot, b: LayeredMemorySnapshot): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
+
 export function joinFsPath(basePath: string, ...segments: string[]): string {
   const trimmedBase = basePath.replace(/[\\/]+$/, '')
   const separator = detectPathSeparator(trimmedBase)
@@ -67,9 +201,22 @@ export function joinFsPath(basePath: string, ...segments: string[]): string {
   return [trimmedBase, ...normalizedSegments].join(separator)
 }
 
+export function getProjectMemoryCandidatePaths(
+  projectRootPath: string,
+  ...segments: string[]
+): ProjectMemoryCandidatePaths {
+  return {
+    preferredPath: joinFsPath(projectRootPath, PROJECT_MEMORY_DIRNAME, ...segments),
+    fallbackPath: joinFsPath(projectRootPath, ...segments)
+  }
+}
+
 export async function readTextFile(ipc: IPCClient, filePath: string): Promise<ReadTextFileResult> {
   try {
     const result = await ipc.invoke(IPC.FS_READ_FILE, { path: filePath })
+    if (result && typeof result === 'object' && 'error' in result) {
+      return { error: String((result as { error?: unknown }).error ?? 'Failed to read file') }
+    }
     if (typeof result !== 'string') {
       return { error: 'Unexpected fs:read-file response type' }
     }
@@ -87,6 +234,56 @@ export async function readTextFile(ipc: IPCClient, filePath: string): Promise<Re
   }
 }
 
+export async function resolveTextFileWithFallbackPaths(options: {
+  readFile: (path: string) => Promise<ReadTextFileResult>
+  preferredPath: string
+  fallbackPath: string
+}): Promise<ResolvedProjectMemoryFile> {
+  const preferred = await options.readFile(options.preferredPath)
+  if (!preferred.error) {
+    return {
+      path: options.preferredPath,
+      content: preferred.content ?? '',
+      missingFile: false,
+      source: 'agents-dir'
+    }
+  }
+
+  if (!isMissingFileErrorMessage(preferred.error)) {
+    return {
+      path: options.preferredPath,
+      error: preferred.error,
+      missingFile: false,
+      source: 'agents-dir'
+    }
+  }
+
+  const fallback = await options.readFile(options.fallbackPath)
+  if (!fallback.error) {
+    return {
+      path: options.fallbackPath,
+      content: fallback.content ?? '',
+      missingFile: false,
+      source: 'workspace-root'
+    }
+  }
+
+  if (!isMissingFileErrorMessage(fallback.error)) {
+    return {
+      path: options.fallbackPath,
+      error: fallback.error,
+      missingFile: false,
+      source: 'workspace-root'
+    }
+  }
+
+  return {
+    path: options.preferredPath,
+    missingFile: true,
+    source: 'agents-dir'
+  }
+}
+
 export async function loadOptionalMemoryFile(
   ipc: IPCClient,
   filePath: string
@@ -98,27 +295,60 @@ export async function loadOptionalMemoryFile(
   return content
 }
 
+export async function resolveProjectMemoryTextFile(
+  ipc: IPCClient,
+  projectRootPath: string,
+  ...segments: string[]
+): Promise<ResolvedProjectMemoryFile> {
+  const { preferredPath, fallbackPath } = getProjectMemoryCandidatePaths(
+    projectRootPath,
+    ...segments
+  )
+  return resolveTextFileWithFallbackPaths({
+    readFile: (path) => readTextFile(ipc, path),
+    preferredPath,
+    fallbackPath
+  })
+}
+
+export function getLayeredMemorySnapshot(): LayeredMemorySnapshot {
+  return cachedLayeredSnapshot
+}
+
 export function getGlobalMemorySnapshot(): GlobalMemorySnapshot {
   return {
-    path: cachedGlobalMemoryPath,
-    content: cachedGlobalMemoryContent,
-    version: globalMemoryVersion,
-    updatedAt: globalMemoryUpdatedAt,
+    path: cachedLayeredSnapshot.globalMemory?.path,
+    content: cachedLayeredSnapshot.globalMemory?.content,
+    version: cachedLayeredSnapshot.version,
+    updatedAt: cachedLayeredSnapshot.updatedAt
+  }
+}
+
+export function subscribeLayeredMemoryUpdates(
+  listener: (snapshot: LayeredMemorySnapshot) => void
+): () => void {
+  layeredMemoryListeners.add(listener)
+  return () => {
+    layeredMemoryListeners.delete(listener)
   }
 }
 
 export function subscribeGlobalMemoryUpdates(
   listener: (snapshot: GlobalMemorySnapshot) => void
 ): () => void {
-  globalMemoryListeners.add(listener)
-  return () => {
-    globalMemoryListeners.delete(listener)
-  }
+  return subscribeLayeredMemoryUpdates((snapshot) => {
+    listener({
+      path: snapshot.globalMemory?.path,
+      content: snapshot.globalMemory?.content,
+      version: snapshot.version,
+      updatedAt: snapshot.updatedAt
+    })
+  })
 }
 
-export async function resolveGlobalMemoryPath(ipc: IPCClient): Promise<string | undefined> {
-  if (cachedGlobalMemoryPath) {
-    return cachedGlobalMemoryPath
+export async function resolveGlobalMemoryHomePath(ipc: IPCClient): Promise<string | undefined> {
+  if (cachedGlobalHomePath) {
+    return cachedGlobalHomePath
   }
 
   try {
@@ -127,84 +357,196 @@ export async function resolveGlobalMemoryPath(ipc: IPCClient): Promise<string | 
       return undefined
     }
 
-    cachedGlobalMemoryPath = joinFsPath(homeDirResult, '.open-cowork', 'MEMORY.md')
-    return cachedGlobalMemoryPath
+    cachedGlobalHomePath = joinFsPath(homeDirResult, '.open-cowork')
+    return cachedGlobalHomePath
   } catch {
     return undefined
   }
 }
 
-async function refreshGlobalMemoryContent(
-  ipc: IPCClient,
-  filePath: string
-): Promise<string | undefined> {
-  const previousContent = cachedGlobalMemoryContent
-  const previousPath = cachedGlobalMemoryPath
-  const content = await loadOptionalMemoryFile(ipc, filePath)
-  cachedGlobalMemoryContent = content
-  cachedGlobalMemoryPath = filePath
-
-  const changed = content !== previousContent || filePath !== previousPath
-  if (changed) {
-    globalMemoryVersion += 1
-    globalMemoryUpdatedAt = Date.now()
-    const snapshot = getGlobalMemorySnapshot()
-    for (const listener of globalMemoryListeners) {
-      listener(snapshot)
-    }
-  }
-
-  return content
+export async function resolveGlobalMemoryPath(ipc: IPCClient): Promise<string | undefined> {
+  const homePath = await resolveGlobalMemoryHomePath(ipc)
+  return homePath ? joinFsPath(homePath, 'MEMORY.md') : undefined
 }
 
-async function ensureGlobalMemoryWatcher(ipc: IPCClient, filePath: string): Promise<void> {
-  const normalizedPath = normalizeWatchPath(filePath)
-  if (watchedGlobalMemoryPathKey && watchedGlobalMemoryPathKey === normalizedPath) return
+async function buildLayeredMemorySnapshot(
+  ipc: IPCClient,
+  options: {
+    workingFolder?: string
+    scope?: SessionMemoryScope
+  } = {}
+): Promise<LayeredMemorySnapshot> {
+  const globalHomePath = await resolveGlobalMemoryHomePath(ipc)
+  const projectRootPath = options.workingFolder?.trim() || undefined
+  const scope = options.scope ?? 'main'
 
-  if (globalMemoryWatchCleanup && watchedGlobalMemoryPath) {
-    globalMemoryWatchCleanup()
-    globalMemoryWatchCleanup = null
-    await ipc.invoke(IPC.FS_UNWATCH_FILE, { path: watchedGlobalMemoryPath }).catch(() => {})
+  const globalSoulPath = globalHomePath ? joinFsPath(globalHomePath, 'SOUL.md') : undefined
+  const globalUserPath = globalHomePath ? joinFsPath(globalHomePath, 'USER.md') : undefined
+  const globalMemoryPath = globalHomePath ? joinFsPath(globalHomePath, 'MEMORY.md') : undefined
+
+  const [
+    projectAgentsFile,
+    globalSoulContent,
+    projectSoulFile,
+    globalUserContent,
+    projectUserFile,
+    globalMemoryContent,
+    projectMemoryFile,
+    globalDailyMemory,
+    projectDailyMemory
+  ] = await Promise.all([
+    projectRootPath
+      ? resolveProjectMemoryTextFile(ipc, projectRootPath, 'AGENTS.md')
+      : Promise.resolve(undefined),
+    scope === 'main' && globalSoulPath
+      ? loadOptionalMemoryFile(ipc, globalSoulPath)
+      : Promise.resolve(undefined),
+    scope === 'main' && projectRootPath
+      ? resolveProjectMemoryTextFile(ipc, projectRootPath, 'SOUL.md')
+      : Promise.resolve(undefined),
+    scope === 'main' && globalUserPath
+      ? loadOptionalMemoryFile(ipc, globalUserPath)
+      : Promise.resolve(undefined),
+    scope === 'main' && projectRootPath
+      ? resolveProjectMemoryTextFile(ipc, projectRootPath, 'USER.md')
+      : Promise.resolve(undefined),
+    scope === 'main' && globalMemoryPath
+      ? loadOptionalMemoryFile(ipc, globalMemoryPath)
+      : Promise.resolve(undefined),
+    scope === 'main' && projectRootPath
+      ? resolveProjectMemoryTextFile(ipc, projectRootPath, 'MEMORY.md')
+      : Promise.resolve(undefined),
+    scope === 'main' ? loadDailyMemoryEntries(ipc, globalHomePath) : Promise.resolve([]),
+    scope === 'main' ? loadProjectDailyMemoryEntries(ipc, projectRootPath) : Promise.resolve([])
+  ])
+
+  return {
+    globalHomePath,
+    projectRootPath,
+    agents:
+      projectAgentsFile && !projectAgentsFile.error
+        ? toOptionalEntry(projectAgentsFile.path, projectAgentsFile.content)
+        : undefined,
+    globalSoul: globalSoulPath ? toOptionalEntry(globalSoulPath, globalSoulContent) : undefined,
+    projectSoul:
+      projectSoulFile && !projectSoulFile.error
+        ? toOptionalEntry(projectSoulFile.path, projectSoulFile.content)
+        : undefined,
+    globalUser: globalUserPath ? toOptionalEntry(globalUserPath, globalUserContent) : undefined,
+    projectUser:
+      projectUserFile && !projectUserFile.error
+        ? toOptionalEntry(projectUserFile.path, projectUserFile.content)
+        : undefined,
+    globalMemory: globalMemoryPath
+      ? toOptionalEntry(globalMemoryPath, globalMemoryContent)
+      : undefined,
+    projectMemory:
+      projectMemoryFile && !projectMemoryFile.error
+        ? toOptionalEntry(projectMemoryFile.path, projectMemoryFile.content)
+        : undefined,
+    globalDailyMemory,
+    projectDailyMemory,
+    version: cachedLayeredSnapshot.version,
+    updatedAt: cachedLayeredSnapshot.updatedAt
+  }
+}
+
+async function ensurePrimaryMemoryWatcher(
+  ipc: IPCClient,
+  filePath: string | undefined
+): Promise<void> {
+  const normalizedPath = filePath ? normalizeWatchPath(filePath) : undefined
+  if (normalizedPath && watchedLayerPathKey && watchedLayerPathKey === normalizedPath) return
+
+  if (layeredMemoryWatchCleanup && watchedLayerPath) {
+    layeredMemoryWatchCleanup()
+    layeredMemoryWatchCleanup = null
+    await ipc.invoke(IPC.FS_UNWATCH_FILE, { path: watchedLayerPath }).catch(() => {})
   }
 
-  watchedGlobalMemoryPath = filePath
-  watchedGlobalMemoryPathKey = normalizedPath
+  if (!filePath || !normalizedPath) {
+    watchedLayerPath = undefined
+    watchedLayerPathKey = undefined
+    return
+  }
+
+  watchedLayerPath = filePath
+  watchedLayerPathKey = normalizedPath
   await ipc.invoke(IPC.FS_WATCH_FILE, { path: filePath }).catch(() => {})
-  globalMemoryWatchCleanup = ipc.on(IPC.FS_FILE_CHANGED, (...args: unknown[]) => {
+  layeredMemoryWatchCleanup = ipc.on(IPC.FS_FILE_CHANGED, (...args: unknown[]) => {
     const data = args[1] as { path?: string } | undefined
     if (!data?.path) return
     if (normalizeWatchPath(data.path) !== normalizedPath) return
-    void refreshGlobalMemoryContent(ipc, filePath)
+    void loadLayeredMemorySnapshot(ipc, {
+      workingFolder: cachedLayeredSnapshot.projectRootPath,
+      scope:
+        cachedLayeredSnapshot.globalSoul ||
+        cachedLayeredSnapshot.globalUser ||
+        cachedLayeredSnapshot.globalMemory ||
+        cachedLayeredSnapshot.projectSoul ||
+        cachedLayeredSnapshot.projectUser ||
+        cachedLayeredSnapshot.projectMemory ||
+        cachedLayeredSnapshot.globalDailyMemory.length > 0 ||
+        cachedLayeredSnapshot.projectDailyMemory.length > 0
+          ? 'main'
+          : 'shared'
+    })
   })
+}
+
+export async function loadLayeredMemorySnapshot(
+  ipc: IPCClient,
+  options: {
+    workingFolder?: string
+    scope?: SessionMemoryScope
+  } = {}
+): Promise<LayeredMemorySnapshot> {
+  const nextSnapshot = await buildLayeredMemorySnapshot(ipc, options)
+  const previousSnapshot = cachedLayeredSnapshot
+
+  const materializedSnapshot: LayeredMemorySnapshot = {
+    ...nextSnapshot,
+    version: previousSnapshot.version,
+    updatedAt: previousSnapshot.updatedAt
+  }
+
+  if (!snapshotsEqual(previousSnapshot, materializedSnapshot)) {
+    layeredMemoryVersion += 1
+    layeredMemoryUpdatedAt = Date.now()
+    cachedLayeredSnapshot = {
+      ...materializedSnapshot,
+      version: layeredMemoryVersion,
+      updatedAt: layeredMemoryUpdatedAt
+    }
+
+    for (const listener of layeredMemoryListeners) {
+      listener(cachedLayeredSnapshot)
+    }
+  } else {
+    cachedLayeredSnapshot = {
+      ...materializedSnapshot,
+      version: layeredMemoryVersion,
+      updatedAt: layeredMemoryUpdatedAt
+    }
+  }
+
+  await ensurePrimaryMemoryWatcher(
+    ipc,
+    cachedLayeredSnapshot.globalMemory?.path ||
+      cachedLayeredSnapshot.globalSoul?.path ||
+      cachedLayeredSnapshot.globalUser?.path ||
+      cachedLayeredSnapshot.agents?.path
+  )
+
+  return cachedLayeredSnapshot
 }
 
 export async function loadGlobalMemorySnapshot(
   ipc: IPCClient
 ): Promise<{ path?: string; content?: string }> {
-  const globalPath = await resolveGlobalMemoryPath(ipc)
-  if (!globalPath) {
-    const hadMemory = Boolean(cachedGlobalMemoryPath || cachedGlobalMemoryContent)
-    if (globalMemoryWatchCleanup && watchedGlobalMemoryPath) {
-      globalMemoryWatchCleanup()
-      globalMemoryWatchCleanup = null
-      await ipc.invoke(IPC.FS_UNWATCH_FILE, { path: watchedGlobalMemoryPath }).catch(() => {})
-    }
-    watchedGlobalMemoryPath = undefined
-    watchedGlobalMemoryPathKey = undefined
-    cachedGlobalMemoryContent = undefined
-    cachedGlobalMemoryPath = undefined
-    if (hadMemory) {
-      globalMemoryVersion += 1
-      globalMemoryUpdatedAt = Date.now()
-      const snapshot = getGlobalMemorySnapshot()
-      for (const listener of globalMemoryListeners) {
-        listener(snapshot)
-      }
-    }
-    return {}
+  const snapshot = await loadLayeredMemorySnapshot(ipc, { scope: 'main' })
+  return {
+    path: snapshot.globalMemory?.path,
+    content: snapshot.globalMemory?.content
   }
-
-  const content = await refreshGlobalMemoryContent(ipc, globalPath)
-  await ensureGlobalMemoryWatcher(ipc, globalPath)
-  return { path: globalPath, content }
 }

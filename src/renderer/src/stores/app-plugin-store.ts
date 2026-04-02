@@ -3,8 +3,10 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import type { ProviderConfig } from '@renderer/lib/api/types'
 import { configStorage } from '@renderer/lib/ipc/config-storage'
 import { useProviderStore } from './provider-store'
+import { useChatStore } from './chat-store'
 import {
   APP_PLUGIN_DESCRIPTORS,
+  DESKTOP_CONTROL_PLUGIN_ID,
   IMAGE_PLUGIN_ID,
   type AppPluginDescriptor,
   type AppPluginId,
@@ -21,14 +23,27 @@ function createDefaultPlugin(id: AppPluginId): AppPluginInstance {
   }
 }
 
+const GLOBAL_PROJECT_ID = '__global__'
+
+function resolveProjectId(projectId?: string | null): string {
+  return projectId ?? useChatStore.getState().activeProjectId ?? GLOBAL_PROJECT_ID
+}
+
 function provisionBuiltinPlugins(plugins: AppPluginInstance[]): AppPluginInstance[] {
   const next = plugins.map((plugin) => ({ ...plugin }))
 
   for (const descriptor of APP_PLUGIN_DESCRIPTORS) {
     const existing = next.find((plugin) => plugin.id === descriptor.id)
     if (!existing) {
-      next.push(createDefaultPlugin(descriptor.id))
+      const created = createDefaultPlugin(descriptor.id)
+      if (descriptor.id === DESKTOP_CONTROL_PLUGIN_ID) {
+        created.enabled = false
+      }
+      next.push(created)
       continue
+    }
+    if (descriptor.id === DESKTOP_CONTROL_PLUGIN_ID) {
+      existing.enabled = false
     }
 
     if (typeof existing.useGlobalModel !== 'boolean') {
@@ -54,43 +69,59 @@ function isImageModelEnabled(providerId: string, modelId: string): boolean {
 }
 
 interface AppPluginStore {
-  plugins: AppPluginInstance[]
+  pluginsByProject: Record<string, AppPluginInstance[]>
   getDescriptors: () => AppPluginDescriptor[]
-  getPlugin: (id: AppPluginId) => AppPluginInstance | null
-  updatePlugin: (id: AppPluginId, patch: Partial<AppPluginInstance>) => void
-  togglePluginEnabled: (id: AppPluginId) => void
-  getEnabledPlugins: () => AppPluginInstance[]
-  getResolvedImagePluginConfig: () => ProviderConfig | null
-  isImageToolAvailable: () => boolean
+  getPlugin: (id: AppPluginId, projectId?: string | null) => AppPluginInstance | null
+  updatePlugin: (id: AppPluginId, patch: Partial<AppPluginInstance>, projectId?: string | null) => void
+  togglePluginEnabled: (id: AppPluginId, projectId?: string | null) => void
+  getEnabledPlugins: (projectId?: string | null) => AppPluginInstance[]
+  getResolvedImagePluginConfig: (projectId?: string | null) => ProviderConfig | null
+  isImageToolAvailable: (projectId?: string | null) => boolean
+  isDesktopControlToolAvailable: () => boolean
 }
 
 export const useAppPluginStore = create<AppPluginStore>()(
   persist(
     (set, get) => ({
-      plugins: provisionBuiltinPlugins([]),
+      pluginsByProject: {
+        [GLOBAL_PROJECT_ID]: provisionBuiltinPlugins([])
+      },
 
       getDescriptors: () => APP_PLUGIN_DESCRIPTORS,
 
-      getPlugin: (id) => get().plugins.find((plugin) => plugin.id === id) ?? null,
+      getPlugin: (id, projectId) => {
+        const resolvedProjectId = resolveProjectId(projectId)
+        const plugins = get().pluginsByProject[resolvedProjectId] ?? provisionBuiltinPlugins([])
+        return plugins.find((plugin) => plugin.id === id) ?? null
+      },
 
-      updatePlugin: (id, patch) =>
-        set((state) => ({
-          plugins: state.plugins.map((plugin) =>
+      updatePlugin: (id, patch, projectId) => {
+        const resolvedProjectId = resolveProjectId(projectId)
+        set((state) => {
+          const current = state.pluginsByProject[resolvedProjectId] ?? provisionBuiltinPlugins([])
+          const next = current.map((plugin) =>
             plugin.id === id ? { ...plugin, ...patch } : plugin
           )
-        })),
+          return { pluginsByProject: { ...state.pluginsByProject, [resolvedProjectId]: next } }
+        })
+      },
 
-      togglePluginEnabled: (id) =>
-        set((state) => ({
-          plugins: state.plugins.map((plugin) =>
+      togglePluginEnabled: (id, projectId) => {
+        const resolvedProjectId = resolveProjectId(projectId)
+        set((state) => {
+          const current = state.pluginsByProject[resolvedProjectId] ?? provisionBuiltinPlugins([])
+          const next = current.map((plugin) =>
             plugin.id === id ? { ...plugin, enabled: !plugin.enabled } : plugin
           )
-        })),
+          return { pluginsByProject: { ...state.pluginsByProject, [resolvedProjectId]: next } }
+        })
+      },
 
-      getEnabledPlugins: () => get().plugins.filter((plugin) => plugin.enabled),
+      getEnabledPlugins: (projectId) =>
+        (get().pluginsByProject[resolveProjectId(projectId)] ?? []).filter((plugin) => plugin.enabled),
 
-      getResolvedImagePluginConfig: () => {
-        const plugin = get().getPlugin(IMAGE_PLUGIN_ID)
+      getResolvedImagePluginConfig: (projectId) => {
+        const plugin = get().getPlugin(IMAGE_PLUGIN_ID, projectId)
         if (!plugin?.enabled) return null
 
         const providerStore = useProviderStore.getState()
@@ -105,31 +136,54 @@ export const useAppPluginStore = create<AppPluginStore>()(
         return providerStore.getProviderConfigById(providerId, modelId)
       },
 
-      isImageToolAvailable: () => get().getResolvedImagePluginConfig() !== null
+      isImageToolAvailable: (projectId) => get().getResolvedImagePluginConfig(projectId) !== null,
+
+      isDesktopControlToolAvailable: () => false
     }),
     {
       name: 'opencowork-app-plugins',
-      version: 1,
+      version: 2,
       storage: createJSONStorage(() => configStorage),
       migrate: (persisted) => {
-        const state = (persisted ?? {}) as { plugins?: AppPluginInstance[] }
+        const state = (persisted ?? {}) as {
+          plugins?: AppPluginInstance[]
+          pluginsByProject?: Record<string, AppPluginInstance[]>
+        }
+
+        if (state.pluginsByProject) {
+          return {
+            pluginsByProject: Object.fromEntries(
+              Object.entries(state.pluginsByProject).map(([projectId, plugins]) => [
+                projectId,
+                provisionBuiltinPlugins(Array.isArray(plugins) ? plugins : [])
+              ])
+            )
+          }
+        }
+
         return {
-          ...state,
-          plugins: provisionBuiltinPlugins(Array.isArray(state.plugins) ? state.plugins : [])
+          pluginsByProject: {
+            [GLOBAL_PROJECT_ID]: provisionBuiltinPlugins(Array.isArray(state.plugins) ? state.plugins : [])
+          }
         }
       },
       partialize: (state) => ({
-        plugins: state.plugins
+        pluginsByProject: state.pluginsByProject
       })
     }
   )
 )
 
 function ensureBuiltinPlugins(): void {
-  const current = useAppPluginStore.getState().plugins
-  const next = provisionBuiltinPlugins(current)
+  const current = useAppPluginStore.getState().pluginsByProject
+  const next = Object.fromEntries(
+    Object.entries(current).map(([projectId, plugins]) => [
+      projectId,
+      provisionBuiltinPlugins(Array.isArray(plugins) ? plugins : [])
+    ])
+  )
   if (JSON.stringify(current) !== JSON.stringify(next)) {
-    useAppPluginStore.setState({ plugins: next })
+    useAppPluginStore.setState({ pluginsByProject: next })
   }
 }
 

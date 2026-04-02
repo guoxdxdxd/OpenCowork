@@ -5,10 +5,38 @@ import type {
   ToolDefinition,
   UnifiedMessage,
   ContentBlock,
-  TokenUsage,
+  TokenUsage
 } from './types'
 import { ipcStreamRequest, maskHeaders } from '../ipc/api-stream'
 import { registerProvider } from './provider'
+
+function buildAnthropicCacheControl(): { type: 'ephemeral' } {
+  return { type: 'ephemeral' }
+}
+
+function resolveAnthropicEffort(
+  config: ProviderConfig
+): 'low' | 'medium' | 'high' | 'max' | undefined {
+  const levels = config.thinkingConfig?.reasoningEffortLevels
+  if (!levels || levels.length === 0) return undefined
+
+  const selected =
+    config.reasoningEffort && levels.includes(config.reasoningEffort)
+      ? config.reasoningEffort
+      : (config.thinkingConfig?.defaultReasoningEffort ?? levels[0])
+
+  switch (selected) {
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'max':
+      return selected
+    case 'xhigh':
+      return 'max'
+    default:
+      return undefined
+  }
+}
 
 class AnthropicProvider implements APIProvider {
   readonly name = 'Anthropic Messages'
@@ -23,20 +51,45 @@ class AnthropicProvider implements APIProvider {
     const requestStartedAt = Date.now()
     let firstTokenAt: number | null = null
     let outputTokens = 0
+    const promptCacheEnabled = config.enablePromptCache !== false
+    const systemPromptCacheEnabled = promptCacheEnabled || config.enableSystemPromptCache === true
     const body: Record<string, unknown> = {
       model: config.model,
       max_tokens: config.maxTokens ?? 32000,
+      ...(promptCacheEnabled ? { cache_control: buildAnthropicCacheControl() } : {}),
       ...(config.systemPrompt
-        ? { system: [{ type: 'text', text: config.systemPrompt, ...(config.enableSystemPromptCache ? { cache_control: { type: 'ephemeral' } } : {}) }] }
+        ? {
+            system: [
+              {
+                type: 'text',
+                text: config.systemPrompt,
+                ...(systemPromptCacheEnabled ? { cache_control: buildAnthropicCacheControl() } : {})
+              }
+            ]
+          }
         : {}),
-      messages: this.formatMessages(messages),
-      ...(tools.length > 0 ? { tools: this.formatTools(tools), tool_choice: { type: 'auto' } } : {}),
-      stream: true,
+      messages: this.formatMessages(
+        this.normalizeMessagesForAnthropic(messages),
+        promptCacheEnabled
+      ),
+      ...(tools.length > 0
+        ? { tools: this.formatTools(tools, promptCacheEnabled), tool_choice: { type: 'auto' } }
+        : {}),
+      stream: true
     }
 
     // Merge thinking/reasoning params when enabled; explicit disable params when off
     if (config.thinkingEnabled && config.thinkingConfig) {
       Object.assign(body, config.thinkingConfig.bodyParams)
+      const effort = resolveAnthropicEffort(config)
+      if (effort) {
+        body.output_config = {
+          ...(typeof body.output_config === 'object' && body.output_config !== null
+            ? (body.output_config as Record<string, unknown>)
+            : {}),
+          effort
+        }
+      }
       if (config.thinkingConfig.forceTemperature !== undefined) {
         body.temperature = config.thinkingConfig.forceTemperature
       }
@@ -51,13 +104,21 @@ class AnthropicProvider implements APIProvider {
       'Content-Type': 'application/json',
       'x-api-key': config.apiKey,
       'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
+      'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14'
     }
     if (config.userAgent) headers['User-Agent'] = config.userAgent
     const bodyStr = JSON.stringify(body)
 
-    // Yield debug info for dev mode inspection
-    yield { type: 'request_debug', debugInfo: { url, method: 'POST', headers: maskHeaders(headers), body: bodyStr, timestamp: Date.now() } }
+    yield {
+      type: 'request_debug',
+      debugInfo: {
+        url,
+        method: 'POST',
+        headers: maskHeaders(headers),
+        body: bodyStr,
+        timestamp: Date.now()
+      }
+    }
 
     const toolBuffersByBlockIndex = new Map<number, string>()
     const toolCallsByBlockIndex = new Map<number, { id: string; name: string }>()
@@ -71,7 +132,7 @@ class AnthropicProvider implements APIProvider {
       return {
         type: 'thinking_encrypted',
         thinkingEncryptedContent: trimmed,
-        thinkingEncryptedProvider: 'anthropic',
+        thinkingEncryptedProvider: 'anthropic'
       }
     }
 
@@ -88,7 +149,7 @@ class AnthropicProvider implements APIProvider {
       body: bodyStr,
       signal,
       providerId: config.providerId,
-      providerBuiltinId: config.providerBuiltinId,
+      providerBuiltinId: config.providerBuiltinId
     })) {
       if (!sse.data || sse.data === '[DONE]') continue
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -121,12 +182,12 @@ class AnthropicProvider implements APIProvider {
             toolBuffersByBlockIndex.set(blockIndex, '')
             toolCallsByBlockIndex.set(blockIndex, {
               id: data.content_block.id,
-              name: data.content_block.name,
+              name: data.content_block.name
             })
             yield {
               type: 'tool_call_start',
               toolCallId: data.content_block.id,
-              toolName: data.content_block.name,
+              toolName: data.content_block.name
             }
           } else if (data.content_block.type === 'thinking') {
             const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
@@ -161,7 +222,7 @@ class AnthropicProvider implements APIProvider {
             yield {
               type: 'tool_call_delta',
               toolCallId: toolCall?.id,
-              argumentsDelta: data.delta.partial_json,
+              argumentsDelta: data.delta.partial_json
             }
           }
           break
@@ -178,14 +239,14 @@ class AnthropicProvider implements APIProvider {
                   type: 'tool_call_end',
                   toolCallId: toolCall.id,
                   toolName: toolCall.name,
-                  toolCallInput: JSON.parse(raw),
+                  toolCallInput: JSON.parse(raw)
                 }
               } catch {
                 yield {
                   type: 'tool_call_end',
                   toolCallId: toolCall.id,
                   toolName: toolCall.name,
-                  toolCallInput: {},
+                  toolCallInput: {}
                 }
               }
             } else {
@@ -194,7 +255,7 @@ class AnthropicProvider implements APIProvider {
                 type: 'tool_call_end',
                 toolCallId: toolCall.id,
                 toolName: toolCall.name,
-                toolCallInput: {},
+                toolCallInput: {}
               }
             }
             toolBuffersByBlockIndex.delete(blockIndex)
@@ -220,7 +281,7 @@ class AnthropicProvider implements APIProvider {
                 type: 'tool_call_end',
                 toolCallId: toolCall.id,
                 toolName: toolCall.name,
-                toolCallInput: parsed,
+                toolCallInput: parsed
               }
             }
             toolCallsByBlockIndex.clear()
@@ -237,8 +298,8 @@ class AnthropicProvider implements APIProvider {
             timing: {
               totalMs: requestCompletedAt - requestStartedAt,
               ttftMs: firstTokenAt ? firstTokenAt - requestStartedAt : undefined,
-              tps: computeTps(outputTokens, firstTokenAt, requestCompletedAt),
-            },
+              tps: computeTps(outputTokens, firstTokenAt, requestCompletedAt)
+            }
           }
           break
         }
@@ -250,8 +311,8 @@ class AnthropicProvider implements APIProvider {
     }
   }
 
-  formatMessages(messages: UnifiedMessage[]): unknown[] {
-    return messages
+  formatMessages(messages: UnifiedMessage[], promptCacheEnabled = false): unknown[] {
+    const formattedMessages = messages
       .filter((m) => m.role !== 'system')
       .map((m) => {
         if (typeof m.content === 'string') {
@@ -267,9 +328,10 @@ class AnthropicProvider implements APIProvider {
                 return {
                   type: 'thinking',
                   thinking: b.thinking,
-                  ...(b.encryptedContent && (b.encryptedContentProvider === 'anthropic' || !b.encryptedContentProvider)
+                  ...(b.encryptedContent &&
+                  (b.encryptedContentProvider === 'anthropic' || !b.encryptedContentProvider)
                     ? { signature: b.encryptedContent }
-                    : {}),
+                    : {})
                 }
               case 'text':
                 return { type: 'text', text: b.text }
@@ -280,7 +342,14 @@ class AnthropicProvider implements APIProvider {
                 if (Array.isArray(b.content)) {
                   formattedContent = b.content.map((cb) => {
                     if (cb.type === 'image') {
-                      return { type: 'image', source: { type: cb.source.type, media_type: cb.source.mediaType, data: cb.source.data } }
+                      return {
+                        type: 'image',
+                        source: {
+                          type: cb.source.type,
+                          media_type: cb.source.mediaType,
+                          data: cb.source.data
+                        }
+                      }
                     }
                     return cb
                   })
@@ -288,21 +357,167 @@ class AnthropicProvider implements APIProvider {
                 return { type: 'tool_result', tool_use_id: b.toolUseId, content: formattedContent }
               }
               case 'image':
-                return { type: 'image', source: b.source }
+                return {
+                  type: 'image',
+                  source: {
+                    type: b.source.type,
+                    media_type: b.source.mediaType,
+                    data: b.source.data,
+                    ...(b.source.url ? { url: b.source.url } : {})
+                  }
+                }
               default:
                 return { type: 'text', text: '[unsupported block]' }
             }
-          }),
+          })
         }
       })
+
+    if (promptCacheEnabled) {
+      this.applyMessageCacheBreakpoint(
+        formattedMessages as Array<{ content: string | Array<Record<string, unknown>> }>
+      )
+    }
+
+    return formattedMessages
   }
 
-  formatTools(tools: ToolDefinition[]): unknown[] {
-    return tools.map((t) => ({
+  private normalizeMessagesForAnthropic(messages: UnifiedMessage[]): UnifiedMessage[] {
+    const normalized: UnifiedMessage[] = []
+    const validToolUseIds = new Set<string>()
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (message.role === 'system' || typeof message.content === 'string') {
+        normalized.push(message)
+        continue
+      }
+
+      const blocks = message.content as ContentBlock[]
+      const toolUseIds = blocks
+        .filter(
+          (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use'
+        )
+        .map((block) => block.id)
+
+      let nextBlocks = blocks
+
+      if (toolUseIds.length > 0) {
+        const nextMessage = messages[index + 1]
+        const hasImmediateToolResultMessage =
+          nextMessage?.role === 'user' &&
+          Array.isArray(nextMessage.content) &&
+          toolUseIds.every((toolUseId) =>
+            (nextMessage.content as ContentBlock[]).some(
+              (block) => block.type === 'tool_result' && block.toolUseId === toolUseId
+            )
+          )
+
+        if (hasImmediateToolResultMessage) {
+          for (const toolUseId of toolUseIds) validToolUseIds.add(toolUseId)
+        } else {
+          nextBlocks = nextBlocks.map((block) => {
+            if (block.type !== 'tool_use' || !toolUseIds.includes(block.id)) return block
+            return {
+              type: 'text' as const,
+              text: `[Previous tool call omitted for Anthropic replay] ${block.name} ${JSON.stringify(block.input).slice(0, 200)}`
+            }
+          })
+        }
+      }
+
+      const sanitizedBlocks = nextBlocks.map((block) => {
+        if (block.type !== 'tool_result') return block
+        if (validToolUseIds.has(block.toolUseId)) return block
+        const content =
+          typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+        return {
+          type: 'text' as const,
+          text: `[Previous tool result omitted for Anthropic replay] ${content.slice(0, 300)}`
+        }
+      })
+
+      normalized.push({ ...message, content: sanitizedBlocks })
+    }
+
+    return normalized
+  }
+
+  private applyMessageCacheBreakpoint(
+    messages: Array<{ content: string | Array<Record<string, unknown>> }>
+  ): void {
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const message = messages[messageIndex]
+      if (typeof message.content === 'string') {
+        if (!message.content.trim()) continue
+        message.content = [
+          {
+            type: 'text',
+            text: message.content,
+            cache_control: buildAnthropicCacheControl()
+          }
+        ]
+        return
+      }
+
+      for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
+        const block = message.content[blockIndex]
+        if (!this.isExplicitPromptCacheableBlock(block)) continue
+        message.content[blockIndex] = {
+          ...block,
+          cache_control: buildAnthropicCacheControl()
+        }
+        return
+      }
+    }
+  }
+
+  private isExplicitPromptCacheableBlock(block: Record<string, unknown>): boolean {
+    const blockType = block.type
+    return blockType === 'text' || blockType === 'image' || blockType === 'tool_result'
+  }
+
+  formatTools(tools: ToolDefinition[], promptCacheEnabled = false): unknown[] {
+    return tools.map((t, index) => ({
       name: t.name,
       description: t.description,
-      input_schema: t.inputSchema,
+      input_schema: this.normalizeToolSchema(t.inputSchema),
+      ...(promptCacheEnabled && index === tools.length - 1
+        ? { cache_control: buildAnthropicCacheControl() }
+        : {})
     }))
+  }
+
+  private normalizeToolSchema(schema: ToolDefinition['inputSchema']): Record<string, unknown> {
+    if ('properties' in schema) return schema
+
+    const mergedProperties: Record<string, unknown> = {}
+    let requiredIntersection: string[] | null = null
+
+    for (const variant of schema.oneOf) {
+      for (const [key, value] of Object.entries(variant.properties ?? {})) {
+        if (!(key in mergedProperties)) mergedProperties[key] = value
+      }
+
+      const required = variant.required ?? []
+      if (requiredIntersection === null) {
+        requiredIntersection = [...required]
+      } else {
+        requiredIntersection = requiredIntersection.filter((key) => required.includes(key))
+      }
+    }
+
+    const normalized: Record<string, unknown> = {
+      type: 'object',
+      properties: mergedProperties,
+      additionalProperties: false
+    }
+
+    if (requiredIntersection && requiredIntersection.length > 0) {
+      normalized.required = requiredIntersection
+    }
+
+    return normalized
   }
 }
 
@@ -310,7 +525,11 @@ export function registerAnthropicProvider(): void {
   registerProvider('anthropic', () => new AnthropicProvider())
 }
 
-function computeTps(outputTokens: number, firstTokenAt: number | null, completedAt: number): number | undefined {
+function computeTps(
+  outputTokens: number,
+  firstTokenAt: number | null,
+  completedAt: number
+): number | undefined {
   if (!firstTokenAt || outputTokens <= 0) return undefined
   const durationMs = completedAt - firstTokenAt
   if (durationMs <= 0) return undefined

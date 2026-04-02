@@ -14,19 +14,13 @@ export interface SessionRow {
   plugin_id: string | null
   provider_id: string | null
   model_id: string | null
+  long_running_mode: number | null
   message_count?: number
 }
 
 export function listSessions(): SessionRow[] {
   const db = getDb()
-  return db
-    .prepare(
-      `SELECT s.*,
-              (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
-         FROM sessions s
-        ORDER BY s.updated_at DESC`
-    )
-    .all() as SessionRow[]
+  return db.prepare(`SELECT * FROM sessions ORDER BY updated_at DESC`).all() as SessionRow[]
 }
 
 export function getSession(id: string): SessionRow | undefined {
@@ -48,11 +42,12 @@ export function createSession(session: {
   pluginId?: string
   providerId?: string
   modelId?: string
+  longRunningMode?: boolean
 }): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, project_id, working_folder, ssh_connection_id, pinned, plugin_id, provider_id, model_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, message_count, project_id, working_folder, ssh_connection_id, pinned, plugin_id, provider_id, model_id, long_running_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     session.id,
     session.title,
@@ -60,13 +55,15 @@ export function createSession(session: {
     session.mode,
     session.createdAt,
     session.updatedAt,
+    0,
     session.projectId ?? null,
     session.workingFolder ?? null,
     session.sshConnectionId ?? null,
     session.pinned ? 1 : 0,
     session.pluginId ?? null,
     session.providerId ?? null,
-    session.modelId ?? null
+    session.modelId ?? null,
+    session.longRunningMode ? 1 : 0
   )
 }
 
@@ -84,6 +81,7 @@ export function updateSession(
     pluginId: string | null
     providerId: string | null
     modelId: string | null
+    longRunningMode: boolean
   }>
 ): void {
   const db = getDb()
@@ -133,6 +131,10 @@ export function updateSession(
   if (patch.modelId !== undefined) {
     sets.push('model_id = ?')
     values.push(patch.modelId)
+  }
+  if (patch.longRunningMode !== undefined) {
+    sets.push('long_running_mode = ?')
+    values.push(patch.longRunningMode ? 1 : 0)
   }
 
   if (sets.length === 0) return

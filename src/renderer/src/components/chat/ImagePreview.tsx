@@ -1,40 +1,162 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { X, Download, Copy, Check } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
+import { IPC } from '@renderer/lib/ipc/channels'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 
 interface ImagePreviewProps {
   src: string
   alt?: string
+  filePath?: string
 }
 
-export function ImagePreview({ src, alt = 'Generated image' }: ImagePreviewProps): React.JSX.Element {
+function getDownloadExtension(imageSrc: string): string {
+  if (imageSrc.startsWith('data:')) {
+    const mimeType = imageSrc.slice(5, imageSrc.indexOf(';'))
+    if (mimeType === 'image/jpeg') return '.jpg'
+    if (mimeType === 'image/webp') return '.webp'
+    if (mimeType === 'image/gif') return '.gif'
+    if (mimeType === 'image/bmp') return '.bmp'
+    if (mimeType === 'image/svg+xml') return '.svg'
+    return '.png'
+  }
+
+  const fileExt = imageSrc.split('?')[0].split('.').pop()?.toLowerCase()
+  return fileExt ? `.${fileExt}` : '.png'
+}
+
+function dataUrlToBlob(dataUrl: string): Blob {
+  const commaIndex = dataUrl.indexOf(',')
+  if (commaIndex === -1) throw new Error('Invalid data URL')
+
+  const metadata = dataUrl.slice(5, commaIndex)
+  const data = dataUrl.slice(commaIndex + 1)
+  const mimeType = metadata.split(';')[0] || 'application/octet-stream'
+
+  if (metadata.includes(';base64')) {
+    const binary = window.atob(data)
+    const bytes = new Uint8Array(binary.length)
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+
+    return new Blob([bytes], { type: mimeType })
+  }
+
+  return new Blob([decodeURIComponent(data)], { type: mimeType })
+}
+
+function getFileName(filePath: string): string {
+  const parts = filePath.split(/[\\/]/)
+  return parts[parts.length - 1] || `image-${Date.now()}.png`
+}
+
+async function downloadPersistedImage(
+  filePath: string,
+  defaultName: string
+): Promise<{ canceled?: boolean }> {
+  const readResult = (await ipcClient.invoke(IPC.FS_READ_FILE_BINARY, {
+    path: filePath
+  })) as { data?: string; error?: string }
+
+  if (readResult.error || !readResult.data) {
+    throw new Error(readResult.error || 'Failed to read image file')
+  }
+
+  const saveResult = (await ipcClient.invoke(IPC.FS_SELECT_SAVE_FILE, {
+    defaultPath: defaultName,
+    filters: [
+      {
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg']
+      }
+    ]
+  })) as { path?: string; canceled?: boolean }
+
+  if (saveResult.canceled || !saveResult.path) {
+    return { canceled: true }
+  }
+
+  const writeResult = (await ipcClient.invoke(IPC.FS_WRITE_FILE_BINARY, {
+    path: saveResult.path,
+    data: readResult.data
+  })) as { success?: boolean; error?: string }
+
+  if (writeResult.error) {
+    throw new Error(writeResult.error)
+  }
+
+  return { canceled: false }
+}
+
+export function ImagePreview({
+  src,
+  alt = 'Generated image',
+  filePath
+}: ImagePreviewProps): React.JSX.Element {
   const [isOpen, setIsOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [resolvedSrc, setResolvedSrc] = useState(src)
 
-  const handleDownload = async () => {
+  useEffect(() => {
+    let cancelled = false
+
+    if (!/^https?:\/\//i.test(src)) {
+      setResolvedSrc(src)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setResolvedSrc('')
+    void window.api
+      .fetchImageBase64({ url: src })
+      .then((result) => {
+        if (cancelled) return
+        if (result.data) {
+          setResolvedSrc(`data:${result.mimeType || 'image/png'};base64,${result.data}`)
+          return
+        }
+        setResolvedSrc(src)
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedSrc(src)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [src])
+
+  const effectiveSrc = resolvedSrc || src
+
+  const handleDownload = async (): Promise<void> => {
     try {
-      let blob: Blob
+      const defaultName = filePath
+        ? getFileName(filePath)
+        : `image-${Date.now()}${getDownloadExtension(effectiveSrc)}`
 
-      if (src.startsWith('data:')) {
-        // For base64 images
-        const response = await fetch(src)
-        blob = await response.blob()
+      if (filePath) {
+        const result = await downloadPersistedImage(filePath, defaultName)
+        if (result.canceled) return
+      } else if (effectiveSrc.startsWith('data:')) {
+        const blob = dataUrlToBlob(effectiveSrc)
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = defaultName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       } else {
-        // For URL images, use Electron's fetch (no CORS restrictions)
-        const response = await fetch(src)
-        blob = await response.blob()
+        const result = await window.api.downloadImage({ url: effectiveSrc, defaultName })
+        if (result.error) throw new Error(result.error)
+        if (result.canceled) return
       }
 
-      // Create download link
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `image-${Date.now()}.png`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
       toast.success('Image downloaded')
     } catch (error) {
       console.error('Download failed:', error)
@@ -42,33 +164,28 @@ export function ImagePreview({ src, alt = 'Generated image' }: ImagePreviewProps
     }
   }
 
-  const handleCopy = async () => {
+  const handleCopy = async (): Promise<void> => {
     try {
-      let blob: Blob
+      let imageBase64: string
 
-      if (src.startsWith('data:')) {
-        // For base64 images
-        const response = await fetch(src)
-        blob = await response.blob()
+      if (effectiveSrc.startsWith('data:')) {
+        const parts = effectiveSrc.split(',', 2)
+        if (parts.length !== 2) throw new Error('Invalid data URL')
+        imageBase64 = parts[1]
       } else {
-        // For URL images, use Electron's fetch (no CORS restrictions)
-        const response = await fetch(src)
-        blob = await response.blob()
+        const result = await window.api.fetchImageBase64({ url: effectiveSrc })
+        if (result.error || !result.data) {
+          throw new Error(result.error || 'Failed to fetch image data')
+        }
+        imageBase64 = result.data
       }
 
-      // Copy image to clipboard
-      if (navigator.clipboard && ClipboardItem) {
-        // Ensure we have a valid image MIME type
-        const imageType = blob.type.startsWith('image/') ? blob.type : 'image/png'
-        await navigator.clipboard.write([
-          new ClipboardItem({ [imageType]: blob })
-        ])
-        setCopied(true)
-        toast.success('Image copied to clipboard')
-        setTimeout(() => setCopied(false), 2000)
-      } else {
-        throw new Error('Clipboard API not supported')
-      }
+      const result = await window.api.writeImageToClipboard({ data: imageBase64 })
+      if (result.error) throw new Error(result.error)
+
+      setCopied(true)
+      toast.success('Image copied to clipboard')
+      setTimeout(() => setCopied(false), 2000)
     } catch (error) {
       console.error('Copy failed:', error)
       toast.error('Failed to copy image. Please try downloading instead.')
@@ -79,15 +196,18 @@ export function ImagePreview({ src, alt = 'Generated image' }: ImagePreviewProps
     <>
       {/* Thumbnail */}
       <div
-        className="relative max-w-lg rounded-lg overflow-hidden border border-border/50 cursor-pointer hover:border-primary/50 transition-colors group"
-        onClick={() => setIsOpen(true)}
+        className="relative max-w-lg overflow-hidden rounded-lg border border-border/50 transition-colors group hover:border-primary/50"
+        onClick={() => {
+          if (effectiveSrc) setIsOpen(true)
+        }}
       >
-        <img
-          src={src}
-          alt={alt}
-          className="w-full h-auto"
-          loading="lazy"
-        />
+        {effectiveSrc ? (
+          <img src={effectiveSrc} alt={alt} className="w-full h-auto" loading="lazy" />
+        ) : (
+          <div className="flex aspect-square w-full items-center justify-center bg-muted/20 text-xs text-muted-foreground">
+            Loading image...
+          </div>
+        )}
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
           <div className="opacity-0 group-hover:opacity-100 transition-opacity text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded-full">
             Click to enlarge
@@ -144,7 +264,7 @@ export function ImagePreview({ src, alt = 'Generated image' }: ImagePreviewProps
               initial={{ scale: 0.9 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.9 }}
-              src={src}
+              src={effectiveSrc}
               alt={alt}
               className="max-w-full max-h-full object-contain"
               onClick={(e) => e.stopPropagation()}

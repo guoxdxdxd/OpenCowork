@@ -10,6 +10,7 @@ type GitIgnoreRule = {
   negated: boolean
   directoryOnly: boolean
   basenameOnly: boolean
+  anchoredToBaseDir: boolean
   regex: RegExp
 }
 
@@ -45,6 +46,27 @@ function compileIgnoreRegex(pattern: string): RegExp {
   return new RegExp(`^${regexBody}$`)
 }
 
+function stripUnescapedTrailingSpaces(pattern: string): string {
+  let end = pattern.length
+  while (end > 0 && pattern[end - 1] === ' ') {
+    let backslashCount = 0
+    for (let index = end - 2; index >= 0 && pattern[index] === '\\'; index -= 1) {
+      backslashCount += 1
+    }
+    if (backslashCount % 2 === 1) break
+    end -= 1
+  }
+  return pattern.slice(0, end)
+}
+
+function isEscapedAt(input: string, index: number): boolean {
+  let backslashCount = 0
+  for (let cursor = index - 1; cursor >= 0 && input[cursor] === '\\'; cursor -= 1) {
+    backslashCount += 1
+  }
+  return backslashCount % 2 === 1
+}
+
 function unescapeIgnorePattern(pattern: string): string {
   return pattern.replace(/\\([#! ])/g, '$1').replace(/\\\\/g, '\\')
 }
@@ -53,18 +75,19 @@ function parseGitIgnoreRules(baseDir: string, content: string): GitIgnoreRule[] 
   const rules: GitIgnoreRule[] = []
 
   for (const rawLine of content.split(/\r?\n/)) {
-    let line = rawLine.trim()
-    if (!line) continue
-    if (line.startsWith('#')) continue
+    let line = stripUnescapedTrailingSpaces(rawLine)
+    if (!line.trim()) continue
+    if (line[0] === '#' && !isEscapedAt(line, 0)) continue
 
     let negated = false
-    if (line.startsWith('!')) {
+    if (line[0] === '!' && !isEscapedAt(line, 0)) {
       negated = true
-      line = line.slice(1).trim()
+      line = line.slice(1)
     }
     if (!line) continue
 
     line = unescapeIgnorePattern(line)
+    if (!line) continue
 
     let directoryOnly = false
     if (line.endsWith('/')) {
@@ -73,16 +96,20 @@ function parseGitIgnoreRules(baseDir: string, content: string): GitIgnoreRule[] 
     }
     if (!line) continue
 
-    const basenameOnly = !line.includes('/')
-    if (line.startsWith('/')) {
+    const anchoredToBaseDir = line.startsWith('/')
+    if (anchoredToBaseDir) {
       line = line.slice(1)
     }
+    if (!line) continue
+
+    const basenameOnly = !line.includes('/')
 
     rules.push({
       baseDir,
       negated,
       directoryOnly,
       basenameOnly,
+      anchoredToBaseDir,
       regex: compileIgnoreRegex(line)
     })
   }
@@ -117,6 +144,13 @@ function matchesGitIgnoreRule(rule: GitIgnoreRule, targetPath: string, isDir: bo
       if (rule.directoryOnly && !candidate.isDir) return false
       return rule.regex.test(candidate.name)
     })
+  }
+
+  if (rule.anchoredToBaseDir) {
+    const targetCandidate = candidates[candidates.length - 1]
+    if (!targetCandidate) return false
+    if (rule.directoryOnly && !targetCandidate.isDir) return false
+    return rule.regex.test(targetCandidate.path)
   }
 
   return candidates.some((candidate) => {

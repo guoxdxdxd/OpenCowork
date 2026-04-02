@@ -1,41 +1,49 @@
-'use client';
+'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-  Search, ExternalLink, Github, Wand2,
-  Copy, Check, ChevronLeft, ChevronRight, Download, Loader2,
-} from 'lucide-react';
+  Search,
+  ExternalLink,
+  Github,
+  Wand2,
+  Copy,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Loader2
+} from 'lucide-react'
 
 interface Skill {
-  id: string;
-  name: string;
-  owner: string;
-  repo: string;
-  rank: number;
-  installs: number;
-  url: string;
-  github: string;
+  id: string
+  name: string
+  owner: string
+  repo: string
+  rank: number
+  installs: number
+  url: string
+  github: string
 }
 
 interface SkillsIndex {
-  total: number;
-  totalPages: number;
-  pageSize: number;
-  owners: { name: string; count: number }[];
+  total: number
+  totalPages: number
+  pageSize: number
+  owners: { name: string; count: number }[]
 }
 
 interface PageData {
-  page: number;
-  pageSize: number;
-  totalPages: number;
-  total: number;
-  skills: Skill[];
+  page: number
+  pageSize: number
+  totalPages: number
+  total: number
+  skills: Skill[]
 }
 
 function formatInstalls(n: number): string {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
+  return String(n)
 }
 
 const OWNERS_COLORS: Record<string, string> = {
@@ -46,121 +54,132 @@ const OWNERS_COLORS: Record<string, string> = {
   expo: 'bg-violet-100 text-violet-800 dark:bg-violet-900/30 dark:text-violet-300',
   obra: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
   supabase: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300',
-  antfu: 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-300',
-};
+  antfu: 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-300'
+}
 
 function OwnerBadge({ owner }: { owner: string }) {
-  const cls = OWNERS_COLORS[owner] ?? 'bg-muted text-muted-foreground';
+  const cls = OWNERS_COLORS[owner] ?? 'bg-muted text-muted-foreground'
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}>
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
+    >
       {owner}
     </span>
-  );
+  )
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState(false)
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [text]);
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [text])
   return (
     <button
-      onClick={(e) => { e.stopPropagation(); handleCopy(); }}
+      onClick={(e) => {
+        e.stopPropagation()
+        handleCopy()
+      }}
       className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-mono bg-muted/50 hover:bg-muted transition-colors"
       title="Copy install command"
     >
       {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
       {label}
     </button>
-  );
+  )
 }
 
 export default function SkillsPage() {
-  const [index, setIndex] = useState<SkillsIndex | null>(null);
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [selectedOwner, setSelectedOwner] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Skill | null>(null);
-  const [page, setPage] = useState(1);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const searchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [index, setIndex] = useState<SkillsIndex | null>(null)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [total, setTotal] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [selectedOwner, setSelectedOwner] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Skill | null>(null)
+  const [page, setPage] = useState(1)
+  const [installing, setInstalling] = useState<string | null>(null)
+  const searchTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   // Load index on mount
   useEffect(() => {
     fetch('/skills/index.json')
       .then((r) => r.json())
-      .then((d: SkillsIndex) => setIndex(d));
-  }, []);
+      .then((d: SkillsIndex) => setIndex(d))
+  }, [])
 
   // Fetch skills page from API
   const fetchSkills = useCallback(async (p: number, q: string, owner: string | null) => {
-    setLoading(true);
+    setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(p) });
-      if (q) params.set('q', q);
-      if (owner) params.set('owner', owner);
-      const resp = await fetch(`/api/skills?${params}`);
-      const data: PageData = await resp.json();
-      setSkills(data.skills);
-      setTotal(data.total);
-      setTotalPages(data.totalPages);
+      const params = new URLSearchParams({ page: String(p) })
+      if (q) params.set('q', q)
+      if (owner) params.set('owner', owner)
+      const resp = await fetch(`/api/skills?${params}`)
+      const data: PageData = await resp.json()
+      setSkills(data.skills)
+      setTotal(data.total)
+      setTotalPages(data.totalPages)
     } catch {
-      setSkills([]);
+      setSkills([])
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  }, []);
+  }, [])
 
   // Fetch on page change
   useEffect(() => {
-    fetchSkills(page, search, selectedOwner);
-  }, [page, fetchSkills]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchSkills(page, search, selectedOwner)
+  }, [page, fetchSkills]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Debounced search
-  const handleSearch = useCallback((value: string) => {
-    setSearch(value);
-    clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      setPage(1);
-      fetchSkills(1, value, selectedOwner);
-    }, 300);
-  }, [selectedOwner, fetchSkills]);
+  const handleSearch = useCallback(
+    (value: string) => {
+      setSearch(value)
+      clearTimeout(searchTimer.current)
+      searchTimer.current = setTimeout(() => {
+        setPage(1)
+        fetchSkills(1, value, selectedOwner)
+      }, 300)
+    },
+    [selectedOwner, fetchSkills]
+  )
 
   // Owner filter
-  const handleOwnerFilter = useCallback((owner: string | null) => {
-    setSelectedOwner(owner);
-    setPage(1);
-    fetchSkills(1, search, owner);
-  }, [search, fetchSkills]);
+  const handleOwnerFilter = useCallback(
+    (owner: string | null) => {
+      setSelectedOwner(owner)
+      setPage(1)
+      fetchSkills(1, search, owner)
+    },
+    [search, fetchSkills]
+  )
 
   // Download skill
   const handleDownload = useCallback(async (skill: Skill) => {
-    setInstalling(skill.id);
+    setInstalling(skill.id)
     try {
-      const resp = await fetch(`/api/skills/download/${skill.owner}/${skill.repo}/${skill.name}`);
-      const data = await resp.json();
+      const resp = await fetch(`/api/skills/download/${skill.owner}/${skill.repo}/${skill.name}`)
+      const data = await resp.json()
       if (resp.ok) {
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${skill.name}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${skill.name}.json`
+        a.click()
+        URL.revokeObjectURL(url)
       } else {
-        alert(data.error || 'Failed to download skill');
+        alert(data.error || 'Failed to download skill')
       }
     } catch {
-      alert('Failed to download skill');
+      alert('Failed to download skill')
     } finally {
-      setInstalling(null);
+      setInstalling(null)
     }
-  }, []);
+  }, [])
 
   if (!index) {
     return (
@@ -170,11 +189,11 @@ export default function SkillsPage() {
           <p className="text-sm text-muted-foreground">Loading skills...</p>
         </div>
       </div>
-    );
+    )
   }
 
-  const displayTotal = total || index.total;
-  const displayPages = totalPages || index.totalPages;
+  const displayTotal = total || index.total
+  const displayPages = totalPages || index.totalPages
 
   return (
     <main className="w-full max-w-6xl mx-auto px-4 py-12">
@@ -205,7 +224,9 @@ export default function SkillsPage() {
           <button
             onClick={() => handleOwnerFilter(null)}
             className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-              !selectedOwner ? 'bg-foreground text-background' : 'bg-muted text-muted-foreground hover:text-foreground'
+              !selectedOwner
+                ? 'bg-foreground text-background'
+                : 'bg-muted text-muted-foreground hover:text-foreground'
             }`}
           >
             All ({index.total.toLocaleString()})
@@ -255,30 +276,43 @@ export default function SkillsPage() {
                 selected?.id === skill.id ? 'bg-primary/5' : 'hover:bg-muted/30'
               }`}
             >
-              <span className="hidden sm:block text-muted-foreground text-xs tabular-nums pt-0.5">{skill.rank}</span>
+              <span className="hidden sm:block text-muted-foreground text-xs tabular-nums pt-0.5">
+                {skill.rank}
+              </span>
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="sm:hidden text-muted-foreground text-xs tabular-nums">#{skill.rank}</span>
+                  <span className="sm:hidden text-muted-foreground text-xs tabular-nums">
+                    #{skill.rank}
+                  </span>
                   <span className="font-medium truncate">{skill.name}</span>
                 </div>
-                <span className="text-[11px] text-muted-foreground truncate font-mono">{skill.owner}/{skill.repo}</span>
+                <span className="text-[11px] text-muted-foreground truncate font-mono">
+                  {skill.owner}/{skill.repo}
+                </span>
               </div>
               <div className="hidden sm:flex items-center">
                 <OwnerBadge owner={skill.owner} />
               </div>
               <div className="hidden sm:flex items-center justify-end">
-                <span className="tabular-nums text-xs font-medium">{formatInstalls(skill.installs)}</span>
+                <span className="tabular-nums text-xs font-medium">
+                  {formatInstalls(skill.installs)}
+                </span>
               </div>
               <div className="hidden sm:flex items-center justify-end gap-1">
                 <button
-                  onClick={(e) => { e.stopPropagation(); handleDownload(skill); }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDownload(skill)
+                  }}
                   disabled={installing === skill.id}
                   className="inline-flex items-center justify-center size-7 rounded-md hover:bg-muted transition-colors disabled:opacity-50"
                   title="Download skill"
                 >
-                  {installing === skill.id
-                    ? <Loader2 className="size-3.5 animate-spin" />
-                    : <Download className="size-3.5" />}
+                  {installing === skill.id ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Download className="size-3.5" />
+                  )}
                 </button>
                 <a
                   href={skill.github}
@@ -309,7 +343,9 @@ export default function SkillsPage() {
       {/* Pagination */}
       {displayPages > 1 && (
         <div className="flex items-center justify-between mt-4 text-sm text-muted-foreground">
-          <span>{displayTotal.toLocaleString()} skills &middot; Page {page} of {displayPages}</span>
+          <span>
+            {displayTotal.toLocaleString()} skills &middot; Page {page} of {displayPages}
+          </span>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setPage(Math.max(1, page - 1))}
@@ -319,11 +355,11 @@ export default function SkillsPage() {
               <ChevronLeft className="size-4" />
             </button>
             {Array.from({ length: Math.min(7, displayPages) }, (_, i) => {
-              let p: number;
-              if (displayPages <= 7) p = i + 1;
-              else if (page <= 4) p = i + 1;
-              else if (page >= displayPages - 3) p = displayPages - 6 + i;
-              else p = page - 3 + i;
+              let p: number
+              if (displayPages <= 7) p = i + 1
+              else if (page <= 4) p = i + 1
+              else if (page >= displayPages - 3) p = displayPages - 6 + i
+              else p = page - 3 + i
               return (
                 <button
                   key={p}
@@ -335,7 +371,7 @@ export default function SkillsPage() {
                 >
                   {p}
                 </button>
-              );
+              )
             })}
             <button
               onClick={() => setPage(Math.min(displayPages, page + 1))}
@@ -358,24 +394,33 @@ export default function SkillsPage() {
                 <h2 className="text-lg font-bold">{selected.name}</h2>
                 <OwnerBadge owner={selected.owner} />
               </div>
-              <p className="text-sm text-muted-foreground font-mono">{selected.owner}/{selected.repo}/{selected.name}</p>
+              <p className="text-sm text-muted-foreground font-mono">
+                {selected.owner}/{selected.repo}/{selected.name}
+              </p>
             </div>
             <div className="text-right shrink-0">
-              <div className="text-2xl font-bold tabular-nums">{formatInstalls(selected.installs)}</div>
+              <div className="text-2xl font-bold tabular-nums">
+                {formatInstalls(selected.installs)}
+              </div>
               <div className="text-xs text-muted-foreground">installs</div>
             </div>
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <CopyButton text={`npx skills add ${selected.owner}/${selected.repo}`} label={`npx skills add ${selected.owner}/${selected.repo}`} />
+            <CopyButton
+              text={`npx skills add ${selected.owner}/${selected.repo}`}
+              label={`npx skills add ${selected.owner}/${selected.repo}`}
+            />
             <button
               onClick={() => handleDownload(selected)}
               disabled={installing === selected.id}
               className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
             >
-              {installing === selected.id
-                ? <Loader2 className="size-3 animate-spin" />
-                : <Download className="size-3" />}
+              {installing === selected.id ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Download className="size-3" />
+              )}
               Download Skill
             </button>
             <a
@@ -397,20 +442,26 @@ export default function SkillsPage() {
           </div>
 
           <div className="rounded-lg bg-muted/50 p-4">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Install</h3>
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+              Install
+            </h3>
             <div className="font-mono text-sm bg-zinc-950 text-zinc-100 rounded-md px-4 py-3">
-              <span className="text-zinc-500">$</span> npx skills add {selected.owner}/{selected.repo}
+              <span className="text-zinc-500">$</span> npx skills add {selected.owner}/
+              {selected.repo}
             </div>
           </div>
 
           <div className="rounded-lg bg-muted/50 p-4">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">API Endpoint</h3>
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+              API Endpoint
+            </h3>
             <div className="font-mono text-xs bg-zinc-950 text-zinc-100 rounded-md px-4 py-3 break-all">
-              <span className="text-zinc-500">GET</span> /api/skills/download/{selected.owner}/{selected.repo}/{selected.name}
+              <span className="text-zinc-500">GET</span> /api/skills/download/{selected.owner}/
+              {selected.repo}/{selected.name}
             </div>
           </div>
         </div>
       )}
     </main>
-  );
+  )
 }

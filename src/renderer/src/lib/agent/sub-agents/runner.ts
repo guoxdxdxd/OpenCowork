@@ -1,9 +1,13 @@
 import { nanoid } from 'nanoid'
-import { runAgentLoop } from '../agent-loop'
 import { toolRegistry } from '../tool-registry'
 import type { AgentLoopConfig } from '../types'
-import type { UnifiedMessage, ProviderConfig, TokenUsage } from '../../api/types'
 import type { SubAgentRunConfig, SubAgentResult } from './types'
+import { createSubAgentPromptMessage } from './input-message'
+import { buildRuntimeCompression } from '../context-compression-runtime'
+import { resolveSubAgentTools } from './resolve-tools'
+import { buildToolResultMessage, runSharedAgentRuntime } from '../shared-runtime'
+
+const READ_ONLY_SET = new Set(['Read', 'LS', 'Glob', 'Grep', 'TaskList', 'TaskGet', 'Skill'])
 
 /**
  * Run a SubAgent — executes an inner agent loop with a focused system prompt
@@ -16,217 +20,281 @@ export async function runSubAgent(config: SubAgentRunConfig): Promise<SubAgentRe
   const { definition, parentProvider, toolContext, input, toolUseId, onEvent, onApprovalNeeded } =
     config
 
-  // Create an inner AbortController linked to the parent signal.
-  // This allows us to immediately abort inner streams on error/exit,
-  // preventing cleanup hangs when ipcStreamRequest is still awaiting data.
   const innerAbort = new AbortController()
   const onParentAbort = (): void => innerAbort.abort()
   toolContext.signal.addEventListener('abort', onParentAbort, { once: true })
 
-  // Emit start event
-  onEvent?.({ type: 'sub_agent_start', subAgentName: definition.name, toolUseId, input })
+  const promptMessage = createSubAgentPromptMessage(input, Date.now(), definition.initialPrompt)
+  onEvent?.({
+    type: 'sub_agent_start',
+    subAgentName: definition.name,
+    toolUseId,
+    input,
+    promptMessage
+  })
 
-  // 1. Build inner tool definitions (subset of parent's tools + always include Skill)
-  const allDefs = toolRegistry.getDefinitions()
-  const allowedSet = new Set(definition.allowedTools)
-  allowedSet.add('Skill') // All SubAgents get Skill access by default
-  const innerTools = allDefs.filter((t) => allowedSet.has(t.name))
+  const { tools: innerTools, invalidTools } = resolveSubAgentTools(
+    definition,
+    toolRegistry.getDefinitions()
+  )
 
-  // 2. Build provider config (optionally override model/temperature)
-  const innerProvider: ProviderConfig = {
+  const innerProvider = {
     ...parentProvider,
     systemPrompt: definition.systemPrompt,
     model: definition.model ?? parentProvider.model,
     temperature: definition.temperature ?? parentProvider.temperature
   }
 
-  // 3. Build initial user message from SubAgent input
-  const userMessage = formatInputAsMessage(definition.name, input)
+  const compression = buildRuntimeCompression(innerProvider, innerAbort.signal)
 
-  const systemPrompt = definition.systemPrompt
-
-  // 4. Build inner loop config
   const loopConfig: AgentLoopConfig = {
-    maxIterations: definition.maxIterations,
+    maxIterations: definition.maxTurns,
     provider: innerProvider,
     tools: innerTools,
-    systemPrompt,
+    systemPrompt: definition.systemPrompt,
     workingFolder: toolContext.workingFolder,
-    signal: innerAbort.signal
+    signal: innerAbort.signal,
+    ...(compression ? { contextCompression: compression } : {})
   }
 
-  // 6. Run inner agent loop
-  let output = ''
-  let toolCallCount = 0
-  let iterations = 0
-  const totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  const loopToolContext = {
+    ...toolContext,
+    signal: innerAbort.signal,
+    callerAgent: definition.name
+  }
 
-  try {
-    const loop = runAgentLoop([userMessage], loopConfig, toolContext, async (tc) => {
-      // Auto-approve read-only tools
-      if (isReadOnly(tc.name)) return true
-      // Bubble write tool approval up to parent
-      if (onApprovalNeeded) return onApprovalNeeded(tc)
-      return false
+  const invalidToolsSuffix = invalidTools.length
+    ? ` Unavailable tools: ${invalidTools.join(', ')}.`
+    : ''
+
+  const buildResult = (
+    success: boolean,
+    runtime: {
+      finalOutput: string
+      aggregatedText: string
+      toolCallCount: number
+      iterations: number
+      usage: SubAgentResult['usage']
+    },
+    error?: string
+  ): SubAgentResult => {
+    const baseOutput = success
+      ? runtime.finalOutput
+      : runtime.finalOutput || runtime.aggregatedText.trim()
+    const output =
+      success && definition.formatOutput
+        ? definition.formatOutput({
+            success: true,
+            output: baseOutput,
+            reportSubmitted: !!baseOutput.trim(),
+            toolCallCount: runtime.toolCallCount,
+            iterations: runtime.iterations,
+            usage: runtime.usage
+          })
+        : baseOutput
+    const hasOutput = !!output.trim()
+
+    onEvent?.({
+      type: 'sub_agent_report_update',
+      subAgentName: definition.name,
+      toolUseId,
+      report: output,
+      status: hasOutput ? 'submitted' : 'missing'
     })
 
-    for await (const event of loop) {
-      if (toolContext.signal.aborted) {
-        innerAbort.abort()
-        break
-      }
-
-      switch (event.type) {
-        case 'text_delta':
-          output += event.text
-          onEvent?.({
-            type: 'sub_agent_text_delta',
-            subAgentName: definition.name,
-            toolUseId,
-            text: event.text
-          })
-          break
-
-        case 'iteration_start':
-          iterations = event.iteration
-          onEvent?.({
-            type: 'sub_agent_iteration',
-            subAgentName: definition.name,
-            toolUseId,
-            iteration: event.iteration
-          })
-          break
-
-        case 'message_end':
-          if (event.usage) {
-            totalUsage.inputTokens += event.usage.inputTokens
-            totalUsage.outputTokens += event.usage.outputTokens
-            if (event.usage.cacheCreationTokens) {
-              totalUsage.cacheCreationTokens =
-                (totalUsage.cacheCreationTokens ?? 0) + event.usage.cacheCreationTokens
-            }
-            if (event.usage.cacheReadTokens) {
-              totalUsage.cacheReadTokens =
-                (totalUsage.cacheReadTokens ?? 0) + event.usage.cacheReadTokens
-            }
-            if (event.usage.reasoningTokens) {
-              totalUsage.reasoningTokens =
-                (totalUsage.reasoningTokens ?? 0) + event.usage.reasoningTokens
-            }
-          }
-          break
-
-        case 'tool_call_start':
-        case 'tool_call_result':
-          if (event.type === 'tool_call_result') toolCallCount++
-          onEvent?.({
-            type: 'sub_agent_tool_call',
-            subAgentName: definition.name,
-            toolUseId,
-            toolCall: event.toolCall
-          })
-          break
-
-        case 'error':
-          // Abort inner streams BEFORE return triggers .return() on the generator.
-          // This ensures ipcStreamRequest's waitForItem() resolves immediately,
-          // preventing the cleanup chain from hanging up to 30-60s.
-          innerAbort.abort()
-          const result: SubAgentResult = {
-            success: false,
-            output: '',
-            toolCallCount,
-            iterations,
-            usage: totalUsage,
-            error: event.error.message
-          }
-          onEvent?.({ type: 'sub_agent_end', subAgentName: definition.name, toolUseId, result })
-          return result
-      }
+    return {
+      success,
+      output,
+      reportSubmitted: hasOutput,
+      toolCallCount: runtime.toolCallCount,
+      iterations: runtime.iterations,
+      usage: runtime.usage,
+      ...(error ? { error } : {})
     }
+  }
+
+  try {
+    if (innerTools.length === 0) {
+      const result = buildResult(
+        false,
+        {
+          finalOutput: '',
+          aggregatedText: '',
+          toolCallCount: 0,
+          iterations: 0,
+          usage: { inputTokens: 0, outputTokens: 0 }
+        },
+        `No tools available for sub-agent.${invalidTools.length > 0 ? ` Requested: ${invalidTools.join(', ')}` : ''}`
+      )
+      onEvent?.({ type: 'sub_agent_end', subAgentName: definition.name, toolUseId, result })
+      return result
+    }
+
+    const runtime = await runSharedAgentRuntime({
+      initialMessages: [promptMessage],
+      loopConfig,
+      toolContext: loopToolContext,
+      isReadOnlyTool: (toolName) => READ_ONLY_SET.has(toolName),
+      onApprovalNeeded,
+      hooks: {
+        afterHandleEvent: async ({ event, state }) => {
+          switch (event.type) {
+            case 'iteration_start':
+              onEvent?.({
+                type: 'sub_agent_iteration',
+                subAgentName: definition.name,
+                toolUseId,
+                iteration: state.iteration,
+                assistantMessage: {
+                  id: nanoid(),
+                  role: 'assistant',
+                  content: '',
+                  createdAt: Date.now()
+                }
+              })
+              break
+
+            case 'thinking_delta':
+              onEvent?.({
+                type: 'sub_agent_thinking_delta',
+                subAgentName: definition.name,
+                toolUseId,
+                thinking: event.thinking
+              })
+              break
+
+            case 'thinking_encrypted':
+              onEvent?.({
+                type: 'sub_agent_thinking_encrypted',
+                subAgentName: definition.name,
+                toolUseId,
+                thinkingEncryptedContent: event.thinkingEncryptedContent,
+                thinkingEncryptedProvider: event.thinkingEncryptedProvider
+              })
+              break
+
+            case 'text_delta':
+              onEvent?.({
+                type: 'sub_agent_text_delta',
+                subAgentName: definition.name,
+                toolUseId,
+                text: event.text
+              })
+              break
+
+            case 'image_generated':
+              onEvent?.({
+                type: 'sub_agent_image_generated',
+                subAgentName: definition.name,
+                toolUseId,
+                imageBlock: event.imageBlock
+              })
+              break
+
+            case 'image_error':
+              onEvent?.({
+                type: 'sub_agent_image_error',
+                subAgentName: definition.name,
+                toolUseId,
+                imageError: event.imageError
+              })
+              break
+
+            case 'tool_use_streaming_start':
+              onEvent?.({
+                type: 'sub_agent_tool_use_streaming_start',
+                subAgentName: definition.name,
+                toolUseId,
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                toolCallExtraContent: event.toolCallExtraContent
+              })
+              break
+
+            case 'tool_use_args_delta':
+              onEvent?.({
+                type: 'sub_agent_tool_use_args_delta',
+                subAgentName: definition.name,
+                toolUseId,
+                toolCallId: event.toolCallId,
+                partialInput: event.partialInput
+              })
+              break
+
+            case 'tool_use_generated':
+              onEvent?.({
+                type: 'sub_agent_tool_use_generated',
+                subAgentName: definition.name,
+                toolUseId,
+                toolUseBlock: {
+                  type: 'tool_use',
+                  id: event.toolUseBlock.id,
+                  name: event.toolUseBlock.name,
+                  input: event.toolUseBlock.input,
+                  ...(event.toolUseBlock.extraContent
+                    ? { extraContent: event.toolUseBlock.extraContent }
+                    : {})
+                }
+              })
+              break
+
+            case 'message_end':
+              onEvent?.({
+                type: 'sub_agent_message_end',
+                subAgentName: definition.name,
+                toolUseId,
+                usage: event.usage,
+                providerResponseId: event.providerResponseId
+              })
+              break
+
+            case 'tool_call_start':
+            case 'tool_call_result':
+              onEvent?.({
+                type: 'sub_agent_tool_call',
+                subAgentName: definition.name,
+                toolUseId,
+                toolCall: event.toolCall
+              })
+              break
+
+            case 'iteration_end':
+              if (event.toolResults && event.toolResults.length > 0) {
+                onEvent?.({
+                  type: 'sub_agent_tool_result_message',
+                  subAgentName: definition.name,
+                  toolUseId,
+                  message: buildToolResultMessage(event.toolResults)
+                })
+              }
+              break
+          }
+        }
+      }
+    })
+
+    const error = runtime.error ? `${runtime.error}${invalidToolsSuffix}` : undefined
+    const success = runtime.reason !== 'error' && runtime.reason !== 'aborted'
+    const result = buildResult(success, runtime, error)
+    onEvent?.({ type: 'sub_agent_end', subAgentName: definition.name, toolUseId, result })
+    return result
   } catch (err) {
-    innerAbort.abort()
     const errMsg = err instanceof Error ? err.message : String(err)
-    const result: SubAgentResult = {
-      success: false,
-      output: '',
-      toolCallCount,
-      iterations,
-      usage: totalUsage,
-      error: errMsg
-    }
+    const result = buildResult(
+      false,
+      {
+        finalOutput: '',
+        aggregatedText: '',
+        toolCallCount: 0,
+        iterations: 0,
+        usage: { inputTokens: 0, outputTokens: 0 }
+      },
+      `${errMsg}${invalidToolsSuffix}`
+    )
     onEvent?.({ type: 'sub_agent_end', subAgentName: definition.name, toolUseId, result })
     return result
   } finally {
-    // Ensure inner streams are aborted for all exit paths (including normal completion)
     innerAbort.abort()
     toolContext.signal.removeEventListener('abort', onParentAbort)
-  }
-
-  // 7. Format output
-  const finalOutput = definition.formatOutput
-    ? definition.formatOutput({
-        success: true,
-        output,
-        toolCallCount,
-        iterations,
-        usage: totalUsage
-      })
-    : output
-
-  const result: SubAgentResult = {
-    success: true,
-    output: finalOutput,
-    toolCallCount,
-    iterations,
-    usage: totalUsage
-  }
-
-  onEvent?.({ type: 'sub_agent_end', subAgentName: definition.name, toolUseId, result })
-  return result
-}
-
-// --- Helpers ---
-
-const READ_ONLY_SET = new Set(['Read', 'LS', 'Glob', 'Grep', 'TaskList', 'TaskGet', 'Skill'])
-
-function isReadOnly(toolName: string): boolean {
-  return READ_ONLY_SET.has(toolName)
-}
-
-function formatInputAsMessage(
-  _subAgentName: string,
-  input: Record<string, unknown>
-): UnifiedMessage {
-  // Build a natural language message from the SubAgent input
-  const parts: string[] = []
-
-  // Unified Task tool sends "prompt" as the detailed task description
-  if (input.prompt) {
-    parts.push(String(input.prompt))
-  } else if (input.query) {
-    parts.push(String(input.query))
-  } else if (input.task) {
-    parts.push(String(input.task))
-  } else if (input.target) {
-    parts.push(`Analyze: ${input.target}`)
-    if (input.focus) parts.push(`Focus: ${input.focus}`)
-  } else {
-    // Fallback: stringify the input
-    parts.push(JSON.stringify(input, null, 2))
-  }
-
-  if (input.scope) {
-    parts.push(`\nScope: ${input.scope}`)
-  }
-  if (input.constraints) {
-    parts.push(`\nConstraints: ${input.constraints}`)
-  }
-
-  return {
-    id: nanoid(),
-    role: 'user',
-    content: parts.join('\n'),
-    createdAt: Date.now()
   }
 }

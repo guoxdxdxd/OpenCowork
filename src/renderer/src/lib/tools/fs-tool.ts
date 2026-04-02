@@ -1,6 +1,7 @@
 import { toolRegistry } from '../agent/tool-registry'
 import { joinFsPath } from '../agent/memory-files'
 import { IPC } from '../ipc/channels'
+import { encodeStructuredToolResult, encodeToolError } from './tool-result-format'
 import type { ToolHandler, ToolContext } from './tool-types'
 
 type EolStyle = '\n' | '\r\n' | null
@@ -97,13 +98,13 @@ function normalizePath(p: string): string {
   return normalized
 }
 
-function isAbsolutePath(p: string): boolean {
+export function isAbsolutePath(p: string): boolean {
   if (!p) return false
   if (p.startsWith('/') || p.startsWith('\\')) return true
   return /^[a-zA-Z]:[\\/]/.test(p)
 }
 
-function resolveToolPath(inputPath: unknown, workingFolder?: string): string {
+export function resolveToolPath(inputPath: unknown, workingFolder?: string): string {
   const raw = typeof inputPath === 'string' ? inputPath.trim() : ''
   const base = workingFolder?.trim()
   if (!raw || raw === '.') {
@@ -183,6 +184,7 @@ const readHandler: ToolHandler = {
       offset: input.offset,
       limit: input.limit
     })
+    if (isErrorResult(result)) throw new Error(`Read failed: ${result.error}`)
     // IPC returns { type: 'image', mediaType, data } for image files
     if (
       result &&
@@ -242,7 +244,7 @@ const writeHandler: ToolHandler = {
         sshWriteArgs(ctx, resolvedPath, input.content, 'Write')
       )
       if (isErrorResult(result)) throw new Error(`Write failed: ${result.error}`)
-      return JSON.stringify({ success: true, path: resolvedPath })
+      return encodeStructuredToolResult({ success: true, path: resolvedPath })
     }
     const result = await ctx.ipc.invoke(
       IPC.FS_WRITE_FILE,
@@ -252,7 +254,7 @@ const writeHandler: ToolHandler = {
       throw new Error(`Write failed: ${result.error}`)
     }
 
-    return JSON.stringify({ success: true, path: resolvedPath })
+    return encodeStructuredToolResult({ success: true, path: resolvedPath })
   },
   requiresApproval: (input, ctx) => {
     const filePath = resolveToolPath(input.file_path, ctx.workingFolder)
@@ -299,7 +301,11 @@ const editHandler: ToolHandler = {
     // Read file, perform replacement, write back
     const readCh = isSsh(ctx) ? IPC.SSH_FS_READ_FILE : IPC.FS_READ_FILE
     const readArgs = isSsh(ctx) ? sshArgs(ctx, { path: resolvedPath }) : { path: resolvedPath }
-    const content = String(await ctx.ipc.invoke(readCh, readArgs))
+    const contentResult = await ctx.ipc.invoke(readCh, readArgs)
+    if (isErrorResult(contentResult)) {
+      return encodeToolError(`Read failed: ${contentResult.error}`)
+    }
+    const content = String(contentResult)
     const oldStr = String(input.old_string)
     const newStr = String(input.new_string)
     const replaceAll = Boolean(input.replace_all)
@@ -310,11 +316,11 @@ const editHandler: ToolHandler = {
     )
     if (!matchedVariant) {
       if (replaceAll) {
-        return JSON.stringify({ error: 'old_string not found in file' })
+        return encodeToolError('old_string not found in file')
       }
       const idxFallback = content.indexOf(oldStr)
       if (idxFallback === -1) {
-        return JSON.stringify({ error: 'old_string not found in file' })
+        return encodeToolError('old_string not found in file')
       }
       const replacement = applyEolStyle(newStr, detectEolStyle(oldStr))
       const updatedFallback =
@@ -324,7 +330,7 @@ const editHandler: ToolHandler = {
         ? sshWriteArgs(ctx, resolvedPath, updatedFallback, 'Edit')
         : localWriteArgs(ctx, resolvedPath, updatedFallback, 'Edit')
       await ctx.ipc.invoke(writeChFallback, writeArgsFallback)
-      return JSON.stringify({ success: true })
+      return encodeStructuredToolResult({ success: true })
     }
 
     const replacementText = applyEolStyle(newStr, matchedVariant.eol)
@@ -342,7 +348,7 @@ const editHandler: ToolHandler = {
       ? sshWriteArgs(ctx, resolvedPath, updated, 'Edit')
       : localWriteArgs(ctx, resolvedPath, updated, 'Edit')
     await ctx.ipc.invoke(writeCh, writeArgs)
-    return JSON.stringify({ success: true })
+    return encodeStructuredToolResult({ success: true })
   },
   requiresApproval: (input, ctx) => {
     if (isSsh(ctx)) return false // SSH sessions: trust working folder
@@ -382,13 +388,15 @@ const lsHandler: ToolHandler = {
           path: resolvedPath
         })
       )
-      return JSON.stringify(result)
+      return encodeStructuredToolResult(
+        result as Array<{ name: string; type: string; path: string }>
+      )
     }
     const result = await ctx.ipc.invoke(IPC.FS_LIST_DIR, {
       path: resolvedPath,
       ignore: input.ignore
     })
-    return JSON.stringify(result)
+    return encodeStructuredToolResult(result as Array<{ name: string; type: string; path: string }>)
   },
   requiresApproval: (input, ctx) => {
     if (ctx.channelPermissions) {

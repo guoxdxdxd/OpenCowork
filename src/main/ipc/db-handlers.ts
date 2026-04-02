@@ -5,6 +5,9 @@ import * as projectsDao from '../db/projects-dao'
 import * as messagesDao from '../db/messages-dao'
 import * as plansDao from '../db/plans-dao'
 import * as tasksDao from '../db/tasks-dao'
+import * as drawRunsDao from '../db/draw-runs-dao'
+import * as usageEventsDao from '../db/usage-events-dao'
+import * as wikiDao from '../db/wiki-dao'
 
 export function registerDbHandlers(): void {
   // Initialize DB on registration
@@ -34,6 +37,7 @@ export function registerDbHandlers(): void {
         workingFolder?: string | null
         sshConnectionId?: string | null
         pluginId?: string | null
+        pinned?: boolean
         createdAt?: number
         updatedAt?: number
       }
@@ -53,6 +57,7 @@ export function registerDbHandlers(): void {
           workingFolder: string | null
           sshConnectionId: string | null
           pluginId: string | null
+          pinned: boolean
           updatedAt: number
         }>
       }
@@ -96,6 +101,7 @@ export function registerDbHandlers(): void {
         pluginId?: string
         providerId?: string
         modelId?: string
+        longRunningMode?: boolean
       }
     ) => {
       let projectId = session.projectId
@@ -111,7 +117,8 @@ export function registerDbHandlers(): void {
         const project = projectsDao.getProject(projectId)
         if (project) {
           if (workingFolder === undefined) workingFolder = project.working_folder ?? undefined
-          if (sshConnectionId === undefined) sshConnectionId = project.ssh_connection_id ?? undefined
+          if (sshConnectionId === undefined)
+            sshConnectionId = project.ssh_connection_id ?? undefined
         }
       }
 
@@ -119,7 +126,7 @@ export function registerDbHandlers(): void {
         ...session,
         projectId,
         workingFolder,
-        sshConnectionId,
+        sshConnectionId
       })
       return { success: true }
     }
@@ -139,6 +146,7 @@ export function registerDbHandlers(): void {
           workingFolder: string | null
           sshConnectionId: string | null
           pinned: boolean
+          longRunningMode: boolean
         }>
       }
     ) => {
@@ -196,7 +204,7 @@ export function registerDbHandlers(): void {
           updatedAt: msg.createdAt,
           projectId: project.id,
           workingFolder: project.working_folder ?? undefined,
-          sshConnectionId: project.ssh_connection_id ?? undefined,
+          sshConnectionId: project.ssh_connection_id ?? undefined
         })
       }
       messagesDao.addMessage(msg)
@@ -227,6 +235,85 @@ export function registerDbHandlers(): void {
 
   ipcMain.handle('db:messages:count', (_event, sessionId: string) => {
     return messagesDao.getMessageCount(sessionId)
+  })
+
+  // --- Usage Events ---
+
+  ipcMain.handle('usage-events:add', (_event, payload) => {
+    usageEventsDao.addUsageEvent(payload)
+    return { success: true }
+  })
+
+  ipcMain.handle('usage-events:overview', (_event, query) => {
+    return usageEventsDao.getUsageOverview(query)
+  })
+
+  ipcMain.handle('usage-events:daily', (_event, query) => {
+    return usageEventsDao.getUsageDaily(query)
+  })
+
+  ipcMain.handle(
+    'usage-events:timeline',
+    (
+      _event,
+      args: {
+        query: usageEventsDao.UsageEventsQuery
+        bucket: usageEventsDao.UsageTimelineBucket
+      }
+    ) => {
+      return usageEventsDao.getUsageTimeline(args.query, args.bucket)
+    }
+  )
+
+  ipcMain.handle('usage-events:by-model', (_event, query) => {
+    return usageEventsDao.getUsageByModel(query)
+  })
+
+  ipcMain.handle('usage-events:by-provider', (_event, query) => {
+    return usageEventsDao.getUsageByProvider(query)
+  })
+
+  ipcMain.handle('usage-events:list', (_event, query) => {
+    return usageEventsDao.listUsageEvents(query)
+  })
+
+  // --- Draw Runs ---
+
+  ipcMain.handle('db:draw-runs:list', () => {
+    return drawRunsDao.listDrawRuns()
+  })
+
+  ipcMain.handle(
+    'db:draw-runs:save',
+    (
+      _event,
+      run: {
+        id: string
+        prompt: string
+        providerName: string
+        modelName: string
+        mode?: string
+        metaJson?: string | null
+        createdAt: number
+        isGenerating: boolean
+        imagesJson: string
+        errorJson?: string | null
+        updatedAt: number
+      }
+    ) => {
+      drawRunsDao.saveDrawRun(run)
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle('db:draw-runs:delete', (_event, id: string) => {
+    drawRunsDao.deleteDrawRun(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('db:draw-runs:clear', () => {
+    drawRunsDao.clearDrawRuns()
+    return { success: true }
   })
 
   // --- Plans ---
@@ -358,6 +445,96 @@ export function registerDbHandlers(): void {
 
   ipcMain.handle('db:tasks:delete-by-session', (_event, sessionId: string) => {
     tasksDao.deleteTasksBySession(sessionId)
+    return { success: true }
+  })
+
+  // --- Wiki ---
+
+  ipcMain.handle('db:wiki:list-documents', (_event, projectId: string) => {
+    return wikiDao.listWikiDocuments(projectId)
+  })
+
+  ipcMain.handle('db:wiki:get-document', (_event, id: string) => {
+    return wikiDao.getWikiDocument(id) ?? null
+  })
+
+  ipcMain.handle(
+    'db:wiki:get-document-by-name',
+    (_event, args: { projectId: string; name: string }) => {
+      return wikiDao.getWikiDocumentByName(args.projectId, args.name) ?? null
+    }
+  )
+
+  ipcMain.handle('db:wiki:save-document', (_event, args) => {
+    return wikiDao.saveWikiDocument(args)
+  })
+
+  ipcMain.handle('db:wiki:list-sections', (_event, documentId: string) => {
+    return wikiDao.listWikiSections(documentId)
+  })
+
+  ipcMain.handle(
+    'db:wiki:save-sections',
+    (_event, args: { documentId: string; sections: Array<Record<string, unknown>> }) => {
+      return wikiDao.replaceWikiSections(
+        args.documentId,
+        args.sections as Array<{
+          id?: string
+          title: string
+          anchor: string
+          sortOrder: number
+          summary?: string
+          contentMarkdown?: string
+        }>
+      )
+    }
+  )
+
+  ipcMain.handle('db:wiki:list-section-sources', (_event, sectionId: string) => {
+    return wikiDao.listWikiSectionSources(sectionId)
+  })
+
+  ipcMain.handle(
+    'db:wiki:save-section-sources',
+    (_event, args: { sectionId: string; sources: Array<Record<string, unknown>> }) => {
+      return wikiDao.replaceWikiSectionSources(
+        args.sectionId,
+        args.sources as Array<{
+          id?: string
+          filePath: string
+          symbolHint?: string | null
+          reason?: string
+        }>
+      )
+    }
+  )
+
+  ipcMain.handle('db:wiki:get-project-state', (_event, projectId: string) => {
+    return wikiDao.getWikiProjectState(projectId) ?? null
+  })
+
+  ipcMain.handle(
+    'db:wiki:save-project-state',
+    (_event, args: { projectId: string; patch: Record<string, unknown> }) => {
+      return wikiDao.saveWikiProjectState(args.projectId, args.patch)
+    }
+  )
+
+  ipcMain.handle('db:wiki:clear-project', (_event, projectId: string) => {
+    wikiDao.clearWikiProject(projectId)
+    return { success: true }
+  })
+
+  ipcMain.handle('db:wiki:list-runs', (_event, projectId: string) => {
+    return wikiDao.listWikiGenerationRuns(projectId)
+  })
+
+  ipcMain.handle('db:wiki:create-run', (_event, args) => {
+    return wikiDao.createWikiGenerationRun(args)
+  })
+
+  ipcMain.handle('db:wiki:update-run', (_event, args: { id: string; patch: Record<string, unknown> }) => {
+    wikiDao.updateWikiGenerationRun(args.id, args.patch)
     return { success: true }
   })
 }

@@ -191,6 +191,7 @@ function getListDirQueue(sessionId: string): ListDirQueue {
 const SLOT_ACQUIRE_TIMEOUT_MS = 10000
 
 let uploadEventsSubscribed = false
+let sshConfigChangedSubscribed = false
 
 function ensureUploadEventsSubscribed(): void {
   if (uploadEventsSubscribed) return
@@ -230,11 +231,20 @@ function ensureUploadEventsSubscribed(): void {
   })
 }
 
+function ensureSshConfigChangedSubscribed(): void {
+  if (sshConfigChangedSubscribed) return
+  sshConfigChangedSubscribed = true
+
+  ipcClient.on('ssh:config:changed', () => {
+    void useSshStore.getState().loadAll()
+  })
+}
+
 function acquireListDirSlot(sessionId: string): Promise<() => void> {
   const queue = getListDirQueue(sessionId)
   return new Promise((resolve) => {
     let resolved = false
-    const tryAcquire = () => {
+    const tryAcquire = (): void => {
       if (resolved) return
       if (queue.active < MAX_CONCURRENT_LIST_DIR) {
         resolved = true
@@ -420,6 +430,7 @@ export const useSshStore = create<SshStore>()((set, get) => ({
   loadAll: async () => {
     try {
       ensureUploadEventsSubscribed()
+      ensureSshConfigChangedSubscribed()
       const [groupRows, connRows, sessionRows] = await Promise.all([
         ipcClient.invoke(IPC.SSH_GROUP_LIST) as Promise<SshGroupRow[] | { error: string }>,
         ipcClient.invoke(IPC.SSH_CONNECTION_LIST) as Promise<
@@ -601,7 +612,7 @@ export const useSshStore = create<SshStore>()((set, get) => ({
     const session: SshSession = {
       id: result.sessionId,
       connectionId,
-      status: 'connecting'
+      status: 'connected'
     }
     set((s) => ({
       sessions: { ...s.sessions, [result.sessionId!]: session },

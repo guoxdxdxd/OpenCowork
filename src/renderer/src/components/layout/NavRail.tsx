@@ -1,4 +1,12 @@
-import { Languages, MessageSquare, Monitor, Settings, Wand2 } from 'lucide-react'
+import {
+  CalendarDays,
+  FolderOpen,
+  Image,
+  MessageSquare,
+  Monitor,
+  Settings,
+  Wand2
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useUIStore, type NavItem } from '@renderer/stores/ui-store'
@@ -7,9 +15,11 @@ import packageJson from '../../../../../package.json'
 
 const navItems: { value: NavItem; icon: React.ReactNode; labelKey: string }[] = [
   { value: 'chat', icon: <MessageSquare className="size-5" />, labelKey: 'navRail.conversations' },
+  { value: 'tasks', icon: <CalendarDays className="size-5" />, labelKey: 'navRail.tasks' },
+  { value: 'resources', icon: <FolderOpen className="size-5" />, labelKey: 'navRail.resources' },
   { value: 'skills', icon: <Wand2 className="size-5" />, labelKey: 'navRail.skills' },
-  { value: 'translate', icon: <Languages className="size-5" />, labelKey: 'navRail.translate' },
-  { value: 'ssh', icon: <Monitor className="size-5" />, labelKey: 'navRail.ssh' },
+  { value: 'draw', icon: <Image className="size-5" />, labelKey: 'navRail.draw' },
+  { value: 'ssh', icon: <Monitor className="size-5" />, labelKey: 'navRail.ssh' }
 ]
 
 export function NavRail(): React.JSX.Element {
@@ -18,12 +28,27 @@ export function NavRail(): React.JSX.Element {
   const setActiveNavItem = useUIStore((s) => s.setActiveNavItem)
   const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
+  const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
+  const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
   const sshPageOpen = useUIStore((s) => s.sshPageOpen)
+  const tasksPageOpen = useUIStore((s) => s.tasksPageOpen)
 
   const handleNavClick = (item: NavItem): void => {
+    if (item === 'tasks') {
+      useUIStore.getState().openTasksPage()
+      return
+    }
     if (item === 'skills') {
       useUIStore.getState().openSkillsPage()
+      return
+    }
+    if (item === 'resources') {
+      useUIStore.getState().openResourcesPage()
+      return
+    }
+    if (item === 'draw') {
+      useUIStore.getState().openDrawPage()
       return
     }
     if (item === 'translate') {
@@ -38,8 +63,11 @@ export function NavRail(): React.JSX.Element {
     const ui = useUIStore.getState()
     if (ui.settingsPageOpen) ui.closeSettingsPage()
     if (ui.skillsPageOpen) ui.closeSkillsPage()
+    if (ui.resourcesPageOpen) ui.closeResourcesPage()
+    if (ui.drawPageOpen) ui.closeDrawPage()
     if (ui.translatePageOpen) ui.closeTranslatePage()
     if (ui.sshPageOpen) ui.closeSshPage()
+    if (ui.tasksPageOpen) ui.closeTasksPage()
     if (activeNavItem === item && leftSidebarOpen) {
       useUIStore.getState().setLeftSidebarOpen(false)
     } else {
@@ -62,10 +90,17 @@ export function NavRail(): React.JSX.Element {
                 onClick={() => handleNavClick(item.value)}
                 className={cn(
                   'flex size-9 items-center justify-center rounded-lg transition-all duration-200',
-                  (item.value === 'skills' && skillsPageOpen) ||
-                  (item.value === 'translate' && translatePageOpen) ||
-                  (item.value === 'ssh' && sshPageOpen) ||
-                  (!['skills', 'translate', 'ssh'].includes(item.value) && activeNavItem === item.value && leftSidebarOpen)
+                  (item.value === 'tasks' && tasksPageOpen) ||
+                    (item.value === 'resources' && resourcesPageOpen) ||
+                    (item.value === 'skills' && skillsPageOpen) ||
+                    (item.value === 'draw' && drawPageOpen) ||
+                    (item.value === 'translate' && translatePageOpen) ||
+                    (item.value === 'ssh' && sshPageOpen) ||
+                    (!['tasks', 'resources', 'skills', 'draw', 'translate', 'ssh'].includes(
+                      item.value
+                    ) &&
+                      activeNavItem === item.value &&
+                      leftSidebarOpen)
                     ? 'bg-primary/10 text-primary shadow-sm'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 )}
@@ -94,7 +129,9 @@ export function NavRail(): React.JSX.Element {
           </TooltipTrigger>
           <TooltipContent side="right">{t('navRail.settings')}</TooltipContent>
         </Tooltip>
-        <span className="text-[9px] text-muted-foreground/40 select-none">v{packageJson.version}</span>
+        <span className="text-[9px] text-muted-foreground/40 select-none">
+          v{packageJson.version}
+        </span>
       </div>
     </div>
   )

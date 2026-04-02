@@ -19,6 +19,13 @@ import {
   type SshConfigConnection
 } from '../ssh/ssh-config'
 import {
+  applySshImport,
+  exportSshConfig,
+  previewSshImport,
+  type SshImportAction,
+  type SshImportSource
+} from '../ssh/ssh-transfer'
+import {
   buildFileSnapshot,
   buildOpaqueExistingSnapshot,
   recordSshTextWriteChange,
@@ -26,6 +33,7 @@ import {
   type FileSnapshot
 } from './agent-change-handlers'
 import { createGitIgnoreMatcher } from './gitignore-utils'
+import { safeSendToAllWindows, safeSendToWindow } from '../window-ipc'
 
 // ── SSH Session Manager ──
 
@@ -152,9 +160,7 @@ type UploadTaskState = {
 const uploadTasks = new Map<string, UploadTaskState>()
 
 function broadcastUploadEvent(evt: UploadEvent): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('ssh:fs:upload:events', evt)
-  }
+  safeSendToAllWindows('ssh:fs:upload:events', evt)
 }
 
 function nowStamp(): string {
@@ -397,8 +403,8 @@ interface SshConnectionRow {
 
 function broadcastToRenderer(channel: string, data: unknown): void {
   const win = BrowserWindow.getAllWindows()[0]
-  if (win && !win.isDestroyed()) {
-    win.webContents.send(channel, data)
+  if (win) {
+    safeSendToWindow(win, channel, data)
   }
 }
 
@@ -1488,6 +1494,47 @@ export function registerSshHandlers(): void {
     }
   })
 
+  ipcMain.handle(
+    'ssh:export',
+    async (_event, args: { filePath: string; connectionIds?: string[] | null }) => {
+      try {
+        exportSshConfig(args.filePath, args.connectionIds ?? undefined)
+        return { success: true }
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'ssh:import:preview',
+    async (_event, args: { filePath: string; source: SshImportSource }) => {
+      try {
+        return previewSshImport(args.filePath, args.source)
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'ssh:import:apply',
+    async (
+      _event,
+      args: {
+        filePath: string
+        source: SshImportSource
+        decisions: Array<{ importId: string; action: SshImportAction }>
+      }
+    ) => {
+      try {
+        return applySshImport(args.filePath, args.source, args.decisions)
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
+
   // ── Terminal Session: Connect ──
 
   ipcMain.handle('ssh:connect', async (_event, args: { connectionId: string }) => {
@@ -1764,7 +1811,7 @@ export function registerSshHandlers(): void {
         }
         return content
       } catch (err) {
-        return JSON.stringify({ error: String(err) })
+        return { error: String(err) }
       }
     }
   )

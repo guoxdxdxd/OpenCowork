@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo, useEffect, useId } from 'react'
+import { useState, useCallback, useMemo, useEffect, useId, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import mermaid from 'mermaid'
@@ -9,12 +10,28 @@ import {
   useMermaidThemeVersion
 } from '@renderer/lib/utils/mermaid-theme'
 import { Avatar, AvatarFallback } from '@renderer/components/ui/avatar'
-import { Copy, Check, ChevronsDownUp, ChevronsUpDown, Bug, ImageDown } from 'lucide-react'
+import {
+  Copy,
+  Check,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Bug,
+  ImageDown,
+  ZoomIn,
+  Trash2,
+  RotateCcw,
+  Play,
+  Ellipsis,
+  Languages,
+  Volume2,
+  Share2
+} from 'lucide-react'
 import { FadeIn, ScaleIn } from '@renderer/components/animate-ui'
 import { ImageGeneratingLoader } from './ImageGeneratingLoader'
 import { ImageGenerationErrorCard } from './ImageGenerationErrorCard'
 import { ImagePreview } from './ImagePreview'
 import { ImagePluginToolCard } from './ImagePluginToolCard'
+import { DesktopActionToolCard } from './DesktopActionToolCard'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
 import type { AgentRunFileChange } from '@renderer/stores/agent-store'
@@ -39,20 +56,53 @@ import { TASK_TOOL_NAME } from '@renderer/lib/agent/sub-agents/create-tool'
 import { TEAM_TOOL_NAMES } from '@renderer/lib/agent/teams/register'
 import { useProviderStore } from '@renderer/stores/provider-store'
 import { ModelIcon } from '@renderer/components/settings/provider-icons'
-import { formatTokens, calculateCost, formatCost } from '@renderer/lib/format-tokens'
+import {
+  formatTokens,
+  calculateCost,
+  formatCost,
+  getBillableInputTokens,
+  getBillableTotalTokens
+} from '@renderer/lib/format-tokens'
 import { useMemoizedTokens } from '@renderer/hooks/use-estimated-tokens'
-import { getLastDebugInfo } from '@renderer/lib/debug-store'
+import { getLastDebugInfo, getRequestTraceInfo } from '@renderer/lib/debug-store'
 import { MONO_FONT } from '@renderer/lib/constants'
 import type { ToolCallState } from '@renderer/lib/agent/types'
-import { IMAGE_GENERATE_TOOL_NAME } from '@renderer/lib/app-plugin/types'
+import {
+  DESKTOP_CLICK_TOOL_NAME,
+  DESKTOP_SCREENSHOT_TOOL_NAME,
+  DESKTOP_SCROLL_TOOL_NAME,
+  DESKTOP_TYPE_TOOL_NAME,
+  DESKTOP_WAIT_TOOL_NAME,
+  IMAGE_GENERATE_TOOL_NAME
+} from '@renderer/lib/app-plugin/types'
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@renderer/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from '@renderer/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
+import { useTranslateStore } from '@renderer/stores/translate-store'
+import { useUIStore } from '@renderer/stores/ui-store'
+
+type AssistantRenderMode = 'default' | 'transcript'
 
 interface AssistantMessageProps {
   content: string | ContentBlock[]
   isStreaming?: boolean
   usage?: TokenUsage
   toolResults?: Map<string, { content: ToolResultContent; isError?: boolean }>
+  liveToolCallMap?: Map<string, ToolCallState> | null
   msgId?: string
+  showRetry?: boolean
+  showContinue?: boolean
+  onRetry?: () => void
+  onContinue?: () => void
+  onDelete?: (messageId: string) => void
+  renderMode?: AssistantRenderMode
 }
 
 const MARKDOWN_WRAPPER_CLASS = 'text-sm leading-relaxed text-foreground break-words'
@@ -64,7 +114,10 @@ const SPECIAL_TOOLS = new Set([
   'Edit',
   'Delete',
   'AskUserQuestion',
-  IMAGE_GENERATE_TOOL_NAME
+  IMAGE_GENERATE_TOOL_NAME,
+  DESKTOP_SCREENSHOT_TOOL_NAME,
+  DESKTOP_CLICK_TOOL_NAME,
+  DESKTOP_TYPE_TOOL_NAME
 ])
 const EMPTY_LIVE_TOOL_CALLS: ToolCallState[] = []
 
@@ -95,81 +148,67 @@ function DebugToggleButton({ debugInfo }: { debugInfo: RequestDebugInfo }): Reac
   return (
     <>
       <button
-        onClick={() => setShow((v) => !v)}
+        onClick={() => setShow(true)}
         className={`flex items-center rounded px-1 py-0.5 transition-colors ${show ? 'text-orange-500 bg-orange-500/10' : 'text-muted-foreground hover:bg-muted-foreground/10'}`}
       >
         <Bug className="size-3.5" />
       </button>
-      {show && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          onClick={() => setShow(false)}
-        >
-          <div
-            className="w-[640px] max-w-[90vw] max-h-[80vh] rounded-lg border bg-background shadow-2xl flex flex-col overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-4 py-2.5 border-b bg-muted/30 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <Bug className="size-3.5 text-orange-500" />
-                <span className="text-xs font-medium">Request Debug</span>
+      <Dialog open={show} onOpenChange={setShow}>
+        <DialogContent className="max-h-[80vh] max-w-[90vw] gap-0 overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="border-b bg-muted/30 px-4 py-2.5 pr-10 text-left">
+            <DialogTitle className="flex items-center gap-2 text-xs font-medium">
+              <Bug className="size-3.5 text-orange-500" />
+              <span>Request Debug</span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto">
+            <div
+              className="space-y-1.5 border-b px-4 py-2 text-[11px]"
+              style={{ fontFamily: MONO_FONT }}
+            >
+              <div className="flex gap-2">
+                <span className="text-muted-foreground/60 shrink-0">URL</span>
+                <span className="text-foreground break-all">{debugInfo.url}</span>
               </div>
-              <button
-                onClick={() => setShow(false)}
-                className="text-muted-foreground hover:text-foreground text-sm px-1"
-              >
-                ✕
-              </button>
+              <div className="flex gap-2">
+                <span className="text-muted-foreground/60 shrink-0">Method</span>
+                <span className="text-foreground">{debugInfo.method}</span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-muted-foreground/60 shrink-0">Time</span>
+                <span className="text-foreground">
+                  {new Date(debugInfo.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
             </div>
-            <div className="flex-1 overflow-y-auto">
-              <div
-                className="px-4 py-2 space-y-1.5 border-b text-[11px]"
-                style={{ fontFamily: MONO_FONT }}
-              >
-                <div className="flex gap-2">
-                  <span className="text-muted-foreground/60 shrink-0">URL</span>
-                  <span className="text-foreground break-all">{debugInfo.url}</span>
-                </div>
-                <div className="flex gap-2">
-                  <span className="text-muted-foreground/60 shrink-0">Method</span>
-                  <span className="text-foreground">{debugInfo.method}</span>
-                </div>
-                <div className="flex gap-2">
-                  <span className="text-muted-foreground/60 shrink-0">Time</span>
-                  <span className="text-foreground">
-                    {new Date(debugInfo.timestamp).toLocaleTimeString()}
+            {bodyFormatted && (
+              <div>
+                <div className="flex items-center justify-between border-b bg-muted/20 px-4 py-1.5">
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Request Body
                   </span>
+                  <CopyButton text={bodyFormatted} />
                 </div>
+                <LazySyntaxHighlighter
+                  language="json"
+                  customStyle={{
+                    margin: 0,
+                    padding: '12px 16px',
+                    fontSize: '11px',
+                    fontFamily: MONO_FONT,
+                    background: 'transparent',
+                    wordBreak: 'break-all',
+                    whiteSpace: 'pre-wrap'
+                  }}
+                  codeTagProps={{ style: { fontFamily: MONO_FONT } }}
+                >
+                  {bodyFormatted}
+                </LazySyntaxHighlighter>
               </div>
-              {bodyFormatted && (
-                <div>
-                  <div className="px-4 py-1.5 bg-muted/20 border-b flex items-center justify-between">
-                    <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                      Request Body
-                    </span>
-                    <CopyButton text={bodyFormatted} />
-                  </div>
-                  <LazySyntaxHighlighter
-                    language="json"
-                    customStyle={{
-                      margin: 0,
-                      padding: '12px 16px',
-                      fontSize: '11px',
-                      fontFamily: MONO_FONT,
-                      background: 'transparent',
-                      wordBreak: 'break-all',
-                      whiteSpace: 'pre-wrap'
-                    }}
-                    codeTagProps={{ style: { fontFamily: MONO_FONT } }}
-                  >
-                    {bodyFormatted}
-                  </LazySyntaxHighlighter>
-                </div>
-              )}
-            </div>
+            )}
           </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
@@ -191,6 +230,34 @@ function CopyButton({ text }: { text: string }): React.JSX.Element {
       {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
       {copied ? t('userMessage.copied') : t('action.copy', { ns: 'common' })}
     </button>
+  )
+}
+
+function ActionIconButton({
+  label,
+  icon,
+  onClick,
+  danger = false
+}: {
+  label: string
+  icon: ReactNode
+  onClick: () => void
+  danger?: boolean
+}): React.JSX.Element {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          onClick={onClick}
+          className={`flex size-7 items-center justify-center rounded-md border border-border/50 bg-background/80 text-muted-foreground transition-colors hover:bg-muted/80 ${danger ? 'hover:text-destructive' : 'hover:text-foreground'}`}
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{label}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -227,6 +294,7 @@ function MermaidImageCopyButton({ svg }: { svg: string }): React.JSX.Element {
 function MermaidCodeBlock({ code }: { code: string }): React.JSX.Element {
   const [svg, setSvg] = useState('')
   const [error, setError] = useState('')
+  const [zoomOpen, setZoomOpen] = useState(false)
   const diagramKey = useId().replace(/[^a-zA-Z0-9_-]/g, '')
   const themeVersion = useMermaidThemeVersion()
 
@@ -266,6 +334,15 @@ function MermaidCodeBlock({ code }: { code: string }): React.JSX.Element {
           mermaid
         </span>
         <div className="flex items-center gap-0.5">
+          <button
+            onClick={() => setZoomOpen(true)}
+            disabled={!svg.trim()}
+            title="放大 Mermaid 图"
+            className="flex items-center rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted-foreground/10 transition-colors disabled:opacity-50"
+          >
+            <ZoomIn className="size-3" />
+            <span>放大</span>
+          </button>
           <MermaidImageCopyButton svg={svg} />
           <CopyButton text={code} />
         </div>
@@ -289,6 +366,21 @@ function MermaidCodeBlock({ code }: { code: string }): React.JSX.Element {
           </div>
         )}
       </div>
+      <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
+        <DialogContent className="flex h-[90vh] w-[95vw] max-w-[95vw] flex-col p-4">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Mermaid 放大预览</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto rounded-md bg-background p-4">
+            {svg ? (
+              <div
+                className="flex min-h-full min-w-max items-start justify-center [&_svg]:h-auto [&_svg]:max-w-none"
+                dangerouslySetInnerHTML={{ __html: svg }}
+              />
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -572,12 +664,21 @@ export function AssistantMessage({
   isStreaming,
   usage,
   toolResults,
-  msgId
+  liveToolCallMap,
+  msgId,
+  showRetry,
+  showContinue,
+  onRetry,
+  onContinue,
+  onDelete
 }: AssistantMessageProps): React.JSX.Element {
   const { t } = useTranslation('chat')
   const devMode = useSettingsStore((s) => s.devMode)
   const debugInfo = devMode && msgId ? getLastDebugInfo(msgId) : undefined
+  const openTranslatePage = useUIStore((s) => s.openTranslatePage)
+  const setTranslateSourceText = useTranslateStore((s) => s.setSourceText)
   const [toolsCollapsed, setToolsCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
 
   // Memoize the plain text extraction for token estimation (used only when no API usage)
   const plainTextForTokens = useMemo(() => {
@@ -615,7 +716,9 @@ export function AssistantMessage({
   }, [isStreaming, normalizedContent])
   const liveToolCalls = useAgentStore(
     useShallow((s) => {
-      if (!isStreaming || liveToolCallIds.length === 0) return EMPTY_LIVE_TOOL_CALLS
+      if (liveToolCallMap || !isStreaming || liveToolCallIds.length === 0) {
+        return EMPTY_LIVE_TOOL_CALLS
+      }
       const idSet = new Set(liveToolCallIds)
       const matches: ToolCallState[] = []
       for (const toolCall of s.pendingToolCalls) {
@@ -628,13 +731,14 @@ export function AssistantMessage({
     })
   )
   const effectiveLiveToolCallMap = useMemo(() => {
+    if (liveToolCallMap) return liveToolCallMap
     if (!isStreaming || liveToolCalls.length === 0) return null
     const map = new Map<string, ToolCallState>()
     for (const toolCall of liveToolCalls) {
       map.set(toolCall.id, toolCall)
     }
     return map
-  }, [isStreaming, liveToolCalls])
+  }, [isStreaming, liveToolCalls, liveToolCallMap])
   const structuredToolCount = useMemo(
     () => normalizedContent?.filter((block) => block.type === 'tool_use').length ?? 0,
     [normalizedContent]
@@ -691,7 +795,6 @@ export function AssistantMessage({
     }
     return items
   }, [normalizedContent])
-
   const renderContent = (): React.JSX.Element => {
     // Show image generation loader when generating images
     if (isGeneratingImage && isStreaming) {
@@ -875,6 +978,28 @@ export function AssistantMessage({
         return (
           <ScaleIn key={key} className="w-full origin-left">
             <ImagePluginToolCard
+              toolUseId={block.id}
+              input={liveTc?.input ?? block.input}
+              output={liveTc?.output ?? result?.content}
+              status={liveTc?.status ?? (result?.isError ? 'error' : 'completed')}
+              error={liveTc?.error}
+            />
+          </ScaleIn>
+        )
+      }
+      if (
+        block.name === DESKTOP_SCREENSHOT_TOOL_NAME ||
+        block.name === DESKTOP_CLICK_TOOL_NAME ||
+        block.name === DESKTOP_TYPE_TOOL_NAME ||
+        block.name === DESKTOP_SCROLL_TOOL_NAME ||
+        block.name === DESKTOP_WAIT_TOOL_NAME
+      ) {
+        const result = toolResults?.get(block.id)
+        const liveTc = effectiveLiveToolCallMap?.get(block.id)
+        return (
+          <ScaleIn key={key} className="w-full origin-left">
+            <DesktopActionToolCard
+              name={block.name}
               input={block.input}
               output={liveTc?.output ?? result?.content}
               status={liveTc?.status ?? (result?.isError ? 'error' : 'completed')}
@@ -999,7 +1124,11 @@ export function AssistantMessage({
                 if (!imgSrc) return null
                 return (
                   <ScaleIn key={item.index} className="w-full origin-left">
-                    <ImagePreview src={imgSrc} alt="Generated image" />
+                    <ImagePreview
+                      src={imgSrc}
+                      alt="Generated image"
+                      filePath={imgBlock.source.filePath}
+                    />
                   </ScaleIn>
                 )
               }
@@ -1105,6 +1234,53 @@ export function AssistantMessage({
             .join('\n')
         : ''
 
+  const handleCopy = useCallback((): void => {
+    if (!plainText) return
+    navigator.clipboard.writeText(plainText)
+  }, [plainText])
+
+  const handleTranslate = useCallback((): void => {
+    const text = plainText.trim()
+    if (!text) return
+    setTranslateSourceText(text)
+    openTranslatePage()
+    toast.success(t('messageActions.sentToTranslator'))
+  }, [openTranslatePage, plainText, setTranslateSourceText, t])
+
+  const handleSpeak = useCallback((): void => {
+    const text = plainText.trim()
+    if (!text) return
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      toast.error(t('messageActions.speechNotSupported'))
+      return
+    }
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US'
+    window.speechSynthesis.cancel()
+    window.speechSynthesis.speak(utterance)
+  }, [plainText, t])
+
+  const handleShare = useCallback(async (): Promise<void> => {
+    const text = plainText.trim()
+    if (!text) return
+    try {
+      if (navigator.share) {
+        await navigator.share({ text })
+        return
+      }
+      await navigator.clipboard.writeText(text)
+      toast.success(t('messageActions.copiedForShare'))
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      toast.error(t('messageActions.shareFailed'))
+    }
+  }, [plainText, t])
+
+  const handleDeleteAndRegenerate = useCallback((): void => {
+    if (!showRetry || !onRetry) return
+    onRetry()
+  }, [onRetry, showRetry])
+
   const timingSummary = useMemo(() => {
     if (!usage) return null
     const totalDuration = usage.totalDurationMs ? formatMs(usage.totalDurationMs) : null
@@ -1131,15 +1307,16 @@ export function AssistantMessage({
     }
   }, [t, usage])
 
-  const activeProvider = useProviderStore((s) => {
-    const pid = s.activeProviderId
+  const requestTrace = msgId ? getRequestTraceInfo(msgId) : undefined
+  const tracedProvider = useProviderStore((s) => {
+    const pid = requestTrace?.providerId
     return pid ? (s.providers.find((p) => p.id === pid) ?? null) : null
   })
-  const activeModelId = useProviderStore((s) => s.activeModelId)
-  const activeModelCfg = activeProvider?.models.find((m) => m.id === activeModelId)
+  const tracedModelId = requestTrace?.model
+  const tracedModelCfg = tracedProvider?.models.find((m) => m.id === tracedModelId)
   const modelDisplayName =
-    activeModelCfg?.name ||
-    activeModelId
+    tracedModelCfg?.name ||
+    tracedModelId
       ?.split('/')
       .pop()
       ?.replace(/-\d{8}$/, '') ||
@@ -1150,64 +1327,203 @@ export function AssistantMessage({
       <Avatar className="size-7 shrink-0 ring-1 ring-border/50">
         <AvatarFallback className="bg-gradient-to-br from-secondary to-muted text-secondary-foreground text-xs">
           <ModelIcon
-            icon={activeModelCfg?.icon}
-            modelId={activeModelId}
-            providerBuiltinId={activeProvider?.builtinId}
+            icon={tracedModelCfg?.icon}
+            modelId={tracedModelId}
+            providerBuiltinId={tracedProvider?.builtinId ?? requestTrace?.providerBuiltinId}
             size={16}
           />
         </AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1 pt-0.5 overflow-hidden">
-        <div className="flex items-center gap-2 mb-1">
+        <div className="mb-1 flex items-center gap-2">
           <p className="text-sm font-medium">{modelDisplayName}</p>
-          {!isStreaming && (
-            <span className="opacity-0 group-hover/msg:opacity-100 transition-opacity flex items-center gap-0.5">
-              {plainText && <CopyButton text={plainText} />}
-              {devMode && debugInfo && <DebugToggleButton debugInfo={debugInfo} />}
-            </span>
-          )}
         </div>
-        {renderContent()}
-        {!isStreaming && runChangeSet && runChangeSet.changes.length > 0 && (
-          <RunChangeReviewCard runId={runChangeSet.runId} changeSet={runChangeSet} />
-        )}
-        {!isStreaming && plainText && (
-          <p className="mt-1 text-[10px] text-muted-foreground/40 tabular-nums">
-            {usage
-              ? (() => {
-                  const u = usage!
-                  const total = u.inputTokens + u.outputTokens
-                  const modelCfg = useProviderStore.getState().getActiveModelConfig()
-                  const cost = calculateCost(u, modelCfg)
-                  return (
-                    <>
-                      {`${formatTokens(total)} ${t('unit.tokens', { ns: 'common' })} (${formatTokens(u.inputTokens)}↓ ${formatTokens(u.outputTokens)}↑`}
-                      {u.cacheReadTokens
-                        ? ` · ${formatTokens(u.cacheReadTokens)} ${t('unit.cached', { ns: 'common' })}`
-                        : ''}
-                      {u.reasoningTokens
-                        ? ` · ${formatTokens(u.reasoningTokens)} ${t('unit.reasoning', { ns: 'common' })}`
-                        : ''}
-                      {')'}
-                      {cost !== null && (
-                        <span className="text-emerald-500/70"> · {formatCost(cost)}</span>
-                      )}
-                    </>
-                  )
-                })()
-              : `~${formatTokens(fallbackTokens)} ${t('unit.tokens', { ns: 'common' })}`}
-          </p>
-        )}
-        {!isStreaming && timingSummary && (
-          <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground/40 tabular-nums">
-            {timingSummary.totalDuration && (
-              <div>
-                {t('assistantMessage.totalDuration', { duration: timingSummary.totalDuration })}
+        {collapsed ? (
+          <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <div className="max-h-10 overflow-hidden whitespace-pre-wrap break-words">
+              {plainText.trim() || t('messageActions.collapsedMessage')}
+            </div>
+          </div>
+        ) : (
+          <>
+            {renderContent()}
+            {!isStreaming && runChangeSet && runChangeSet.changes.length > 0 && (
+              <RunChangeReviewCard runId={runChangeSet.runId} changeSet={runChangeSet} />
+            )}
+            {!isStreaming && plainText && (
+              <p className="mt-1 text-[10px] text-muted-foreground/40 tabular-nums">
+                {usage
+                  ? (() => {
+                      const u = usage!
+                      const provider = requestTrace?.providerId
+                        ? useProviderStore
+                            .getState()
+                            .providers.find((item) => item.id === requestTrace.providerId)
+                        : null
+                      const modelCfg =
+                        provider?.models.find((item) => item.id === requestTrace?.model) ?? null
+                      const total = getBillableTotalTokens(u, modelCfg?.type)
+                      const billableInput = getBillableInputTokens(u, modelCfg?.type)
+                      const cost = calculateCost(u, modelCfg)
+                      return (
+                        <>
+                          {`${formatTokens(total)} ${t('unit.tokens', { ns: 'common' })} (${formatTokens(billableInput)}↓ ${formatTokens(u.outputTokens)}↑`}
+                          {u.cacheReadTokens
+                            ? ` · ${formatTokens(u.cacheReadTokens)} ${t('unit.cached', { ns: 'common' })}`
+                            : ''}
+                          {u.reasoningTokens
+                            ? ` · ${formatTokens(u.reasoningTokens)} ${t('unit.reasoning', { ns: 'common' })}`
+                            : ''}
+                          {')'}
+                          {cost !== null && (
+                            <span className="text-emerald-500/70"> · {formatCost(cost)}</span>
+                          )}
+                        </>
+                      )
+                    })()
+                  : `~${formatTokens(fallbackTokens)} ${t('unit.tokens', { ns: 'common' })}`}
+              </p>
+            )}
+            {!isStreaming && timingSummary && (
+              <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground/40 tabular-nums">
+                {timingSummary.totalDuration && (
+                  <div>
+                    {t('assistantMessage.totalDuration', { duration: timingSummary.totalDuration })}
+                  </div>
+                )}
+                {timingSummary.lastDetail && <div>{timingSummary.lastDetail}</div>}
               </div>
             )}
-            {timingSummary.lastDetail && <div>{timingSummary.lastDetail}</div>}
-          </div>
+          </>
         )}
+        {!isStreaming &&
+          (plainText ||
+            (msgId && onDelete) ||
+            (devMode && debugInfo) ||
+            (showContinue && onContinue) ||
+            (showRetry && onRetry)) && (
+            <div
+              className={`mt-2 flex items-center gap-1 transition-opacity ${showContinue && onContinue ? 'opacity-100' : 'opacity-0 group-hover/msg:opacity-100'}`}
+            >
+              {plainText && (
+                <ActionIconButton
+                  label={t('action.copy', { ns: 'common' })}
+                  icon={<Copy className="size-3.5" />}
+                  onClick={handleCopy}
+                />
+              )}
+              {showContinue && onContinue ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={onContinue}
+                      aria-label={t('assistantMessage.continueToolExecution', {
+                        defaultValue: '继续执行'
+                      })}
+                      className="flex size-7 items-center justify-center rounded-md border border-border/50 bg-background/80 text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
+                    >
+                      <Play className="size-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {t('assistantMessage.continueToolExecutionHint', {
+                      defaultValue:
+                        '检测到上次停在工具执行，点击后会在这条消息里继续，不会新增 AI 消息'
+                    })}
+                  </TooltipContent>
+                </Tooltip>
+              ) : null}
+              {showRetry && onRetry ? (
+                <ActionIconButton
+                  label={t('assistantMessage.regenerateReference', {
+                    defaultValue: '重新生成参考'
+                  })}
+                  icon={<RotateCcw className="size-3.5" />}
+                  onClick={onRetry}
+                />
+              ) : null}
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t('action.showMore', { ns: 'common' })}
+                        className="flex size-7 items-center justify-center rounded-md border border-border/50 bg-background/80 text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
+                      >
+                        <Ellipsis className="size-3.5" />
+                      </button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {t('action.showMore', { ns: 'common' })}
+                  </TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="start" className="w-56">
+                  <DropdownMenuItem onSelect={handleCopy} disabled={!plainText.trim()}>
+                    <Copy className="size-4" />
+                    {t('action.copy', { ns: 'common' })}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={handleTranslate} disabled={!plainText.trim()}>
+                    <Languages className="size-4" />
+                    {t('messageActions.translate')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={handleSpeak} disabled={!plainText.trim()}>
+                    <Volume2 className="size-4" />
+                    {t('messageActions.readAloud')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => void handleShare()}
+                    disabled={!plainText.trim()}
+                  >
+                    <Share2 className="size-4" />
+                    {t('messageActions.share')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setCollapsed((value) => !value)}>
+                    {collapsed ? (
+                      <ChevronsDownUp className="size-4" />
+                    ) : (
+                      <ChevronsUpDown className="size-4" />
+                    )}
+                    {collapsed ? t('messageActions.expand') : t('messageActions.collapse')}
+                  </DropdownMenuItem>
+                  {showContinue && onContinue && (
+                    <DropdownMenuItem onSelect={onContinue}>
+                      <Play className="size-4" />
+                      {t('assistantMessage.continueToolExecution', {
+                        defaultValue: '继续执行'
+                      })}
+                    </DropdownMenuItem>
+                  )}
+                  {showRetry && onRetry && (
+                    <DropdownMenuItem onSelect={onRetry}>
+                      <RotateCcw className="size-4" />
+                      {t('assistantMessage.regenerateReference', {
+                        defaultValue: '重新生成参考'
+                      })}
+                    </DropdownMenuItem>
+                  )}
+                  {showRetry && onRetry && (
+                    <DropdownMenuItem onSelect={handleDeleteAndRegenerate}>
+                      <RotateCcw className="size-4" />
+                      {t('messageActions.deleteAndRegenerate')}
+                    </DropdownMenuItem>
+                  )}
+                  {msgId && onDelete && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem variant="destructive" onSelect={() => onDelete(msgId)}>
+                        <Trash2 className="size-4" />
+                        {t('action.delete', { ns: 'common' })}
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {devMode && debugInfo && <DebugToggleButton debugInfo={debugInfo} />}
+            </div>
+          )}
       </div>
     </div>
   )

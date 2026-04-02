@@ -21,7 +21,17 @@ export interface CodexQuota {
   fetchedAt: number
 }
 
-export type ProviderQuota = CodexQuota
+export interface CopilotQuota {
+  type: 'copilot'
+  sku?: string
+  chatEnabled?: boolean
+  telemetry?: string
+  apiBaseUrl?: string
+  tokenExpiresAt?: number
+  fetchedAt: number
+}
+
+export type ProviderQuota = CodexQuota | CopilotQuota
 
 export interface QuotaUpdatePayload {
   requestId?: string
@@ -46,7 +56,7 @@ export const useQuotaStore = create<QuotaStore>((set) => ({
       const next = { ...state.quotaByKey }
       delete next[key]
       return { quotaByKey: next }
-    }),
+    })
 }))
 
 function resolveQuotaKey(payload: QuotaUpdatePayload): string | null {

@@ -33,15 +33,17 @@ export type SkillsTab = 'market' | 'installed'
 
 export interface MarketSkillInfo {
   id: string
+  slug: string
   name: string
-  owner: string
-  repo: string
-  rank: number
-  installs: number
+  description: string
+  category?: string
+  tags: string[]
+  downloads: number
+  updatedAt?: string
+  filePath?: string
   url: string
-  github: string
-  description?: string
-  source_path?: string
+  downloadUrl: string
+  installCommand: string
 }
 
 interface SkillsStore {
@@ -85,7 +87,9 @@ interface SkillsStore {
   loadSkillFiles: (name: string) => Promise<void>
   deleteSkill: (name: string) => Promise<boolean>
   openSkillFolder: (name: string) => Promise<void>
-  addSkillFromFolder: (sourcePath: string) => Promise<{ success: boolean; name?: string; error?: string }>
+  addSkillFromFolder: (
+    sourcePath: string
+  ) => Promise<{ success: boolean; name?: string; error?: string }>
 
   // Market actions
   loadMarketSkills: (query?: string, reset?: boolean) => Promise<void>
@@ -149,10 +153,23 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
 
   setActiveTab: (tab) =>
-    set({ activeTab: tab, selectedSkill: null, skillContent: null, skillFiles: [], editing: false, editContent: null }),
+    set({
+      activeTab: tab,
+      selectedSkill: null,
+      skillContent: null,
+      skillFiles: [],
+      editing: false,
+      editContent: null
+    }),
 
   selectSkill: (name) => {
-    set({ selectedSkill: name, skillContent: null, skillFiles: [], editing: false, editContent: null })
+    set({
+      selectedSkill: name,
+      skillContent: null,
+      skillFiles: [],
+      editing: false,
+      editContent: null
+    })
     if (name) {
       get().readSkill(name)
       get().loadSkillFiles(name)
@@ -161,7 +178,10 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
 
   readSkill: async (name) => {
     try {
-      const result = (await ipcClient.invoke('skills:read', { name })) as { content?: string; error?: string }
+      const result = (await ipcClient.invoke('skills:read', { name })) as {
+        content?: string
+        error?: string
+      }
       if (result.content) set({ skillContent: result.content })
     } catch {
       set({ skillContent: null })
@@ -170,7 +190,10 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
 
   loadSkillFiles: async (name) => {
     try {
-      const result = (await ipcClient.invoke('skills:list-files', { name })) as { files?: ScanFileInfo[]; error?: string }
+      const result = (await ipcClient.invoke('skills:list-files', { name })) as {
+        files?: ScanFileInfo[]
+        error?: string
+      }
       if (result.files) set({ skillFiles: result.files })
     } catch {
       set({ skillFiles: [] })
@@ -186,7 +209,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
           skills: state.skills.filter((s) => s.name !== name),
           selectedSkill: state.selectedSkill === name ? null : state.selectedSkill,
           skillContent: state.selectedSkill === name ? null : state.skillContent,
-          skillFiles: state.selectedSkill === name ? [] : state.skillFiles,
+          skillFiles: state.selectedSkill === name ? [] : state.skillFiles
         })
         return true
       }
@@ -231,15 +254,16 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
         limit: 50,
         query: q,
         provider: 'skillsmp',
-        apiKey: skillsMarketApiKey,
+        apiKey: skillsMarketApiKey
       })) as {
         total: number
         skills: MarketSkillInfo[]
       }
       set({
-        marketSkills: reset || offset === 0 ? result.skills : [...get().marketSkills, ...result.skills],
+        marketSkills:
+          reset || offset === 0 ? result.skills : [...get().marketSkills, ...result.skills],
         marketTotal: result.total,
-        marketOffset: (reset ? 0 : offset) + result.skills.length,
+        marketOffset: (reset ? 0 : offset) + result.skills.length
       })
     } catch {
       if (reset || offset === 0) set({ marketSkills: [], marketTotal: 0 })
@@ -260,21 +284,29 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
   },
 
   downloadAndReviewMarketSkill: async (skill) => {
-    set({ installDialogOpen: true, installSourcePath: null, installScanResult: null, scanning: true, installing: false, agentReviewText: '', agentReviewDone: false, agentReviewPassed: null })
+    set({
+      installDialogOpen: true,
+      installSourcePath: null,
+      installScanResult: null,
+      scanning: true,
+      installing: false,
+      agentReviewText: '',
+      agentReviewDone: false,
+      agentReviewPassed: null
+    })
 
     try {
       const { useSettingsStore } = await import('@renderer/stores/settings-store')
       const { skillsMarketApiKey } = useSettingsStore.getState()
-      // Download from remote API
+      // Download from remote marketplace
       const downloadResult = (await ipcClient.invoke('skills:download-remote', {
-        owner: skill.owner,
-        repo: skill.repo,
+        slug: skill.slug,
         name: skill.name,
         provider: 'skillsmp',
         apiKey: skillsMarketApiKey,
         skillId: skill.id,
-        sourcePath: skill.source_path,
-        github: skill.github,
+        url: skill.url,
+        downloadUrl: skill.downloadUrl
       })) as { tempPath?: string; files?: { path: string; content: string }[]; error?: string }
 
       if (downloadResult.error || !downloadResult.tempPath) {
@@ -284,7 +316,9 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
       }
 
       // Run regex scan first (fast preliminary check)
-      const scanResult = (await ipcClient.invoke('skills:scan', { sourcePath: downloadResult.tempPath })) as ScanResult | { error: string }
+      const scanResult = (await ipcClient.invoke('skills:scan', {
+        sourcePath: downloadResult.tempPath
+      })) as ScanResult | { error: string }
       if ('error' in scanResult) {
         console.error('[Skills] Scan error:', scanResult.error)
         set({ scanning: false })
@@ -305,7 +339,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
           baseUrl: settingsState.baseUrl,
           model: settingsState.model,
           maxTokens: settingsState.maxTokens,
-          temperature: settingsState.temperature,
+          temperature: settingsState.temperature
         }
 
         if (!settingsState.apiKey) {
@@ -314,7 +348,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
             installScanResult: scanResult,
             installSourcePath: downloadResult.tempPath,
             agentReviewDone: true,
-            agentReviewPassed: scanResult.risks.length === 0,
+            agentReviewPassed: scanResult.risks.length === 0
           })
         } else {
           const agentRisks = await runSkillSecurityReview(
@@ -333,7 +367,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
             installScanResult: { ...scanResult, risks: mergedRisks },
             installSourcePath: downloadResult.tempPath,
             agentReviewDone: true,
-            agentReviewPassed: !hasDanger,
+            agentReviewPassed: !hasDanger
           })
         }
       } catch (err) {
@@ -342,7 +376,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
           installScanResult: scanResult,
           installSourcePath: downloadResult.tempPath,
           agentReviewDone: true,
-          agentReviewPassed: scanResult.risks.length === 0,
+          agentReviewPassed: scanResult.risks.length === 0
         })
       }
     } catch (err) {
@@ -365,7 +399,10 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
 
   saveSkill: async (name, content) => {
     try {
-      const result = (await ipcClient.invoke('skills:save', { name, content })) as { success: boolean; error?: string }
+      const result = (await ipcClient.invoke('skills:save', { name, content })) as {
+        success: boolean
+        error?: string
+      }
       if (result.success) {
         set({ skillContent: content, editing: false, editContent: null })
         return true
@@ -378,7 +415,13 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
 
   // Install dialog actions
   openInstallDialog: (sourcePath) => {
-    set({ installDialogOpen: true, installSourcePath: sourcePath, installScanResult: null, scanning: true, installing: false })
+    set({
+      installDialogOpen: true,
+      installSourcePath: sourcePath,
+      installScanResult: null,
+      scanning: true,
+      installing: false
+    })
     get().scanSkill(sourcePath)
   },
 
@@ -387,13 +430,24 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
     if (state.installSourcePath && state.installSourcePath.includes('opencowork-skills')) {
       void ipcClient.invoke('skills:cleanup-temp', { tempPath: state.installSourcePath })
     }
-    set({ installDialogOpen: false, installSourcePath: null, installScanResult: null, scanning: false, installing: false, agentReviewText: '', agentReviewDone: false, agentReviewPassed: null })
+    set({
+      installDialogOpen: false,
+      installSourcePath: null,
+      installScanResult: null,
+      scanning: false,
+      installing: false,
+      agentReviewText: '',
+      agentReviewDone: false,
+      agentReviewPassed: null
+    })
   },
 
   scanSkill: async (sourcePath) => {
     set({ scanning: true })
     try {
-      const result = (await ipcClient.invoke('skills:scan', { sourcePath })) as ScanResult | { error: string }
+      const result = (await ipcClient.invoke('skills:scan', { sourcePath })) as
+        | ScanResult
+        | { error: string }
       if ('error' in result) {
         set({ scanning: false })
         return null
@@ -428,7 +482,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
           selectedSkill: result.name || null,
           agentReviewText: '',
           agentReviewDone: false,
-          agentReviewPassed: null,
+          agentReviewPassed: null
         })
 
         // Load the newly installed skill's content
@@ -444,5 +498,5 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
       set({ installing: false })
       return { success: false, error: String(err) }
     }
-  },
+  }
 }))

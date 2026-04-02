@@ -13,7 +13,7 @@ import {
   Globe,
   Wrench,
   FileText,
-  MessageSquare,
+  MessageSquare
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@renderer/components/ui/button'
@@ -26,29 +26,90 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
+  SelectValue
 } from '@renderer/components/ui/select'
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
-  DialogTitle,
+  DialogTitle
 } from '@renderer/components/ui/dialog'
 import { useMcpStore } from '@renderer/stores/mcp-store'
 import type { McpServerConfig, McpTransportType } from '@renderer/lib/mcp/types'
 
+type McpJsonImportEntry = {
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  url?: string
+  headers?: Record<string, string>
+  transport?: McpTransportType
+  autoFallback?: boolean
+  description?: string
+  enabled?: boolean
+}
+
+function normalizeImportedServer(
+  name: string,
+  entry: McpJsonImportEntry
+): Omit<McpServerConfig, 'id' | 'createdAt'> {
+  const transport =
+    entry.transport ??
+    (entry.url ? (entry.url.includes('/sse') ? 'sse' : 'streamable-http') : 'stdio')
+
+  return {
+    name,
+    enabled: entry.enabled ?? true,
+    transport,
+    command: entry.command,
+    args: Array.isArray(entry.args) ? entry.args : undefined,
+    env: entry.env,
+    cwd: entry.cwd,
+    url: entry.url,
+    headers: entry.headers,
+    autoFallback: transport === 'streamable-http' ? (entry.autoFallback ?? true) : undefined,
+    description: entry.description
+  }
+}
+
+function parseImportedServers(jsonText: string): Array<Omit<McpServerConfig, 'id' | 'createdAt'>> {
+  const parsed = JSON.parse(jsonText) as unknown
+  const source =
+    parsed && typeof parsed === 'object' && 'mcpServers' in parsed
+      ? (parsed as { mcpServers: unknown }).mcpServers
+      : parsed
+
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('Invalid MCP JSON format')
+  }
+
+  return Object.entries(source).flatMap(([name, value]) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return []
+    }
+    return [normalizeImportedServer(name, value as McpJsonImportEntry)]
+  })
+}
+
 // ─── Transport labels ───
 
 const TRANSPORT_LABELS: Record<McpTransportType, string> = {
-  'stdio': 'stdio',
-  'sse': 'SSE (Legacy)',
-  'streamable-http': 'Streamable HTTP',
+  stdio: 'stdio',
+  sse: 'SSE (Legacy)',
+  'streamable-http': 'Streamable HTTP'
 }
 
 // ─── Server Config Panel (right side) ───
 
-function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.Element {
+function ServerConfigPanel({
+  server,
+  projectId
+}: {
+  server: McpServerConfig
+  projectId?: string
+}): React.JSX.Element {
   const { t } = useTranslation('settings')
   const updateServer = useMcpStore((s) => s.updateServer)
   const removeServer = useMcpStore((s) => s.removeServer)
@@ -74,11 +135,19 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
   const [localArgs, setLocalArgs] = useState((server.args ?? []).join(' '))
   const [localCwd, setLocalCwd] = useState(server.cwd ?? '')
   const [localEnv, setLocalEnv] = useState(
-    server.env ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''
+    server.env
+      ? Object.entries(server.env)
+          .map(([k, v]) => `${k}=${v}`)
+          .join('\n')
+      : ''
   )
   const [localUrl, setLocalUrl] = useState(server.url ?? '')
   const [localHeaders, setLocalHeaders] = useState(
-    server.headers ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : ''
+    server.headers
+      ? Object.entries(server.headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n')
+      : ''
   )
   const [capTab, setCapTab] = useState<'tools' | 'resources' | 'prompts'>('tools')
   const [connecting, setConnecting] = useState(false)
@@ -91,11 +160,19 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
     setLocalArgs((server.args ?? []).join(' '))
     setLocalCwd(server.cwd ?? '')
     setLocalEnv(
-      server.env ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''
+      server.env
+        ? Object.entries(server.env)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n')
+        : ''
     )
     setLocalUrl(server.url ?? '')
     setLocalHeaders(
-      server.headers ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : ''
+      server.headers
+        ? Object.entries(server.headers)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join('\n')
+        : ''
     )
   }, [server.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -195,7 +272,10 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
 
   const handleToggleEnabled = async (): Promise<void> => {
     const enabled = !server.enabled
-    await updateServer(server.id, { enabled })
+    await updateServer(server.id, {
+      enabled,
+      ...(enabled && projectId && server.projectId !== projectId ? { projectId } : {})
+    })
     if (!enabled && status === 'connected') {
       await disconnectServer(server.id)
     }
@@ -204,7 +284,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
   const handleDelete = async (): Promise<void> => {
     const confirmed = await confirm({
       title: t('mcp.deleteConfirm', { name: server.name }),
-      variant: 'destructive',
+      variant: 'destructive'
     })
     if (!confirmed) return
     await removeServer(server.id)
@@ -219,17 +299,25 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
   const isHttp = server.transport === 'sse' || server.transport === 'streamable-http'
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto overflow-x-hidden px-4 py-3">
       {/* Header with name + enabled toggle */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-sm font-semibold">{localName}</h3>
+      <div className="flex items-start justify-between mb-4 gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold truncate">{localName}</h3>
           <p className="text-xs text-muted-foreground">{TRANSPORT_LABELS[server.transport]}</p>
         </div>
-        <Switch
-          checked={server.enabled}
-          onCheckedChange={handleToggleEnabled}
-        />
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+            onClick={handleDelete}
+            title={t('mcp.deleteServer')}
+          >
+            <Trash2 className="size-3.5" />
+          </Button>
+          <Switch checked={server.enabled} onCheckedChange={handleToggleEnabled} />
+        </div>
       </div>
 
       <Separator className="mb-4" />
@@ -339,7 +427,11 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
               value={localUrl}
               onChange={(e) => handleUrlChange(e.target.value)}
               className="h-8 text-xs font-mono"
-              placeholder={server.transport === 'sse' ? t('mcp.urlPlaceholderSse') : t('mcp.urlPlaceholderHttp')}
+              placeholder={
+                server.transport === 'sse'
+                  ? t('mcp.urlPlaceholderSse')
+                  : t('mcp.urlPlaceholderHttp')
+              }
             />
           </section>
           <section className="space-y-1.5 mb-3">
@@ -358,9 +450,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-xs font-medium">{t('mcp.autoFallback')}</label>
-                  <p className="text-[10px] text-muted-foreground">
-                    {t('mcp.autoFallbackDesc')}
-                  </p>
+                  <p className="text-[10px] text-muted-foreground">{t('mcp.autoFallbackDesc')}</p>
                 </div>
                 <Switch
                   checked={server.autoFallback !== false}
@@ -377,12 +467,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
       {/* Connection control */}
       <section className="flex items-center gap-2 mb-4">
         {status === 'connected' ? (
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={handleDisconnect}
-          >
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleDisconnect}>
             <Square className="size-3 mr-1" />
             {t('mcp.disconnect')}
           </Button>
@@ -399,17 +484,11 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
           </Button>
         )}
         {status === 'connected' && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={handleRefresh}
-          >
+          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleRefresh}>
             <RefreshCw className="size-3 mr-1" />
             {t('mcp.refresh')}
           </Button>
         )}
-        <div className="flex-1" />
         <span
           className={`inline-flex items-center gap-1 text-[10px] ${
             status === 'connected'
@@ -449,7 +528,12 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
           <Separator className="mb-3" />
           <div className="flex items-center gap-1 mb-3">
             {(['tools', 'resources', 'prompts'] as const).map((tab) => {
-              const count = tab === 'tools' ? tools.length : tab === 'resources' ? resources.length : prompts.length
+              const count =
+                tab === 'tools'
+                  ? tools.length
+                  : tab === 'resources'
+                    ? resources.length
+                    : prompts.length
               const Icon = tab === 'tools' ? Wrench : tab === 'resources' ? FileText : MessageSquare
               return (
                 <button
@@ -470,7 +554,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
 
           {/* Tools list */}
           {capTab === 'tools' && (
-            <div className="space-y-1 max-h-60 overflow-y-auto">
+            <div className="space-y-1">
               {tools.length === 0 ? (
                 <p className="text-xs text-muted-foreground py-2">{t('mcp.noTools')}</p>
               ) : (
@@ -490,7 +574,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
 
           {/* Resources list */}
           {capTab === 'resources' && (
-            <div className="space-y-1 max-h-60 overflow-y-auto">
+            <div className="space-y-1">
               {resources.length === 0 ? (
                 <p className="text-xs text-muted-foreground py-2">{t('mcp.noResources')}</p>
               ) : (
@@ -509,7 +593,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
 
           {/* Prompts list */}
           {capTab === 'prompts' && (
-            <div className="space-y-1 max-h-60 overflow-y-auto">
+            <div className="space-y-1">
               {prompts.length === 0 ? (
                 <p className="text-xs text-muted-foreground py-2">{t('mcp.noPrompts')}</p>
               ) : (
@@ -533,18 +617,6 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
       )}
 
       <div className="flex-1" />
-
-      {/* Delete */}
-      <Separator className="my-4" />
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-7 text-xs text-destructive hover:text-destructive hover:bg-destructive/10 self-start"
-        onClick={handleDelete}
-      >
-        <Trash2 className="size-3 mr-1" />
-        {t('mcp.deleteServer')}
-      </Button>
     </div>
   )
 }
@@ -553,7 +625,7 @@ function ServerConfigPanel({ server }: { server: McpServerConfig }): React.JSX.E
 
 function AddServerDialog({
   open,
-  onOpenChange,
+  onOpenChange
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -562,8 +634,17 @@ function AddServerDialog({
   const addServer = useMcpStore((s) => s.addServer)
   const setSelectedServer = useMcpStore((s) => s.setSelectedServer)
 
+  const [mode, setMode] = useState<'manual' | 'json'>('manual')
   const [name, setName] = useState('')
   const [transport, setTransport] = useState<McpTransportType>('stdio')
+  const [jsonText, setJsonText] = useState('')
+
+  const resetForm = (): void => {
+    setMode('manual')
+    setName('')
+    setTransport('stdio')
+    setJsonText('')
+  }
 
   const handleAdd = async (): Promise<void> => {
     const serverName = name.trim() || t('mcp.namePlaceholder')
@@ -571,62 +652,127 @@ function AddServerDialog({
       name: serverName,
       enabled: true,
       transport,
-      autoFallback: true,
+      autoFallback: true
     })
     setSelectedServer(id)
     onOpenChange(false)
-    setName('')
-    setTransport('stdio')
+    resetForm()
     toast.success(t('mcp.serverAdded', { name: serverName }))
   }
 
+  const handleJsonImport = async (): Promise<void> => {
+    try {
+      const servers = parseImportedServers(jsonText.trim())
+      if (servers.length === 0) {
+        toast.error(t('mcp.importJsonInvalid'))
+        return
+      }
+
+      let lastId: string | null = null
+      for (const server of servers) {
+        lastId = await addServer(server)
+      }
+
+      setSelectedServer(lastId)
+      onOpenChange(false)
+      resetForm()
+      toast.success(t('mcp.importJsonSuccess', { count: servers.length }))
+    } catch (error) {
+      toast.error(t('mcp.importJsonFailed'), {
+        description: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  const handleOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen) resetForm()
+    onOpenChange(nextOpen)
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{t('mcp.addServerTitle')}</DialogTitle>
-          <DialogDescription>
-            {t('mcp.addServerDesc')}
-          </DialogDescription>
+          <DialogDescription>{t('mcp.addServerDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 mt-2">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium">{t('mcp.name')}</label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t('mcp.namePlaceholder')}
-              className="h-8 text-xs"
-              autoFocus
-              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }}
-            />
+          <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
+            <button
+              onClick={() => setMode('manual')}
+              className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
+                mode === 'manual' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+              }`}
+            >
+              {t('mcp.manualCreate')}
+            </button>
+            <button
+              onClick={() => setMode('json')}
+              className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
+                mode === 'json' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+              }`}
+            >
+              {t('mcp.importJson')}
+            </button>
           </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium">{t('mcp.transport')}</label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['stdio', 'streamable-http', 'sse'] as const).map((tp) => (
-                <button
-                  key={tp}
-                  onClick={() => setTransport(tp)}
-                  className={`flex flex-col items-center gap-1 rounded-lg border p-3 text-center transition-colors ${
-                    transport === tp
-                      ? 'border-primary bg-primary/5'
-                      : 'hover:bg-muted/50'
-                  }`}
-                >
-                  {tp === 'stdio' ? (
-                    <Terminal className="size-4" />
-                  ) : (
-                    <Globe className="size-4" />
-                  )}
-                  <span className="text-[10px] font-medium">{TRANSPORT_LABELS[tp]}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <Button onClick={handleAdd} className="w-full h-8 text-xs">
-            {t('mcp.addServer')}
-          </Button>
+
+          {mode === 'manual' ? (
+            <>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">{t('mcp.name')}</label>
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={t('mcp.namePlaceholder')}
+                  className="h-8 text-xs"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAdd()
+                  }}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">{t('mcp.transport')}</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['stdio', 'streamable-http', 'sse'] as const).map((tp) => (
+                    <button
+                      key={tp}
+                      onClick={() => setTransport(tp)}
+                      className={`flex flex-col items-center gap-1 rounded-lg border p-3 text-center transition-colors ${
+                        transport === tp ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'
+                      }`}
+                    >
+                      {tp === 'stdio' ? (
+                        <Terminal className="size-4" />
+                      ) : (
+                        <Globe className="size-4" />
+                      )}
+                      <span className="text-[10px] font-medium">{TRANSPORT_LABELS[tp]}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <Button onClick={handleAdd} className="w-full h-8 text-xs">
+                {t('mcp.addServer')}
+              </Button>
+            </>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">{t('mcp.importJson')}</label>
+                <Textarea
+                  value={jsonText}
+                  onChange={(e) => setJsonText(e.target.value)}
+                  className="min-h-[180px] text-xs font-mono"
+                  placeholder={t('mcp.importJsonPlaceholder')}
+                />
+                <p className="text-[10px] text-muted-foreground">{t('mcp.importJsonHint')}</p>
+              </div>
+              <Button onClick={handleJsonImport} className="w-full h-8 text-xs">
+                {t('mcp.importJsonAction')}
+              </Button>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -635,7 +781,13 @@ function AddServerDialog({
 
 // ─── Main MCP Panel ───
 
-export function McpPanel(): React.JSX.Element {
+export function McpPanel({
+  projectId,
+  showHeader = true
+}: {
+  projectId?: string
+  showHeader?: boolean
+} = {}): React.JSX.Element {
   const { t } = useTranslation('settings')
   const servers = useMcpStore((s) => s.servers)
   const selectedServerId = useMcpStore((s) => s.selectedServerId)
@@ -660,34 +812,39 @@ export function McpPanel(): React.JSX.Element {
     }
   }, [selectedServerId, servers, setSelectedServer])
 
+  const projectScopedServers = useMemo(() => {
+    if (!projectId) return servers
+    return servers.filter((server) => !server.projectId || server.projectId === projectId)
+  }, [servers, projectId])
+
   const filteredServers = useMemo(() => {
-    if (!searchQuery.trim()) return servers
+    if (!searchQuery.trim()) return projectScopedServers
     const q = searchQuery.toLowerCase()
-    return servers.filter(
+    return projectScopedServers.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
         s.transport.toLowerCase().includes(q) ||
         (s.description ?? '').toLowerCase().includes(q)
     )
-  }, [servers, searchQuery])
+  }, [projectScopedServers, searchQuery])
 
-  const selectedServer = servers.find((s) => s.id === selectedServerId)
+  const selectedServer = filteredServers.find((s) => s.id === selectedServerId)
 
   const enabledServers = filteredServers.filter((s) => s.enabled)
   const disabledServers = filteredServers.filter((s) => !s.enabled)
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="mb-3 shrink-0">
-        <h2 className="text-lg font-semibold">{t('mcp.title')}</h2>
-        <p className="text-sm text-muted-foreground">
-          {t('mcp.subtitle')}
-        </p>
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      {showHeader && (
+        <div className="mb-3 shrink-0">
+          <h2 className="text-lg font-semibold">{t('mcp.title')}</h2>
+          <p className="text-sm text-muted-foreground">{t('mcp.subtitle')}</p>
+        </div>
+      )}
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left: Server list */}
-        <div className="w-52 shrink-0 border-r flex flex-col">
+        <div className="w-60 shrink-0 border-r flex flex-col xl:w-64">
           {/* Search + Add */}
           <div className="flex items-center gap-1 p-2 border-b">
             <div className="relative flex-1">
@@ -787,9 +944,9 @@ export function McpPanel(): React.JSX.Element {
         </div>
 
         {/* Right: Config panel */}
-        <div className="flex-1 min-w-0 overflow-hidden">
+        <div className="flex-1 min-w-0 min-h-0">
           {selectedServer ? (
-            <ServerConfigPanel server={selectedServer} />
+            <ServerConfigPanel server={selectedServer} projectId={projectId} />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               {t('mcp.selectToConfig')}

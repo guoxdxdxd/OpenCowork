@@ -6,6 +6,7 @@ import { runSubAgent } from './runner'
 import { subAgentEvents } from './events'
 import { subAgentRegistry } from './registry'
 import type { ProviderConfig, TokenUsage, ToolResultContent } from '../../api/types'
+import { encodeStructuredToolResult, encodeToolError } from '../../tools/tool-result-format'
 import { useAgentStore } from '../../../stores/agent-store'
 import { useSettingsStore } from '../../../stores/settings-store'
 import { ConcurrencyLimiter } from '../concurrency-limiter'
@@ -17,7 +18,7 @@ import type { TeamMember } from '../teams/types'
 /** Global concurrency limiter: at most 2 SubAgents run simultaneously. */
 const subAgentLimiter = new ConcurrencyLimiter(2)
 
-/** Metadata embedded in SubAgent output for historical rendering */
+/** Legacy metadata shape kept only for parsing older stored Task outputs. */
 export interface SubAgentMeta {
   iterations: number
   elapsed: number
@@ -37,7 +38,7 @@ export interface SubAgentMeta {
 const META_PREFIX = '<!--subagent-meta:'
 const META_SUFFIX = '-->\n'
 
-/** Extract embedded metadata from SubAgent output string */
+/** Parse legacy embedded metadata from older SubAgent output strings. */
 export function parseSubAgentMeta(output: string): { meta: SubAgentMeta | null; text: string } {
   if (!output.startsWith(META_PREFIX)) return { meta: null, text: output }
   const endIdx = output.indexOf(META_SUFFIX)
@@ -135,6 +136,7 @@ function scheduleNextTask(teamName: string): void {
         prompt: `Work on the following task:\n**Subject:** ${nextTask.subject}\n**Description:** ${nextTask.description}`,
         taskId: nextTask.id,
         model: null,
+        agentName: null,
         workingFolder: ctx.workingFolder
       }).finally(() => {
         limiter.release()
@@ -148,9 +150,7 @@ function scheduleNextTask(teamName: string): void {
 }
 
 function buildTaskDescription(agents: SubAgentDefinition[]): string {
-  const agentLines = agents
-    .map((a) => `- ${a.name}: ${a.description}`)
-    .join('\n')
+  const agentLines = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n')
 
   return `Launch a new agent to handle complex, multi-step tasks autonomously.
 
@@ -186,19 +186,38 @@ async function executeBackgroundTeammate(
   input: Record<string, unknown>,
   ctx: ToolContext
 ): Promise<ToolResultContent> {
+  if (ctx.callerAgent === 'teammate') {
+    return encodeToolError(
+      'Background teammate spawning is not allowed from a teammate. Send a message to the lead instead.'
+    )
+  }
+
   const team = useTeamStore.getState().activeTeam
   if (!team) {
-    return JSON.stringify({ error: 'No active team. Call TeamCreate first.' })
+    return encodeToolError('No active team. Call TeamCreate first.')
+  }
+
+  const requestedTeamName = input.team_name ? String(input.team_name) : null
+  if (requestedTeamName && requestedTeamName !== team.name) {
+    return encodeToolError(
+      `Active team is "${team.name}", but received team_name="${requestedTeamName}".`
+    )
   }
 
   const memberName = String(input.name ?? '')
   if (!memberName) {
-    return JSON.stringify({ error: '"name" is required when run_in_background=true' })
+    return encodeToolError('"name" is required when run_in_background=true')
   }
 
   const existing = team.members.find((m) => m.name === memberName)
   if (existing) {
-    return JSON.stringify({ error: `Teammate "${memberName}" already exists in the team.` })
+    return encodeToolError(`Teammate "${memberName}" already exists in the team.`)
+  }
+
+  const subType = input.subagent_type ? String(input.subagent_type) : null
+  const agentDefinition = subType ? subAgentRegistry.get(subType) : null
+  if (subType && !agentDefinition) {
+    return encodeToolError(`Unknown subagent_type "${subType}".`)
   }
 
   const teamName = team.name
@@ -213,9 +232,9 @@ async function executeBackgroundTeammate(
   if (assignedTaskId) {
     const task = team.tasks.find((t) => t.id === assignedTaskId)
     if (task?.status === 'completed') {
-      return JSON.stringify({
-        error: `Task "${assignedTaskId}" is already completed and cannot be re-assigned.`
-      })
+      return encodeToolError(
+        `Task "${assignedTaskId}" is already completed and cannot be re-assigned.`
+      )
     }
   }
 
@@ -223,6 +242,7 @@ async function executeBackgroundTeammate(
     id: nanoid(),
     name: memberName,
     model: String(input.model ?? 'default'),
+    ...(agentDefinition ? { agentName: agentDefinition.name } : {}),
     status: willQueue ? 'waiting' : 'idle',
     currentTaskId: assignedTaskId,
     iteration: 0,
@@ -255,6 +275,7 @@ async function executeBackgroundTeammate(
         prompt: String(input.prompt),
         taskId: assignedTaskId,
         model: input.model ? String(input.model) : null,
+        agentName: agentDefinition?.name ?? null,
         workingFolder: ctx.workingFolder
       }).finally(() => {
         limiter.release()
@@ -268,7 +289,7 @@ async function executeBackgroundTeammate(
       // If runTeammate() failed after acquire(), .finally() already released.
     })
 
-  return JSON.stringify({
+  return encodeStructuredToolResult({
     success: true,
     member_id: member.id,
     name: memberName,
@@ -353,6 +374,11 @@ export function createTaskTool(providerGetter: () => ProviderConfig): ToolHandle
                 type: 'string',
                 description: 'Team name for spawning. Uses current team context if omitted.'
               },
+              subagent_type: {
+                type: 'string',
+                enum: subTypeEnum,
+                description: 'Optional specialized background agent type to use for this teammate.'
+              },
               model: {
                 type: 'string',
                 description: 'Optional model override for this agent.'
@@ -377,33 +403,23 @@ export function createTaskTool(providerGetter: () => ProviderConfig): ToolHandle
       // --- Synchronous sub-agent mode ---
       const subType = String(input.subagent_type ?? '')
       if (!subType) {
-        return JSON.stringify({
-          error: `"subagent_type" is required for synchronous Task. Available: ${subTypeEnum.join(', ')}`
-        })
+        return encodeToolError(
+          `"subagent_type" is required for synchronous Task. Available: ${subTypeEnum.join(', ')}`
+        )
       }
       const def = subAgentRegistry.get(subType)
       if (!def) {
-        return JSON.stringify({
-          error: `Unknown subagent_type "${subType}". Available: ${subTypeEnum.join(', ')}`
-        })
+        return encodeToolError(
+          `Unknown subagent_type "${subType}". Available: ${subTypeEnum.join(', ')}`
+        )
       }
 
       // Acquire concurrency slot (blocks if 2 SubAgents are already running)
       await subAgentLimiter.acquire(ctx.signal)
 
       try {
-        // Collect inner tool calls for metadata embedding
-        const collectedToolCalls = new Map<string, ToolCallState>()
-        let startedAt = Date.now()
-
         const onEvent = (event: SubAgentEvent): void => {
           subAgentEvents.emit(event)
-          if (event.type === 'sub_agent_start') {
-            startedAt = Date.now()
-          }
-          if (event.type === 'sub_agent_tool_call') {
-            collectedToolCalls.set(event.toolCall.id, event.toolCall)
-          }
         }
 
         const result = await runSubAgent({
@@ -426,59 +442,14 @@ export function createTaskTool(providerGetter: () => ProviderConfig): ToolHandle
           }
         })
 
-        // Build metadata for historical rendering (truncate large outputs to prevent bloat)
-        const MAX_OUTPUT = 6000
-        const MAX_INPUT_VALUE = 2000
-        const truncStr = (s: string | undefined, max: number): string | undefined => {
-          if (!s || s.length <= max) return s
-          return s.slice(0, max) + `\n... [truncated, ${s.length} chars total]`
-        }
-        const truncInput = (inp: Record<string, unknown>): Record<string, unknown> => {
-          const out: Record<string, unknown> = {}
-          for (const [k, v] of Object.entries(inp)) {
-            out[k] =
-              typeof v === 'string' && v.length > MAX_INPUT_VALUE
-                ? v.slice(0, MAX_INPUT_VALUE) + `... [${v.length} chars]`
-                : v
-          }
-          return out
-        }
-        const meta: SubAgentMeta = {
-          iterations: result.iterations,
-          elapsed: Date.now() - startedAt,
-          usage: result.usage,
-          toolCalls: Array.from(collectedToolCalls.values()).map((tc) => ({
-            id: tc.id,
-            name: tc.name,
-            input: truncInput(tc.input),
-            status: tc.status,
-            output: truncStr(
-              typeof tc.output === 'string'
-                ? tc.output
-                : tc.output
-                  ? JSON.stringify(tc.output)
-                  : undefined,
-              MAX_OUTPUT
-            ),
-            error: tc.error,
-            startedAt: tc.startedAt,
-            completedAt: tc.completedAt
-          }))
-        }
-        const metaStr = `${META_PREFIX}${JSON.stringify(meta)}${META_SUFFIX}`
-
         if (!result.success) {
-          return (
-            metaStr +
-            JSON.stringify({
-              error: result.error ?? 'SubAgent failed',
-              toolCalls: result.toolCallCount,
-              iterations: result.iterations
-            })
-          )
+          return encodeStructuredToolResult({
+            error: result.error ?? 'SubAgent failed',
+            result: result.output || undefined
+          })
         }
 
-        return metaStr + result.output
+        return result.output
       } finally {
         subAgentLimiter.release()
       }

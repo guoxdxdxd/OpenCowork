@@ -1,5 +1,6 @@
 import * as React from 'react'
 import type { ToolResultContent } from '@renderer/lib/api/types'
+import type { ToolCallState } from '@renderer/lib/agent/types'
 import { UserMessage } from './UserMessage'
 import { AssistantMessage } from './AssistantMessage'
 import { Users, ChevronDown } from 'lucide-react'
@@ -9,13 +10,41 @@ import { SlideIn } from '@renderer/components/animate-ui'
 import type { EditableUserMessageDraft } from '@renderer/lib/image-attachments'
 import type { UnifiedMessage } from '@renderer/lib/api/types'
 
+type MessageRenderMode = 'default' | 'transcript'
+
 interface MessageItemProps {
   message: UnifiedMessage
   messageId: string
   isStreaming?: boolean
   isLastUserMessage?: boolean
-  onEditUserMessage?: (draft: EditableUserMessageDraft) => void
+  isLastAssistantMessage?: boolean
+  showContinue?: boolean
+  disableAnimation?: boolean
+  onRetryAssistantMessage?: () => void
+  onContinueAssistantMessage?: () => void
+  onEditUserMessage?: (messageId: string, draft: EditableUserMessageDraft) => void
+  onDeleteMessage?: (messageId: string) => void
   toolResults?: Map<string, { content: ToolResultContent; isError?: boolean }>
+  liveToolCallMap?: Map<string, ToolCallState> | null
+  renderMode?: MessageRenderMode
+}
+
+function getToolUseInputSignal(input: Record<string, unknown>): string {
+  const entries = Object.entries(input)
+  if (entries.length === 0) return '0'
+
+  return entries
+    .map(([key, value]) => {
+      if (typeof value === 'string') return `${key}:s:${value.length}:${value.slice(-24)}`
+      if (typeof value === 'number') return `${key}:n:${value}`
+      if (typeof value === 'boolean') return `${key}:b:${value ? 1 : 0}`
+      if (Array.isArray(value)) return `${key}:a:${value.length}`
+      if (value && typeof value === 'object') {
+        return `${key}:o:${Object.keys(value as Record<string, unknown>).length}`
+      }
+      return `${key}:${typeof value}`
+    })
+    .join('|')
 }
 
 function getContentSignal(content: UnifiedMessage['content']): string {
@@ -28,7 +57,7 @@ function getContentSignal(content: UnifiedMessage['content']): string {
     return `a:${content.length}:h:${last.thinking.length}:${last.completedAt ?? 0}`
   }
   if (last.type === 'tool_use') {
-    return `a:${content.length}:u:${last.id}:${JSON.stringify(last.input).length}`
+    return `a:${content.length}:u:${last.id}:${getToolUseInputSignal(last.input)}`
   }
   if (last.type === 'tool_result') {
     return `a:${content.length}:r:${last.toolUseId}:${typeof last.content === 'string' ? last.content.length : last.content.length}`
@@ -84,8 +113,16 @@ function MessageItemInner({
   messageId,
   isStreaming,
   isLastUserMessage,
+  isLastAssistantMessage,
+  showContinue,
+  disableAnimation,
+  onRetryAssistantMessage,
+  onContinueAssistantMessage,
   onEditUserMessage,
-  toolResults
+  onDeleteMessage,
+  toolResults,
+  liveToolCallMap,
+  renderMode = 'default'
 }: MessageItemProps): React.JSX.Element | null {
   if (message.id !== messageId) return null
 
@@ -108,9 +145,11 @@ function MessageItemInner({
         // UserMessage will handle ContentBlock[] extraction and system-remind filtering
         return (
           <UserMessage
+            messageId={message.id}
             content={message.content}
             isLast={isLastUserMessage}
             onEdit={onEditUserMessage}
+            onDelete={onDeleteMessage}
           />
         )
       }
@@ -122,6 +161,13 @@ function MessageItemInner({
             usage={message.usage}
             toolResults={toolResults}
             msgId={message.id}
+            showRetry={isLastAssistantMessage}
+            showContinue={showContinue && isLastAssistantMessage}
+            onRetry={onRetryAssistantMessage}
+            onContinue={onContinueAssistantMessage}
+            onDelete={onDeleteMessage}
+            liveToolCallMap={liveToolCallMap}
+            renderMode={renderMode}
           />
         )
       default:
@@ -131,17 +177,19 @@ function MessageItemInner({
 
   if (!inner) return null
 
+  if (disableAnimation) {
+    return (
+      <div className="group/ts relative">
+        <span className="absolute -left-12 top-1 hidden group-hover/ts:block text-[10px] text-muted-foreground/40 whitespace-nowrap">
+          {formatTime(message.createdAt)}
+        </span>
+        {inner}
+      </div>
+    )
+  }
+
   return (
-    <SlideIn
-      className="group/ts relative"
-      direction="up"
-      offset={10}
-      duration={0.3}
-      style={{
-        contentVisibility: 'auto',
-        containIntrinsicSize: '320px'
-      }}
-    >
+    <SlideIn className="group/ts relative" direction="up" offset={10} duration={0.3}>
       <span className="absolute -left-12 top-1 hidden group-hover/ts:block text-[10px] text-muted-foreground/40 whitespace-nowrap">
         {formatTime(message.createdAt)}
       </span>
@@ -170,23 +218,31 @@ function areToolResultsEqual(
 
 function areEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
   const prevUsageSignal = prev.message.usage
-    ? `${prev.message.usage.inputTokens}:${prev.message.usage.outputTokens}:${prev.message.usage.totalDurationMs ?? 0}`
+    ? `${prev.message.usage.inputTokens}:${prev.message.usage.billableInputTokens ?? ''}:${prev.message.usage.outputTokens}:${prev.message.usage.cacheReadTokens ?? 0}:${prev.message.usage.totalDurationMs ?? 0}`
     : ''
   const nextUsageSignal = next.message.usage
-    ? `${next.message.usage.inputTokens}:${next.message.usage.outputTokens}:${next.message.usage.totalDurationMs ?? 0}`
+    ? `${next.message.usage.inputTokens}:${next.message.usage.billableInputTokens ?? ''}:${next.message.usage.outputTokens}:${next.message.usage.cacheReadTokens ?? 0}:${next.message.usage.totalDurationMs ?? 0}`
     : ''
 
   return (
     prev.messageId === next.messageId &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
+    prev.isLastAssistantMessage === next.isLastAssistantMessage &&
+    prev.showContinue === next.showContinue &&
+    prev.disableAnimation === next.disableAnimation &&
+    prev.onRetryAssistantMessage === next.onRetryAssistantMessage &&
+    prev.onContinueAssistantMessage === next.onContinueAssistantMessage &&
     prev.onEditUserMessage === next.onEditUserMessage &&
+    prev.onDeleteMessage === next.onDeleteMessage &&
     prev.message.role === next.message.role &&
     prev.message.createdAt === next.message.createdAt &&
     prev.message.source === next.message.source &&
     getContentSignal(prev.message.content) === getContentSignal(next.message.content) &&
     prevUsageSignal === nextUsageSignal &&
-    areToolResultsEqual(prev.toolResults, next.toolResults)
+    areToolResultsEqual(prev.toolResults, next.toolResults) &&
+    prev.liveToolCallMap === next.liveToolCallMap &&
+    prev.renderMode === next.renderMode
   )
 }
 

@@ -1,8 +1,11 @@
 {
   "input": {
     "placeholder": "Type a message...",
+    "placeholderClarify": "Describe your idea and I will keep probing until the requirements are clear...",
     "placeholderCowork": "Ask the assistant to help with your project...",
-    "placeholderCode": "Describe what you want to build...",
+    "placeholderCode": "Describe what you want to build, like fixing bugs, writing scripts, or using /commit to commit the repository...",
+    "placeholderAcp": "Describe the goal, context, constraints, and acceptance criteria. I will design and delegate first instead of coding directly...",
+    "placeholderInitWorkspace": "No AGENTS.md found in the current working folder. Try /init first to initialize the project context...",
     "noApiKey": "No API key configured. Click here to open Settings.",
     "attachImages": "Attach images (paste or drag & drop also supported)",
     "dropImages": "Drop images or files",
@@ -10,6 +13,8 @@
     "disableThinking": "Disable deep thinking",
     "enableThinking": "Enable deep thinking",
     "thinkingOff": "Off",
+    "noModelSettings": "No extra settings for this model (e.g. deep thinking, fast mode)",
+    "contextCompressionThreshold": "Context compression threshold",
     "thinkingLevel": "Thinking: {{level}}",
     "effortDesc": {
       "none": "No reasoning",
@@ -17,6 +22,7 @@
       "low": "Quick reasoning",
       "medium": "Balanced",
       "high": "Thorough",
+      "max": "Maximum effort",
       "xhigh": "Maximum depth"
     },
     "selectFolder": "Select working folder",
@@ -47,7 +53,154 @@
     "sshDirectory": "Remote directory",
     "sshDirectoryPlaceholder": "",
     "sshSelect": "Select",
-    "sshConnected": "Connected"
+    "sshConnected": "Connected",
+    "queueTitle": "Queued messages",
+    "queuePausedHint": "Paused — click to resume",
+    "queueRunningHint": "Sent in order after the current task finishes",
+    "queueResume": "Resume",
+    "queueEditing": "Edit queued message",
+    "queueImageCount": "{{count}} images",
+    "queueImageOnly": "[Images only]",
+    "queueCleared": "Queued messages cleared",
+    "queueClearConfirmTitle": "Clear queued messages?",
+    "queueClearConfirmDesc": "This will remove {{count}} queued messages in the current session.",
+    "clearConfirmDescWithQueue": "This will remove all messages in this conversation and clear {{count}} queued messages in the current session. This action cannot be undone.",
+    "recommendationDefaultChat": "Help me turn the current context into a clearer question I can directly ask next.",
+    "recommendationDefaultClarify": "Keep questioning me until the goal, constraints, boundaries, and acceptance criteria are clear.",
+    "recommendationDefaultCowork": "Based on the current context, suggest the next collaborative task worth executing.",
+    "recommendationDefaultCode": "Based on the current context, suggest the next code change goal and implementation requirements.",
+    "recommendationInitWorkspace": "No AGENTS.md found in the current working folder. Help me run /init to initialize the project context first.",
+    "startAcp": "Start an ACP session",
+    "startAcpDesc": "First clarify the goal, background, constraints, and acceptance criteria. Then design the architecture and delegate tasks before writing code.",
+    "homeTitleAcp": "ACP mode",
+    "homeDescAcp": "In ACP mode, begin by clarifying goals, background, constraints, and acceptance criteria. Then propose an architecture and task breakdown before implementation."
+  },
+  "guide": {
+    "title": "Conversation Onboarding",
+    "badge": "Chat Features",
+    "subtitle": "Learn the left project/session area, the composer with commands and @ file mentions, and the right-side panels.",
+    "openButton": "Open Guide",
+    "bannerTitle": "New to the conversation page?",
+    "bannerDesc": "Spend two minutes on this guide and you will know how projects, sessions, the composer, and the right panel work together.",
+    "openDocs": "Open Help Site",
+    "close": "Maybe later",
+    "startNow": "Start using it",
+    "progress": "Step {{current}} / {{total}}",
+    "previous": "Previous",
+    "next": "Next",
+    "finish": "Finish",
+    "skip": "Skip",
+    "steps": {
+      "modeClarify": {
+        "title": "This is Clarify mode",
+        "description": "Use it to understand the goal, boundaries, constraints, and acceptance criteria before execution. It is better for asking and narrowing things down first."
+      },
+      "modeCowork": {
+        "title": "This is Cowork mode",
+        "description": "Use it for general project collaboration: researching, organizing plans, coordinating tools, handling files, and advancing multi-step work."
+      },
+      "modeCode": {
+        "title": "This is Code mode",
+        "description": "Use it for direct implementation tasks such as editing files, writing code, running checks, and handling engineering details."
+      },
+      "leftSidebar": {
+        "title": "This is the project and session area",
+        "description": "Your work is organized here as projects and sessions. Use it to switch projects, revisit old sessions, and search earlier context."
+      },
+      "sessionActions": {
+        "title": "These are the project and session quick actions",
+        "description": "Use this area to create projects, start a session, export conversations, and combine it with right-click actions for rename, pin, duplicate, or delete."
+      },
+      "composer": {
+        "title": "This is the composer",
+        "description": "Most work starts here: describe the task, send messages, attach images, switch models, enable web search, or enter Plan Mode. Enter sends, Shift+Enter adds a newline."
+      },
+      "mentions": {
+        "title": "Use @ here to mention files",
+        "description": "Type @ inside the composer to search files from the current working folder. This inserts structured file references, which is much better than typing paths manually."
+      },
+      "commands": {
+        "title": "Open commands, Skills, and MCP here",
+        "description": "Click this + button to add commands, Skills, Channels, and MCP Servers to the current message. Typing / in the composer opens slash-command suggestions."
+      },
+      "rightPanel": {
+        "title": "This is the execution panel",
+        "description": "Use it to monitor progress and context: Steps shows what is running, Files shows the tree, Artifacts shows changed files, and Context shows folder, model, tokens, and background commands."
+      }
+    },
+    "sections": {
+      "leftSidebar": {
+        "title": "Left: Projects and Sessions",
+        "bullets": [
+          "The narrow far-left rail is app navigation; the wide left panel is where projects and sessions live.",
+          "A project works like a workspace and can store its name, working folder, SSH connection, and default model.",
+          "Each project can contain many sessions, and sessions support create, rename, pin, delete, and mode switching.",
+          "Session search matches both titles and loaded message content, while older sessions collapse into history.",
+          "Right-click a project or session to export, duplicate, clear messages, or change folders."
+        ]
+      },
+      "composer": {
+        "title": "Center Bottom: Composer and Send",
+        "bullets": [
+          "The composer supports multiline editing, per-session draft memory, and input history navigation.",
+          "Press Enter to send and Shift+Enter for a newline; extra sends during a run go into the queue.",
+          "The bottom toolbar controls model selection, web search, Skills, Plan Mode, and image upload.",
+          "When the current mode requires a working folder, the composer reminds you before sending.",
+          "The wand button rewrites your prompt into a clearer and more actionable task description."
+        ]
+      },
+      "mentions": {
+        "title": "Composer: @ File Mentions",
+        "bullets": [
+          "Type @ in the composer to search files inside the current working folder instead of typing full paths.",
+          "Use arrow keys to move, Tab or Enter to insert, and Esc to dismiss the picker.",
+          "Inserted files become structured file references, not plain text, so the assistant can use them reliably.",
+          "The selected-file bar lets you preview, locate references, remove one file, or clear them all."
+        ]
+      },
+      "commands": {
+        "title": "Composer: / Commands and the + Menu",
+        "bullets": [
+          "Type / at the start of input to open command suggestions backed by local command templates.",
+          "The + menu gives visual access to Commands, Skills, Channels, and MCP Servers.",
+          "Selecting a Skill adds its capability prefix to the next message, which is great for repeatable workflows.",
+          "Ctrl+K opens the global command palette for UI actions; it is different from chat slash commands."
+        ]
+      },
+      "rightPanel": {
+        "title": "Right: Execution and Resource Panels",
+        "bullets": [
+          "Steps is the fastest way to see what the assistant is doing right now and how far it has progressed.",
+          "Plan is for planning before implementation, especially for larger or multi-file work.",
+          "Files shows the local or SSH file tree, while Artifacts summarizes files created, edited, or deleted in this run.",
+          "Team shows multi-agent collaboration, and Context summarizes folder, model, tokens, context window, and background commands.",
+          "The right panel can be collapsed, switched by tabs, and resized by dragging.",
+          "Some files open an additional preview panel for HTML, Markdown, images, spreadsheets, PDF, and more."
+        ]
+      },
+      "quickStart": {
+        "title": "Recommended First Steps",
+        "bullets": [
+          "Create a project and bind a working folder before starting serious work.",
+          "Use Clarify for requirement discovery, Cowork for general assistance, and Code for implementation tasks.",
+          "For code work, mention files with @ first, then describe the goal and constraints.",
+          "During execution, keep an eye on Steps, Files, Artifacts, and Context on the right side.",
+          "When the session grows long, use Context compression to keep the model focused."
+        ]
+      }
+    }
+  },
+  "askUser": {
+    "title": "Your input is needed",
+    "subtitle": "Answer these questions and I will continue.",
+    "waiting": "Waiting for answers",
+    "previous": "Previous",
+    "next": "Next",
+    "submit": "Submit",
+    "other": "Other",
+    "answerPlaceholder": "Type your answer…",
+    "answeredTitle": "Questions answered",
+    "answeredSubtitle": "Your selections and notes have been recorded"
   },
   "permission": {
     "title": "Permission Required",
@@ -110,13 +263,60 @@
     "imagePlugin": {
       "title": "Image Plugin",
       "running": "Running image generation",
+      "waitingRetry": "Waiting for manual retry",
       "completed": "Image generation completed",
       "failed": "Image generation failed",
       "prompt": "Prompt",
       "generating": "Generating images...",
+      "retryRequired": "Rate limit hit, waiting for retry",
+      "retryHint": "Generated {{completed}} / {{total}} images so far. The main session stays paused until you click retry.",
+      "retryCaveat": "Note: if the API failed directly instead of being rate-limited, retrying may have no effect.",
+      "retryConfirmTitle": "Retry now?",
+      "retryConfirmDesc": "Generated {{completed}} / {{total}} images so far. Retrying usually only helps when the request was rate-limited; if the API failed directly, retrying may have no effect.",
+      "retryConfirmAction": "Confirm Retry",
       "result": "Results ({{count}})",
       "notes": "Notes",
       "countValue": "Count {{count}}"
+    },
+    "desktop": {
+      "running": "Desktop action in progress",
+      "completed": "Desktop action completed",
+      "failed": "Desktop action failed",
+      "executing": "Executing desktop action...",
+      "input": "Input",
+      "output": "Output",
+      "notes": "Notes",
+      "DesktopScreenshot": {
+        "title": "Desktop Screenshot"
+      },
+      "DesktopClick": {
+        "title": "Desktop Click"
+      },
+      "DesktopType": {
+        "title": "Desktop Type"
+      },
+      "DesktopScroll": {
+        "title": "Desktop Scroll"
+      },
+      "DesktopWait": {
+        "title": "Desktop Wait"
+      },
+      "screenshot": {
+        "summary": "{{width}} × {{height}}",
+        "preview": "Screenshot preview"
+      },
+      "click": {
+        "summary": "{{action}} @ ({{x}}, {{y}})"
+      },
+      "scroll": {
+        "summary": "Scroll ({{scrollX}}, {{scrollY}})"
+      },
+      "wait": {
+        "summary": "Wait {{delayMs}}ms"
+      },
+      "type": {
+        "summary": "Mode: {{mode}}"
+      }
     }
   },
   "subAgent": {
@@ -133,7 +333,10 @@
     "copyOutput": "Copy output",
     "viewDetails": "View details",
     "tok": "tok",
-    "toolCalls": "Tool Calls"
+    "toolCalls": "Tool Calls",
+    "summaryEmpty": "No summary yet",
+    "openInRunsRunning": "View live progress in the right-side execution list",
+    "openInRunsDone": "View the full record in the right-side execution list"
   },
   "teamEvent": {
     "teamCreated": "Team Created",
@@ -147,6 +350,7 @@
   "todo": {
     "tasksDone": "{{completed}} / {{total}} tasks done",
     "moreTasks": "{{count}} more tasks...",
+    "showEarlierTasks": "Show {{count}} earlier tasks",
     "showLess": "Show less"
   },
   "thinking": {
@@ -158,17 +362,45 @@
   "messageList": {
     "startConversation": "Start a conversation",
     "startConversationDesc": "Ask anything — no tools, just chat.",
+    "startClarify": "Start clarifying",
+    "startClarifyDesc": "Interrogate the goal, constraints, risks, and gaps before planning. It defaults to clarification-first behavior, but permissions match Code mode.",
     "startCowork": "Start a Cowork session",
     "startCoworkDesc": "Select a working folder, then ask the assistant to help with your project.",
     "startCoding": "Start coding",
     "startCodingDesc": "Describe what you want to build and the assistant will write the code.",
+    "homeModelUnavailable": "No model selected",
+    "homeCurrentModel": "Current model: {{model}}",
+    "homeTitleChat": "Start a conversation",
+    "homeTitleClarify": "Clarify the task first",
+    "homeTitleCowork": "Work inside the project",
+    "homeTitleCode": "Start coding",
+    "homeTitleAcp": "Start ACP collaboration",
+    "homeDescAcp": "Start ACP mode for architecture confirmation, constraint clarification, and execution breakdown.",
+    "homeDescAutoChat": "After you send, it picks a better model automatically based on task complexity.",
+    "homeDescAutoClarify": "After you send, it picks a model better suited for questioning and narrowing the plan.",
+    "homeDescAutoCowork": "After you send, it picks a model better suited for project work, file edits, and tools.",
+    "homeDescAutoCode": "After you send, it picks a model better suited for coding, refactoring, and analysis.",
+    "homeDescChatGeneral": "Good for everyday chat, writing, and lightweight questions.",
+    "homeDescChatVision": "Good for chat and can also respond quickly with image context.",
+    "homeDescClarifyGeneral": "Good for follow-up questions, goal shaping, and filling in constraints.",
+    "homeDescClarifyThinking": "Better for deep questioning, breaking down problems, and converging on a plan.",
+    "homeDescCoworkGeneral": "Good for entering project context and helping move tasks forward.",
+    "homeDescCoworkTools": "Better for tool-assisted project work: reading files, editing code, and running workflows.",
+    "homeDescCodeGeneral": "Good for generating code, writing scripts, and routine development work.",
+    "homeDescCodeVision": "Useful for coding and for analyzing issues with screenshots or images.",
+    "homeDescCodeThinking": "Better for complex implementation, refactoring, debugging, and multi-step coding tasks.",
+    "homeAutoMeta": "Routes automatically after you send",
     "tipDropFiles": "Tip: Drop files into the input to reference their paths",
     "explainAsync": "Explain how async/await works",
     "compareRest": "Compare REST vs GraphQL",
     "writeRegex": "Write a regex for email validation",
+    "clarifyIdea": "Interrogate this product idea with relentless follow-up questions",
+    "challengeAssumptions": "Challenge the hidden assumptions and vague language in this proposal",
+    "exploreRisks": "Surface edge cases, failure modes, and second-order consequences",
     "summarizeProject": "Summarize this project structure",
     "findBugs": "Find and fix potential bugs",
     "addErrorHandling": "Add error handling to the main module",
+    "useCommitCommand": "Use /commit to commit the repository",
     "reviewCodebase": "Review this codebase and suggest improvements",
     "addTests": "Add tests for the main module",
     "refactorError": "Refactor for better error handling",
@@ -234,6 +466,9 @@
     "req": "Req {{count}}",
     "ttft": "TTFT",
     "tps": "TPS",
+    "regenerateReference": "Regenerate reference",
+    "continueToolExecution": "Continue execution",
+    "continueToolExecutionHint": "The last run stopped during tool execution. Click to continue in this same message without creating a new AI message.",
     "imageError": {
       "titleTimeout": "Image generation timed out",
       "descTimeout": "The request exceeded 10 minutes. Try simplifying the prompt, reducing image complexity, or retrying.",
@@ -247,6 +482,20 @@
       "descUnknown": "An unexpected error occurred while generating the image. Please retry.",
       "details": "View technical details"
     }
+  },
+  "messageActions": {
+    "translate": "Translate",
+    "readAloud": "Read aloud",
+    "share": "Share",
+    "collapse": "Collapse message",
+    "expand": "Expand message",
+    "deleteAndRegenerate": "Delete and regenerate",
+    "sentToTranslator": "Sent to translator",
+    "copiedForShare": "Copied to clipboard for sharing",
+    "shareFailed": "Share failed",
+    "speechNotSupported": "Speech synthesis is not supported in this environment",
+    "collapsedMessage": "Message collapsed",
+    "imagesCollapsed": "{{count}} images"
   },
   "toolGroup": {
     "readFiles": "Read {{count}} files",

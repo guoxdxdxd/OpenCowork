@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
+import { safeSendToWindow } from '../window-ipc'
 import { spawn, type ChildProcess } from 'child_process'
 
 interface ProcessMetadata {
@@ -32,10 +33,7 @@ function detectPort(line: string): number | undefined {
 export function registerProcessManagerHandlers(): void {
   ipcMain.handle(
     'process:spawn',
-    async (
-      _event,
-      args: { command: string; cwd?: string; metadata?: ProcessMetadata }
-    ) => {
+    async (_event, args: { command: string; cwd?: string; metadata?: ProcessMetadata }) => {
       const id = `proc-${nextId++}`
       const isWin = process.platform === 'win32'
       const command = isWin ? `chcp 65001 >nul & ${args.command}` : args.command
@@ -43,7 +41,7 @@ export function registerProcessManagerHandlers(): void {
         cwd: args.cwd || process.cwd(),
         shell: true,
         stdio: ['pipe', 'pipe', 'pipe'],
-        ...(isWin ? {} : { detached: true }),
+        ...(isWin ? {} : { detached: true })
       })
 
       const managed: ManagedProcess = {
@@ -53,7 +51,7 @@ export function registerProcessManagerHandlers(): void {
         command: args.command,
         createdAt: Date.now(),
         metadata: args.metadata,
-        output: [],
+        output: []
       }
       processes.set(id, managed)
 
@@ -68,12 +66,12 @@ export function registerProcessManagerHandlers(): void {
         }
 
         const win = BrowserWindow.getAllWindows()[0]
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('process:output', {
+        if (win) {
+          safeSendToWindow(win, 'process:output', {
             id,
             data: chunk,
             port: managed.port,
-            metadata: managed.metadata,
+            metadata: managed.metadata
           })
         }
       }
@@ -84,15 +82,15 @@ export function registerProcessManagerHandlers(): void {
       child.on('exit', (code) => {
         managed.exitCode = code
         const win = BrowserWindow.getAllWindows()[0]
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('process:output', {
+        if (win) {
+          safeSendToWindow(win, 'process:output', {
             id,
             data: managed.stopping
               ? '\n[Process stopped by user]\n'
               : `\n[Process exited with code ${code}]\n`,
             exited: true,
             exitCode: code,
-            metadata: managed.metadata,
+            metadata: managed.metadata
           })
         }
         processes.delete(id)
@@ -100,13 +98,13 @@ export function registerProcessManagerHandlers(): void {
 
       child.on('error', (err) => {
         const win = BrowserWindow.getAllWindows()[0]
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('process:output', {
+        if (win) {
+          safeSendToWindow(win, 'process:output', {
             id,
             data: `\n[Process error: ${err.message}]\n`,
             exited: true,
             exitCode: 1,
-            metadata: managed.metadata,
+            metadata: managed.metadata
           })
         }
         processes.delete(id)
@@ -127,7 +125,7 @@ export function registerProcessManagerHandlers(): void {
         const taskKillResult = await new Promise<{ ok: boolean; err?: string }>((resolve) => {
           const killer = spawn('taskkill', ['/pid', String(pid), '/f', '/t'], {
             shell: true,
-            windowsHide: true,
+            windowsHide: true
           })
           let stderr = ''
           killer.stderr?.on('data', (data: Buffer) => {
@@ -181,7 +179,7 @@ export function registerProcessManagerHandlers(): void {
       port: managed.port,
       metadata: managed.metadata,
       createdAt: managed.createdAt,
-      exitCode: managed.exitCode,
+      exitCode: managed.exitCode
     }
   })
 
@@ -205,7 +203,7 @@ export function registerProcessManagerHandlers(): void {
         createdAt: m.createdAt,
         metadata: m.metadata,
         running: m.process.exitCode === null,
-        exitCode: m.exitCode,
+        exitCode: m.exitCode
       })
     })
     return list

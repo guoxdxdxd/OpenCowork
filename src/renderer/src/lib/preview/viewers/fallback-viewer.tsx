@@ -1,52 +1,47 @@
 import * as React from 'react'
+import { CodeEditor } from '@renderer/components/editor/CodeEditor'
+import { useChatStore } from '@renderer/stores/chat-store'
+import { useUIStore } from '@renderer/stores/ui-store'
+import {
+  createLocalWorkspace,
+  createSshWorkspace,
+  getParentPath
+} from '@renderer/lib/monaco/workspace'
 import type { ViewerProps } from '../viewer-registry'
 
-const MonacoEditor = React.lazy(async () => {
-  const mod = await import('@monaco-editor/react')
-  return { default: mod.default }
-})
+export function FallbackViewer({
+  filePath,
+  content,
+  onContentChange,
+  sshConnectionId
+}: ViewerProps): React.JSX.Element {
+  const openFilePreview = useUIStore((state) => state.openFilePreview)
+  const workingFolder = useChatStore((state) => {
+    const activeSession = state.sessions.find((session) => session.id === state.activeSessionId)
+    return activeSession?.workingFolder
+  })
 
-function guessLanguage(filePath: string): string {
-  const ext = filePath.lastIndexOf('.') >= 0 ? filePath.slice(filePath.lastIndexOf('.') + 1).toLowerCase() : ''
-  const map: Record<string, string> = {
-    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
-    json: 'json', md: 'markdown', css: 'css', scss: 'scss', less: 'less',
-    html: 'html', htm: 'html', xml: 'xml', svg: 'xml',
-    py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
-    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
-    sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell',
-    yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
-    sql: 'sql', graphql: 'graphql', dockerfile: 'dockerfile',
-    vue: 'html', svelte: 'html',
-  }
-  return map[ext] || 'plaintext'
-}
+  const workspace = React.useMemo(() => {
+    if (sshConnectionId) {
+      return createSshWorkspace(sshConnectionId, workingFolder ?? getParentPath(filePath))
+    }
+    return createLocalWorkspace(workingFolder ?? getParentPath(filePath))
+  }, [filePath, sshConnectionId, workingFolder])
 
-export function FallbackViewer({ filePath, content, onContentChange }: ViewerProps): React.JSX.Element {
+  const handleOpenFile = React.useCallback(
+    (targetPath: string) => {
+      openFilePreview(targetPath, 'code', sshConnectionId)
+    },
+    [openFilePreview, sshConnectionId]
+  )
+
   return (
-    <React.Suspense
-      fallback={
-        <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-          Loading editor...
-        </div>
-      }
-    >
-      <MonacoEditor
-        height="100%"
-        language={guessLanguage(filePath)}
-        theme="vs-dark"
-        value={content}
-        onChange={(value) => onContentChange?.(value ?? '')}
-        options={{
-          minimap: { enabled: false },
-          fontSize: 13,
-          lineNumbers: 'on',
-          wordWrap: 'on',
-          scrollBeyondLastLine: false,
-          automaticLayout: true,
-          tabSize: 2,
-        }}
-      />
-    </React.Suspense>
+    <CodeEditor
+      filePath={filePath}
+      content={content}
+      onChange={onContentChange}
+      onOpenFile={handleOpenFile}
+      workspace={workspace}
+    />
   )
 }

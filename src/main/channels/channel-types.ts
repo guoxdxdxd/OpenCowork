@@ -52,9 +52,10 @@ export interface ChannelInstance {
   name: string
   enabled: boolean
   builtin?: boolean
-  userSystemPrompt: string
   config: Record<string, string>
   createdAt: number
+  /** Bound project ID (null = unbound) */
+  projectId?: string | null
   /** Per-tool enablement flags (missing = default enabled) */
   tools?: Record<string, boolean>
   /** Provider ID for this plugin's auto-reply agent (null = use global active provider) */
@@ -142,7 +143,11 @@ export interface MessagingChannelService {
 
   // Streaming output (optional — override in services that support it)
   supportsStreaming?: boolean
-  sendStreamingMessage?(chatId: string, initialContent: string, replyToMessageId?: string): Promise<ChannelStreamingHandle>
+  sendStreamingMessage?(
+    chatId: string,
+    initialContent: string,
+    replyToMessageId?: string
+  ): Promise<ChannelStreamingHandle>
 }
 
 /** Factory function type — registered per provider */

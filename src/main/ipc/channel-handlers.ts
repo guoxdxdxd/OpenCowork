@@ -5,14 +5,135 @@ import * as os from 'os'
 import { FeishuApi } from '../channels/providers/feishu/feishu-api'
 import { nanoid } from 'nanoid'
 import { ChannelManager } from '../channels/channel-manager'
+import { safeSendToAllWindows } from '../window-ipc'
 import { CHANNEL_PROVIDERS } from '../channels/channel-descriptors'
 import { getDb } from '../db/database'
 import * as projectsDao from '../db/projects-dao'
 import { handleChannelAutoReply } from '../channels/auto-reply'
-import type { ChannelInstance, ChannelEvent, ChannelProviderDescriptor } from '../channels/channel-types'
+import type {
+  ChannelInstance,
+  ChannelEvent,
+  ChannelProviderDescriptor
+} from '../channels/channel-types'
+import {
+  startWeixinLoginWithQr,
+  waitForWeixinLogin,
+  DEFAULT_WEIXIN_BASE_URL
+} from '../channels/providers/weixin/weixin-login'
 
 const DATA_DIR = path.join(os.homedir(), '.open-cowork')
 const PLUGINS_FILE = path.join(DATA_DIR, 'plugins.json')
+let activeChannelManager: ChannelManager | null = null
+
+async function captureQrPageAsDataUrl(url: string): Promise<string | undefined> {
+  const win = new BrowserWindow({
+    show: false,
+    width: 720,
+    height: 960,
+    autoHideMenuBar: true,
+    webPreferences: {
+      sandbox: false,
+      offscreen: false
+    }
+  })
+
+  try {
+    await win.loadURL(url)
+    await new Promise((resolve) => setTimeout(resolve, 1800))
+    const image = await win.webContents.capturePage()
+    const png = image.toPNG()
+    return `data:image/png;base64,${png.toString('base64')}`
+  } catch {
+    return undefined
+  } finally {
+    if (!win.isDestroyed()) {
+      win.destroy()
+    }
+  }
+}
+
+async function normalizeQrDisplayUrl(url?: string): Promise<string | undefined> {
+  const value = url?.trim()
+  if (!value) return undefined
+  if (value.startsWith('data:image/')) return value
+  if (!/^https?:\/\//i.test(value)) return value
+
+  try {
+    const response = await fetch(value)
+    if (!response.ok) {
+      return (await captureQrPageAsDataUrl(value)) || value
+    }
+
+    const contentType = response.headers.get('content-type') || ''
+
+    if (contentType.startsWith('image/')) {
+      const buffer = Buffer.from(await response.arrayBuffer())
+      return `data:${contentType};base64,${buffer.toString('base64')}`
+    }
+
+    const html = await response.text()
+    const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i)
+    if (imgMatch?.[1]) {
+      const imgSrc = new URL(imgMatch[1], value).toString()
+      const imageResponse = await fetch(imgSrc)
+      if (imageResponse.ok) {
+        const imageType = imageResponse.headers.get('content-type') || 'image/png'
+        const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
+        return `data:${imageType};base64,${imageBuffer.toString('base64')}`
+      }
+    }
+
+    return (await captureQrPageAsDataUrl(value)) || value
+  } catch {
+    return (await captureQrPageAsDataUrl(value)) || value
+  }
+}
+
+function resolveSourceFileName(source: string, fallback: string): string {
+  const value = source.trim()
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value)
+      const fileName = path.basename(url.pathname)
+      return decodeURIComponent(fileName || fallback)
+    } catch {
+      return fallback
+    }
+  }
+
+  const sanitized = value.split('?')[0]
+  return path.basename(sanitized) || fallback
+}
+
+async function readBinarySource(
+  source: string,
+  fallbackName: string
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const value = source.trim()
+  if (!value) {
+    throw new Error('File path is empty')
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    const response = await fetch(value)
+    if (!response.ok) {
+      throw new Error(`Download URL failed: HTTP ${response.status}`)
+    }
+    return {
+      buffer: Buffer.from(await response.arrayBuffer()),
+      fileName: resolveSourceFileName(value, fallbackName)
+    }
+  }
+
+  if (!fs.existsSync(value)) {
+    throw new Error(`File not found: ${value}`)
+  }
+
+  return {
+    buffer: fs.readFileSync(value),
+    fileName: resolveSourceFileName(value, fallbackName)
+  }
+}
 
 // ── Persistence helpers ──
 
@@ -55,10 +176,7 @@ function writePlugins(plugins: ChannelInstance[]): void {
 // ── Notify renderer of channel events ──
 
 function notifyRenderer(event: ChannelEvent): void {
-  const windows = BrowserWindow.getAllWindows()
-  for (const win of windows) {
-    win.webContents.send('plugin:incoming-message', event)
-  }
+  safeSendToAllWindows('plugin:incoming-message', event)
 
   // Route incoming messages through auto-reply pipeline
   if (event.type === 'incoming_message') {
@@ -89,7 +207,40 @@ export async function autoStartChannels(channelManager: ChannelManager): Promise
 
 let _handlersRegistered = false
 
+export async function executePluginAction(args: {
+  pluginId: string
+  action: string
+  params: Record<string, unknown>
+}): Promise<unknown> {
+  const { pluginId, action, params } = args
+  const service = activeChannelManager?.getService(pluginId)
+  if (!service) {
+    throw new Error(`Plugin ${pluginId} is not running`)
+  }
+
+  switch (action) {
+    case 'sendMessage': {
+      const target = service as typeof service & {
+        sendWakeupMessage?: (chatId: string, content: string) => Promise<{ messageId: string }>
+      }
+      if (params.isWakeup === true && typeof target.sendWakeupMessage === 'function') {
+        return await target.sendWakeupMessage(params.chatId as string, params.content as string)
+      }
+      return await service.sendMessage(params.chatId as string, params.content as string)
+    }
+    case 'replyMessage':
+      return await service.replyMessage(params.messageId as string, params.content as string)
+    case 'getGroupMessages':
+      return await service.getGroupMessages(params.chatId as string, (params.count as number) ?? 20)
+    case 'listGroups':
+      return await service.listGroups()
+    default:
+      throw new Error(`Unknown action: ${action}`)
+  }
+}
+
 export function registerChannelHandlers(channelManager: ChannelManager): void {
+  activeChannelManager = channelManager
   if (_handlersRegistered) return
   _handlersRegistered = true
 
@@ -98,35 +249,124 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     return CHANNEL_PROVIDERS
   })
 
+  ipcMain.handle(
+    'plugin:weixin:login-start',
+    async (
+      _event,
+      args: {
+        pluginId: string
+        baseUrl?: string
+        routeTag?: string
+        accountId?: string
+        force?: boolean
+      }
+    ) => {
+      try {
+        const result = await startWeixinLoginWithQr({
+          accountId: args.accountId,
+          apiBaseUrl: args.baseUrl || DEFAULT_WEIXIN_BASE_URL,
+          routeTag: args.routeTag,
+          force: args.force
+        })
+        return {
+          qrDataUrl: await normalizeQrDisplayUrl(result.qrcodeUrl),
+          qrUrl: result.qrcodeUrl,
+          message: result.message,
+          sessionKey: result.sessionKey
+        }
+      } catch (err) {
+        return {
+          message: err instanceof Error ? err.message : String(err),
+          sessionKey: args.accountId || ''
+        }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'plugin:weixin:login-wait',
+    async (
+      _event,
+      args: {
+        pluginId: string
+        baseUrl?: string
+        routeTag?: string
+        sessionKey: string
+        timeoutMs?: number
+      }
+    ) => {
+      try {
+        return await waitForWeixinLogin({
+          sessionKey: args.sessionKey,
+          apiBaseUrl: args.baseUrl || DEFAULT_WEIXIN_BASE_URL,
+          routeTag: args.routeTag,
+          timeoutMs: args.timeoutMs
+        })
+      } catch (err) {
+        return {
+          connected: false,
+          message: err instanceof Error ? err.message : String(err)
+        }
+      }
+    }
+  )
+
   // List persisted plugin instances (auto-provisions built-in plugins)
   ipcMain.handle('plugin:list', () => {
     const plugins = readPlugins()
+    const projects = projectsDao.listProjects().filter((project) => !project.plugin_id)
     let changed = false
 
-    // Auto-provision built-in plugins that don't exist yet
-    for (const descriptor of CHANNEL_PROVIDERS) {
-      const existing = plugins.find((p) => p.type === descriptor.type)
-      if (!existing) {
-        const config: Record<string, string> = {}
-        for (const field of descriptor.configSchema) {
-          config[field.key] = ''
+    // Migrate legacy unbound built-ins to the first normal project when there is only one.
+    if (projects.length === 1) {
+      for (const descriptor of CHANNEL_PROVIDERS) {
+        const legacyUnbound = plugins.find((p) => p.type === descriptor.type && !p.projectId)
+        const hasBoundInstance = plugins.some(
+          (p) => p.type === descriptor.type && p.projectId === projects[0].id
+        )
+        if (legacyUnbound && !hasBoundInstance) {
+          legacyUnbound.projectId = projects[0].id
+          changed = true
         }
-        plugins.push({
-          id: nanoid(),
-          type: descriptor.type,
-          name: descriptor.displayName,
-          enabled: false,
-          builtin: true,
-          userSystemPrompt: '',
-          config,
-          createdAt: Date.now(),
-          tools: buildToolsMap(descriptor),
-        })
-        changed = true
-      } else if (!existing.builtin) {
-        // Mark existing plugin as builtin if it matches a built-in type
-        existing.builtin = true
-        changed = true
+      }
+    }
+
+    // Auto-provision one built-in channel instance per normal project and provider type.
+    for (const project of projects) {
+      for (const descriptor of CHANNEL_PROVIDERS) {
+        const existing = plugins.find(
+          (p) => p.type === descriptor.type && p.projectId === project.id
+        )
+        if (!existing) {
+          const config: Record<string, string> = {}
+          for (const field of descriptor.configSchema) {
+            config[field.key] =
+              descriptor.type === 'weixin-official' && field.key === 'baseUrl'
+                ? DEFAULT_WEIXIN_BASE_URL
+                : ''
+          }
+          plugins.push({
+            id: nanoid(),
+            type: descriptor.type,
+            name: descriptor.displayName,
+            enabled: false,
+            builtin: true,
+            config,
+            createdAt: Date.now(),
+            projectId: project.id,
+            tools: buildToolsMap(descriptor)
+          })
+          changed = true
+        } else {
+          if (!existing.builtin) {
+            existing.builtin = true
+            changed = true
+          }
+          if (existing.name !== descriptor.displayName) {
+            existing.name = descriptor.displayName
+            changed = true
+          }
+        }
       }
     }
 
@@ -137,14 +377,44 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
       const schemaKeys = new Set(desc.configSchema.map((f) => f.key))
       for (const field of desc.configSchema) {
         if (!(field.key in p.config)) {
-          p.config[field.key] = ''
+          p.config[field.key] =
+            desc.type === 'weixin-official' && field.key === 'baseUrl'
+              ? DEFAULT_WEIXIN_BASE_URL
+              : ''
           changed = true
         }
+      }
+      if (desc.type === 'weixin-official' && !p.config.baseUrl) {
+        p.config.baseUrl = DEFAULT_WEIXIN_BASE_URL
+        changed = true
       }
       // Remove config keys that are no longer in the schema
       for (const key of Object.keys(p.config)) {
         if (!schemaKeys.has(key)) {
           delete p.config[key]
+          changed = true
+        }
+      }
+      // Remove legacy top-level fields that are no longer supported
+      for (const key of Object.keys(p)) {
+        if (
+          ![
+            'id',
+            'type',
+            'name',
+            'enabled',
+            'builtin',
+            'config',
+            'createdAt',
+            'projectId',
+            'tools',
+            'providerId',
+            'model',
+            'features',
+            'permissions'
+          ].includes(key)
+        ) {
+          delete (p as unknown as Record<string, unknown>)[key]
           changed = true
         }
       }
@@ -157,7 +427,9 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     }
 
     if (changed) writePlugins(plugins)
-    console.log(`[Channels] Loaded ${plugins.length} channels (${plugins.filter((p) => p.builtin).length} built-in)`)
+    console.log(
+      `[Channels] Loaded ${plugins.length} channels (${plugins.filter((p) => p.builtin).length} built-in)`
+    )
     return plugins
   })
 
@@ -168,7 +440,7 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     const nextTools = buildToolsMap(desc, instance.tools)
     plugins.push({
       ...instance,
-      ...(nextTools ? { tools: nextTools } : {}),
+      ...(nextTools ? { tools: nextTools } : {})
     })
     writePlugins(plugins)
     return { success: true }
@@ -193,10 +465,30 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
           const db = getDb()
           const providerId = next.providerId ?? null
           const modelId = providerId ? (next.model ?? null) : null
-          db.prepare('UPDATE sessions SET provider_id = ?, model_id = ? WHERE plugin_id = ?')
-            .run(providerId, modelId, id)
+          db.prepare('UPDATE sessions SET provider_id = ?, model_id = ? WHERE plugin_id = ?').run(
+            providerId,
+            modelId,
+            id
+          )
         } catch (err) {
           console.error('[Channels] Failed to sync channel session model:', err)
+        }
+      }
+
+      if ('projectId' in patch) {
+        try {
+          const db = getDb()
+          const boundProject = next.projectId ? projectsDao.getProject(next.projectId) : undefined
+          db.prepare(
+            'UPDATE sessions SET project_id = ?, working_folder = ?, ssh_connection_id = ? WHERE plugin_id = ?'
+          ).run(
+            boundProject?.id ?? null,
+            boundProject?.working_folder ?? null,
+            boundProject?.ssh_connection_id ?? null,
+            id
+          )
+        } catch (err) {
+          console.error('[Channels] Failed to sync channel project binding:', err)
         }
       }
       return { success: true }
@@ -218,9 +510,9 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     // Cascade-delete plugin sessions and their messages
     try {
       const db = getDb()
-      const sessionIds = db
-        .prepare('SELECT id FROM sessions WHERE plugin_id = ?')
-        .all(id) as { id: string }[]
+      const sessionIds = db.prepare('SELECT id FROM sessions WHERE plugin_id = ?').all(id) as {
+        id: string
+      }[]
       if (sessionIds.length > 0) {
         const ids = sessionIds.map((s) => s.id)
         for (const sid of ids) {
@@ -266,35 +558,13 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     'plugin:exec',
     async (
       _event,
-      { pluginId, action, params }: { pluginId: string; action: string; params: Record<string, unknown> }
+      {
+        pluginId,
+        action,
+        params
+      }: { pluginId: string; action: string; params: Record<string, unknown> }
     ) => {
-      const service = channelManager.getService(pluginId)
-      if (!service) {
-        throw new Error(`Plugin ${pluginId} is not running`)
-      }
-
-      // Dispatch to the unified MessagingPluginService method with named params
-      switch (action) {
-        case 'sendMessage':
-          return await service.sendMessage(
-            params.chatId as string,
-            params.content as string
-          )
-        case 'replyMessage':
-          return await service.replyMessage(
-            params.messageId as string,
-            params.content as string
-          )
-        case 'getGroupMessages':
-          return await service.getGroupMessages(
-            params.chatId as string,
-            (params.count as number) ?? 20
-          )
-        case 'listGroups':
-          return await service.listGroups()
-        default:
-          throw new Error(`Unknown action: ${action}`)
-      }
+      return await executePluginAction({ pluginId, action, params })
     }
   )
 
@@ -322,7 +592,8 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
       }
     ) => {
       const db = getDb()
-      const project = projectsDao.ensurePluginProject(args.pluginId, `Plugin ${args.pluginId}`)
+      const plugin = readPlugins().find((item) => item.id === args.pluginId)
+      const project = plugin?.projectId ? projectsDao.getProject(plugin.projectId) : undefined
       db.prepare(
         `INSERT INTO sessions (id, title, icon, mode, created_at, updated_at, project_id, working_folder, ssh_connection_id, pinned, plugin_id, external_chat_id)
          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
@@ -332,9 +603,9 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
         args.mode,
         args.createdAt,
         args.updatedAt,
-        project.id,
-        project.working_folder,
-        project.ssh_connection_id,
+        project?.id ?? null,
+        project?.working_folder ?? null,
+        project?.ssh_connection_id ?? null,
         args.pluginId,
         args.externalChatId ?? null
       )
@@ -345,15 +616,19 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   // Find a plugin session by external chat ID
   ipcMain.handle('plugin:sessions:find-by-chat', (_event, externalChatId: string) => {
     const db = getDb()
-    return db
-      .prepare('SELECT * FROM sessions WHERE external_chat_id = ? LIMIT 1')
-      .get(externalChatId) ?? null
+    return (
+      db.prepare('SELECT * FROM sessions WHERE external_chat_id = ? LIMIT 1').get(externalChatId) ??
+      null
+    )
   })
 
   // ── Streaming output IPC ──
 
   // Active streaming handles keyed by `${pluginId}:${chatId}`
-  const streamHandles = new Map<string, import('../channels/channel-types').ChannelStreamingHandle>()
+  const streamHandles = new Map<
+    string,
+    import('../channels/channel-types').ChannelStreamingHandle
+  >()
 
   /**
    * Start a streaming message for a plugin chat.
@@ -372,7 +647,11 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
       }
 
       try {
-        const handle = await service.sendStreamingMessage(args.chatId, args.initialContent, args.messageId)
+        const handle = await service.sendStreamingMessage(
+          args.chatId,
+          args.initialContent,
+          args.messageId
+        )
         const key = `${args.pluginId}:${args.chatId}`
         streamHandles.set(key, handle)
         console.log(`[PluginStream] Started streaming for ${key}`)
@@ -389,26 +668,33 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   /** List all plugin sessions (sessions with plugin_id set) */
   ipcMain.handle('plugin:sessions:list-all', async () => {
     const db = getDb()
-    const rows = db.prepare(
-      `SELECT s.id, s.title, s.plugin_id, s.external_chat_id, s.created_at, s.updated_at,
+    const rows = db
+      .prepare(
+        `SELECT s.id, s.title, s.plugin_id, s.external_chat_id, s.created_at, s.updated_at,
               (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as message_count
        FROM sessions s WHERE s.plugin_id IS NOT NULL AND s.plugin_id != ''
        ORDER BY s.updated_at DESC`
-    ).all()
+      )
+      .all()
     return rows
   })
 
   /** Get messages for a plugin session */
-  ipcMain.handle('plugin:sessions:messages', async (_event, args: { sessionId: string; limit?: number; offset?: number }) => {
-    const db = getDb()
-    const limit = args.limit ?? 50
-    const offset = args.offset ?? 0
-    const rows = db.prepare(
-      `SELECT id, role, content, created_at FROM messages
+  ipcMain.handle(
+    'plugin:sessions:messages',
+    async (_event, args: { sessionId: string; limit?: number; offset?: number }) => {
+      const db = getDb()
+      const limit = args.limit ?? 50
+      const offset = args.offset ?? 0
+      const rows = db
+        .prepare(
+          `SELECT id, role, content, created_at FROM messages
        WHERE session_id = ? ORDER BY sort_order ASC LIMIT ? OFFSET ?`
-    ).all(args.sessionId, limit, offset)
-    return rows
-  })
+        )
+        .all(args.sessionId, limit, offset)
+      return rows
+    }
+  )
 
   /** Clear all messages in a plugin session */
   ipcMain.handle('plugin:sessions:clear', async (_event, args: { sessionId: string }) => {
@@ -423,19 +709,67 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
     db.prepare('DELETE FROM messages WHERE session_id = ?').run(args.sessionId)
     db.prepare('DELETE FROM sessions WHERE id = ?').run(args.sessionId)
     // Notify renderer to remove from store
-    const windows = BrowserWindow.getAllWindows()
-    for (const win of windows) {
-      win.webContents.send('plugin:session-deleted', { sessionId: args.sessionId })
-    }
+    safeSendToAllWindows('plugin:session-deleted', { sessionId: args.sessionId })
     return { ok: true }
   })
 
   /** Rename a plugin session */
-  ipcMain.handle('plugin:sessions:rename', async (_event, args: { sessionId: string; title: string }) => {
-    const db = getDb()
-    db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(args.title, args.sessionId)
-    return { ok: true }
-  })
+  ipcMain.handle(
+    'plugin:sessions:rename',
+    async (_event, args: { sessionId: string; title: string }) => {
+      const db = getDb()
+      db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(args.title, args.sessionId)
+      return { ok: true }
+    }
+  )
+
+  // ── Weixin media send ──
+
+  ipcMain.handle(
+    'plugin:weixin:send-image',
+    async (
+      _event,
+      args: { pluginId: string; chatId: string; filePath: string; content?: string }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/weixin/weixin-service').WeixinService
+        | undefined
+      if (!service) return { error: 'Weixin plugin not running or not found' }
+
+      try {
+        const { buffer } = await readBinarySource(args.filePath, 'image.png')
+        const result = await service.sendImage(args.chatId, buffer, args.content)
+        return { ok: true, messageId: result.messageId }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Weixin] send-image failed:', msg)
+        return { error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'plugin:weixin:send-file',
+    async (
+      _event,
+      args: { pluginId: string; chatId: string; filePath: string; content?: string }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/weixin/weixin-service').WeixinService
+        | undefined
+      if (!service) return { error: 'Weixin plugin not running or not found' }
+
+      try {
+        const { buffer, fileName } = await readBinarySource(args.filePath, 'file')
+        const result = await service.sendFile(args.chatId, buffer, fileName, args.content)
+        return { ok: true, messageId: result.messageId }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Weixin] send-file failed:', msg)
+        return { error: msg }
+      }
+    }
+  )
 
   // ── Feishu media send ──
 
@@ -448,7 +782,9 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   ipcMain.handle(
     'plugin:feishu:send-image',
     async (_event, args: { pluginId: string; chatId: string; filePath: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -490,8 +826,13 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
    */
   ipcMain.handle(
     'plugin:feishu:send-file',
-    async (_event, args: { pluginId: string; chatId: string; filePath: string; fileType?: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: { pluginId: string; chatId: string; filePath: string; fileType?: string }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -514,20 +855,38 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
         // Auto-detect file type from extension
         const ext = path.extname(fileName).toLowerCase().replace('.', '')
         const typeMap: Record<string, 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream'> = {
-          opus: 'opus', mp4: 'mp4', pdf: 'pdf',
-          doc: 'doc', docx: 'doc',
-          xls: 'xls', xlsx: 'xls',
-          ppt: 'ppt', pptx: 'ppt',
+          opus: 'opus',
+          mp4: 'mp4',
+          pdf: 'pdf',
+          doc: 'doc',
+          docx: 'doc',
+          xls: 'xls',
+          xlsx: 'xls',
+          ppt: 'ppt',
+          pptx: 'ppt'
         }
-        const fileType = (args.fileType as 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream' | undefined)
-          ?? typeMap[ext]
-          ?? 'stream'
+        const fileType =
+          (args.fileType as
+            | 'opus'
+            | 'mp4'
+            | 'pdf'
+            | 'doc'
+            | 'xls'
+            | 'ppt'
+            | 'stream'
+            | undefined) ??
+          typeMap[ext] ??
+          'stream'
 
-        console.log(`[Feishu] Uploading file "${fileName}" (${buf.byteLength} bytes, type=${fileType})...`)
+        console.log(
+          `[Feishu] Uploading file "${fileName}" (${buf.byteLength} bytes, type=${fileType})...`
+        )
         const fileKey = await service.api.uploadFile(buf, fileName, fileType)
         console.log(`[Feishu] Uploaded file_key=${fileKey}, sending to chat...`)
         const result = await service.api.sendFileMessage(args.chatId, fileKey)
-        console.log(`[Feishu] Sent file "${fileName}" to ${args.chatId}: messageId=${result.messageId}`)
+        console.log(
+          `[Feishu] Sent file "${fileName}" to ${args.chatId}: messageId=${result.messageId}`
+        )
         return { ok: true, messageId: result.messageId }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -540,8 +899,19 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   /** Mention members in a Feishu group chat */
   ipcMain.handle(
     'plugin:feishu:send-mention',
-    async (_event, args: { pluginId: string; chatId?: string; userIds?: string[]; atAll?: boolean; text?: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: {
+        pluginId: string
+        chatId?: string
+        userIds?: string[]
+        atAll?: boolean
+        text?: string
+      }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -569,8 +939,8 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
         const postContent = {
           zh_cn: {
-            content: [elements],
-          },
+            content: [elements]
+          }
         }
 
         const result = await service.api.sendMessage(chatId, JSON.stringify(postContent), 'post')
@@ -586,8 +956,19 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   /** List members in a Feishu chat */
   ipcMain.handle(
     'plugin:feishu:list-members',
-    async (_event, args: { pluginId: string; chatId?: string; pageToken?: string; pageSize?: number; memberIdType?: 'open_id' | 'user_id' | 'union_id' }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: {
+        pluginId: string
+        chatId?: string
+        pageToken?: string
+        pageSize?: number
+        memberIdType?: 'open_id' | 'user_id' | 'union_id'
+      }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -597,7 +978,7 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
           chatId,
           pageToken: args.pageToken,
           pageSize: args.pageSize,
-          memberIdType: args.memberIdType,
+          memberIdType: args.memberIdType
         })
         return result
       } catch (err) {
@@ -611,8 +992,18 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   /** Send urgent push (app/sms) */
   ipcMain.handle(
     'plugin:feishu:send-urgent',
-    async (_event, args: { pluginId: string; messageId: string; userIds: string[]; urgentTypes: Array<'app' | 'sms'> }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: {
+        pluginId: string
+        messageId: string
+        userIds: string[]
+        urgentTypes: Array<'app' | 'sms'>
+      }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -637,8 +1028,19 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   /** Download Feishu message resource (audio/file) as base64 */
   ipcMain.handle(
     'plugin:feishu:download-resource',
-    async (_event, args: { pluginId: string; messageId: string; fileKey: string; type?: 'image' | 'file'; mediaType?: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: {
+        pluginId: string
+        messageId: string
+        fileKey: string
+        type?: 'image' | 'file'
+        mediaType?: string
+      }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
 
       try {
@@ -647,7 +1049,11 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
           args.fileKey,
           args.type ?? 'file'
         )
-        return { ok: true, base64: buf.toString('base64'), mediaType: args.mediaType ?? 'application/octet-stream' }
+        return {
+          ok: true,
+          base64: buf.toString('base64'),
+          mediaType: args.mediaType ?? 'application/octet-stream'
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[Feishu] download-resource failed:', msg)
@@ -658,25 +1064,26 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
   // ── Feishu Bitable ──
 
-  ipcMain.handle(
-    'plugin:feishu:bitable:list-apps',
-    async (_event, args: { pluginId: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
-      if (!service?.api) return { error: 'Feishu plugin not running or not found' }
-      try {
-        const data = await service.api.listBitableApps()
-        return { ok: true, data }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return { error: msg }
-      }
+  ipcMain.handle('plugin:feishu:bitable:list-apps', async (_event, args: { pluginId: string }) => {
+    const service = channelManager.getService(args.pluginId) as
+      | import('../channels/providers/feishu/feishu-service').FeishuService
+      | undefined
+    if (!service?.api) return { error: 'Feishu plugin not running or not found' }
+    try {
+      const data = await service.api.listBitableApps()
+      return { ok: true, data }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { error: msg }
     }
-  )
+  })
 
   ipcMain.handle(
     'plugin:feishu:bitable:list-tables',
     async (_event, args: { pluginId: string; appToken: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
         const data = await service.api.listBitableTables(args.appToken)
@@ -691,7 +1098,9 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
   ipcMain.handle(
     'plugin:feishu:bitable:list-fields',
     async (_event, args: { pluginId: string; appToken: string; tableId: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
         const data = await service.api.listBitableFields(args.appToken, args.tableId)
@@ -705,14 +1114,26 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
   ipcMain.handle(
     'plugin:feishu:bitable:get-records',
-    async (_event, args: { pluginId: string; appToken: string; tableId: string; filter?: string; pageSize?: number; pageToken?: string }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: {
+        pluginId: string
+        appToken: string
+        tableId: string
+        filter?: string
+        pageSize?: number
+        pageToken?: string
+      }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
         const data = await service.api.getBitableRecords(args.appToken, args.tableId, {
           filter: args.filter,
           pageSize: args.pageSize,
-          pageToken: args.pageToken,
+          pageToken: args.pageToken
         })
         return { ok: true, data }
       } catch (err) {
@@ -724,11 +1145,20 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
   ipcMain.handle(
     'plugin:feishu:bitable:create-records',
-    async (_event, args: { pluginId: string; appToken: string; tableId: string; records: unknown[] }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: { pluginId: string; appToken: string; tableId: string; records: unknown[] }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
-        const data = await service.api.createBitableRecords(args.appToken, args.tableId, args.records)
+        const data = await service.api.createBitableRecords(
+          args.appToken,
+          args.tableId,
+          args.records
+        )
         return { ok: true, data }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -739,11 +1169,20 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
   ipcMain.handle(
     'plugin:feishu:bitable:update-records',
-    async (_event, args: { pluginId: string; appToken: string; tableId: string; records: unknown[] }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: { pluginId: string; appToken: string; tableId: string; records: unknown[] }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
-        const data = await service.api.updateBitableRecords(args.appToken, args.tableId, args.records)
+        const data = await service.api.updateBitableRecords(
+          args.appToken,
+          args.tableId,
+          args.records
+        )
         return { ok: true, data }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -754,11 +1193,20 @@ export function registerChannelHandlers(channelManager: ChannelManager): void {
 
   ipcMain.handle(
     'plugin:feishu:bitable:delete-records',
-    async (_event, args: { pluginId: string; appToken: string; tableId: string; recordIds: string[] }) => {
-      const service = channelManager.getService(args.pluginId) as import('../channels/providers/feishu/feishu-service').FeishuService | undefined
+    async (
+      _event,
+      args: { pluginId: string; appToken: string; tableId: string; recordIds: string[] }
+    ) => {
+      const service = channelManager.getService(args.pluginId) as
+        | import('../channels/providers/feishu/feishu-service').FeishuService
+        | undefined
       if (!service?.api) return { error: 'Feishu plugin not running or not found' }
       try {
-        const data = await service.api.deleteBitableRecords(args.appToken, args.tableId, args.recordIds)
+        const data = await service.api.deleteBitableRecords(
+          args.appToken,
+          args.tableId,
+          args.recordIds
+        )
         return { ok: true, data }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)

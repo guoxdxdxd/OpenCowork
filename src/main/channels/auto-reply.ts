@@ -1,16 +1,44 @@
-import { BrowserWindow } from 'electron'
 import * as path from 'path'
 import * as os from 'os'
 import * as fs from 'fs'
 import { nanoid } from 'nanoid'
 import { getDb } from '../db/database'
 import * as projectsDao from '../db/projects-dao'
+import { safeSendToAllWindows } from '../window-ipc'
 import type { ChannelEvent, ChannelInstance, ChannelIncomingMessageData } from './channel-types'
 import type { ChannelManager } from './channel-manager'
 import { tryHandleCommand } from './plugin-commands'
 
-const PLUGINS_WORK_DIR = path.join(os.homedir(), '.open-cowork', 'plugins')
 const PLUGINS_FILE = path.join(os.homedir(), '.open-cowork', 'plugins.json')
+
+function encodeSessionKeyPart(value: string): string {
+  return encodeURIComponent(value)
+}
+
+function buildPluginMessageSessionKey(pluginId: string, chatId: string): string {
+  return `plugin:${pluginId}:chat:${encodeSessionKeyPart(chatId)}`
+}
+
+function buildLegacyPluginMessageSessionKeyPrefix(pluginId: string, chatId: string): string {
+  return `plugin:${pluginId}:chat:${encodeSessionKeyPart(chatId)}:message:`
+}
+
+function shouldReplaceSessionTitle(
+  currentTitle: string | undefined,
+  nextTitle: string | undefined
+): boolean {
+  const current = (currentTitle ?? '').trim()
+  const next = (nextTitle ?? '').trim()
+  if (!next || current === next) return false
+
+  return (
+    current.length === 0 ||
+    current === 'New Conversation' ||
+    current === 'New Chat' ||
+    /^oc_/i.test(current) ||
+    /^Plugin\s+/i.test(current)
+  )
+}
 
 let _pluginManager: ChannelManager | null = null
 
@@ -30,7 +58,8 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
   if (!data || !data.chatId || (!data.content && !data.images?.length && !data.audio)) return
 
   const pluginId = event.pluginId
-  const compositeKey = `plugin:${pluginId}:chat:${data.chatId}`
+  const compositeKey = buildPluginMessageSessionKey(pluginId, data.chatId)
+  const legacyCompositeKeyPrefix = buildLegacyPluginMessageSessionKeyPrefix(pluginId, data.chatId)
 
   try {
     const db = getDb()
@@ -41,18 +70,40 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
         const plugins = JSON.parse(fs.readFileSync(PLUGINS_FILE, 'utf-8')) as ChannelInstance[]
         pluginInstance = plugins.find((p) => p.id === pluginId)
       }
-    } catch { /* ignore read errors */ }
+    } catch {
+      /* ignore read errors */
+    }
 
-    const pluginProject = projectsDao.ensurePluginProject(
-      pluginId,
-      pluginInstance?.name || `Plugin ${pluginId}`
-    )
-    const pluginWorkDir = pluginProject.working_folder ?? path.join(PLUGINS_WORK_DIR, pluginId)
-    const pluginSshConnectionId = pluginProject.ssh_connection_id ?? null
+    const pluginProject = pluginInstance?.projectId
+      ? projectsDao.getProject(pluginInstance.projectId)
+      : undefined
+    const pluginWorkDir = pluginProject?.working_folder ?? ''
+    const pluginSshConnectionId = pluginProject?.ssh_connection_id ?? null
 
     let session = db
       .prepare('SELECT id, title, project_id FROM sessions WHERE external_chat_id = ? LIMIT 1')
       .get(compositeKey) as { id: string; title: string; project_id?: string | null } | undefined
+
+    if (!session) {
+      session = db
+        .prepare(
+          `SELECT id, title, project_id
+             FROM sessions
+            WHERE plugin_id = ? AND external_chat_id LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT 1`
+        )
+        .get(pluginId, `${legacyCompositeKeyPrefix}%`) as
+        | { id: string; title: string; project_id?: string | null }
+        | undefined
+
+      if (session) {
+        db.prepare('UPDATE sessions SET external_chat_id = ? WHERE id = ?').run(
+          compositeKey,
+          session.id
+        )
+      }
+    }
 
     const now = Date.now()
     const sessionProviderId = pluginInstance?.providerId ?? null
@@ -69,32 +120,39 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
         title,
         now,
         now,
-        pluginProject.id,
-        pluginWorkDir,
+        pluginProject?.id ?? null,
+        pluginWorkDir || null,
         pluginSshConnectionId,
         pluginId,
         compositeKey,
         sessionProviderId,
         sessionModelId
       )
-      session = { id: sessionId, title, project_id: pluginProject.id }
+      session = { id: sessionId, title, project_id: pluginProject?.id ?? null }
     } else {
-      db.prepare(
-        `UPDATE sessions
-            SET updated_at = ?,
-                project_id = ?,
-                working_folder = ?,
-                ssh_connection_id = ?
-          WHERE id = ?`
-      ).run(now, pluginProject.id, pluginWorkDir, pluginSshConnectionId, session.id)
+      if (pluginProject) {
+        db.prepare(
+          `UPDATE sessions
+              SET updated_at = ?,
+                  project_id = ?,
+                  working_folder = ?,
+                  ssh_connection_id = ?
+            WHERE id = ?`
+        ).run(now, pluginProject.id, pluginWorkDir || null, pluginSshConnectionId, session.id)
+      } else {
+        db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, session.id)
+      }
 
       if (sessionProviderId || sessionModelId) {
-        db.prepare('UPDATE sessions SET provider_id = ?, model_id = ? WHERE id = ?')
-          .run(sessionProviderId, sessionModelId, session.id)
+        db.prepare('UPDATE sessions SET provider_id = ?, model_id = ? WHERE id = ?').run(
+          sessionProviderId,
+          sessionModelId,
+          session.id
+        )
       }
 
       const betterTitle = data.chatName || data.senderName
-      if (betterTitle && session.title !== betterTitle && /^oc_/.test(session.title)) {
+      if (shouldReplaceSessionTitle(session.title, betterTitle)) {
         db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(betterTitle, session.id)
         session.title = betterTitle
       }
@@ -110,7 +168,7 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
         data,
         sessionId: session.id,
         pluginWorkDir,
-        pluginManager: _pluginManager,
+        pluginManager: _pluginManager
       })
       // true = fully handled, skip agent loop
       if (commandResult === true) return
@@ -130,34 +188,32 @@ export function handleChannelAutoReply(event: ChannelEvent): void {
     const supportsStreaming = !!(service?.supportsStreaming && service?.sendStreamingMessage)
 
     // Notify renderer to trigger Agent Loop auto-reply
-    const windows = BrowserWindow.getAllWindows()
-    for (const win of windows) {
-      win.webContents.send('plugin:session-task', {
-        sessionId: session.id,
-        pluginId,
-        pluginType: event.pluginType,
-        chatId: data.chatId,
-        senderId: data.senderId,
-        senderName: data.senderName,
-        chatName: data.chatName,
-        sessionTitle: session.title,
-        content: data.content
-          || (data.images?.length ? '[User sent an image]' : '')
-          || (data.audio ? '[User sent an audio message]' : ''),
-        messageId: data.messageId,
-        supportsStreaming,
-        images: data.images,
-        audio: data.audio,
-        chatType: data.chatType,
-        projectId: pluginProject.id,
-        workingFolder: pluginWorkDir,
-        sshConnectionId: pluginSshConnectionId,
-      })
-    }
+    safeSendToAllWindows('plugin:session-task', {
+      sessionId: session.id,
+      pluginId,
+      pluginType: event.pluginType,
+      chatId: data.chatId,
+      senderId: data.senderId,
+      senderName: data.senderName,
+      chatName: data.chatName,
+      sessionTitle: session.title,
+      content:
+        data.content ||
+        (data.images?.length ? '[User sent an image]' : '') ||
+        (data.audio ? '[User sent an audio message]' : ''),
+      messageId: data.messageId,
+      supportsStreaming,
+      images: data.images,
+      audio: data.audio,
+      chatType: data.chatType,
+      projectId: pluginProject?.id ?? undefined,
+      workingFolder: pluginWorkDir || undefined,
+      sshConnectionId: pluginSshConnectionId
+    })
 
     console.log(
       `[AutoReply] Routed message from ${data.senderName || data.senderId} ` +
-      `in chat ${data.chatId} to session ${session.id}`
+        `in chat ${data.chatId} to session ${session.id}`
     )
   } catch (err) {
     console.error('[AutoReply] Failed to route incoming message:', err)

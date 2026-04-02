@@ -1,17 +1,47 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
-import { ChevronDown, Check, Search, Eye, Wrench, Brain, Settings2, Zap } from 'lucide-react'
-import { useProviderStore, modelSupportsVision } from '@renderer/stores/provider-store'
-import { useSettingsStore } from '@renderer/stores/settings-store'
+import {
+  Check,
+  Search,
+  Eye,
+  Wrench,
+  Brain,
+  Settings2,
+  Zap,
+  MonitorSmartphone,
+  Loader2
+} from 'lucide-react'
+import {
+  isProviderAvailableForModelSelection,
+  useProviderStore,
+  modelSupportsVision
+} from '@renderer/stores/provider-store'
+import {
+  useSettingsStore,
+  getReasoningEffortKey,
+  resolveReasoningEffortForModel
+} from '@renderer/stores/settings-store'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useChannelStore } from '@renderer/stores/channel-store'
+import { useQuotaStore } from '@renderer/stores/quota-store'
+import { useUIStore } from '@renderer/stores/ui-store'
 
 import { useTranslation } from 'react-i18next'
 import { Popover, PopoverContent, PopoverTrigger } from '@renderer/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 
-import { ProviderIcon, ModelIcon } from '@renderer/components/settings/provider-icons'
+import {
+  ProviderIcon,
+  ModelIcon,
+  AutoModelIcon
+} from '@renderer/components/settings/provider-icons'
 import { cn } from '@renderer/lib/utils'
 import type { AIModelConfig, AIProvider, ReasoningEffortLevel } from '@renderer/lib/api/types'
+import {
+  clampCompressionThreshold,
+  DEFAULT_CONTEXT_COMPRESSION_THRESHOLD,
+  MAX_CONTEXT_COMPRESSION_THRESHOLD,
+  MIN_CONTEXT_COMPRESSION_THRESHOLD
+} from '@renderer/lib/agent/context-compression'
 
 function formatContextLength(length?: number): string | null {
   if (!length) return null
@@ -65,10 +95,8 @@ interface ProviderGroup {
   models: AIModelConfig[]
 }
 
-function supportsPriorityServiceTier(providerBuiltinId?: string, modelId?: string): boolean {
-  if (!providerBuiltinId || !modelId) return false
-  if (providerBuiltinId === 'openai') return true
-  return providerBuiltinId === 'routin-ai' && modelId === 'gpt-5.4'
+function supportsPriorityServiceTier(model: AIModelConfig | undefined): boolean {
+  return !!model?.serviceTier
 }
 
 function selectModel(
@@ -82,6 +110,7 @@ function selectModel(
   const pid = provider.id
   if (pid !== activeProviderId) setActiveProvider(pid)
   setActiveModel(modelId)
+  useSettingsStore.getState().updateSettings({ mainModelSelectionMode: 'manual' })
   const sessionId = useChatStore.getState().activeSessionId
   if (sessionId) {
     useChatStore.getState().updateSessionModel(sessionId, pid, modelId)
@@ -96,55 +125,118 @@ function selectModel(
   setOpen(false)
 }
 
+function selectAutoModel(setOpen: (v: boolean) => void): void {
+  useSettingsStore.getState().updateSettings({ mainModelSelectionMode: 'auto' })
+  const sessionId = useChatStore.getState().activeSessionId
+  if (sessionId) {
+    const session = useChatStore.getState().sessions.find((item) => item.id === sessionId)
+    if (!session?.pluginId) {
+      useChatStore.getState().clearSessionModelBinding(sessionId)
+    }
+  }
+  setOpen(false)
+}
+
 /** Settings popover shown next to model icon */
 function ModelSettingsPopover({
   model,
-  provider,
+  providerId,
   t,
   tChat
 }: {
   model: AIModelConfig | undefined
-  provider: AIProvider | undefined
+  providerId?: string | null
   t: (key: string) => string
   tChat: (key: string, opts?: Record<string, unknown>) => string
 }): React.JSX.Element | null {
   const supportsThinking = model?.supportsThinking ?? false
-  const supportsFastMode = supportsPriorityServiceTier(provider?.builtinId, model?.id)
+  const supportsFastMode = supportsPriorityServiceTier(model)
+  const supportsContextCompression = !!model
   const levels = model?.thinkingConfig?.reasoningEffortLevels
-  const defaultLevel = model?.thinkingConfig?.defaultReasoningEffort ?? 'medium'
   const thinkingEnabled = useSettingsStore((s) => s.thinkingEnabled)
   const fastModeEnabled = useSettingsStore((s) => s.fastModeEnabled)
   const reasoningEffort = useSettingsStore((s) => s.reasoningEffort)
+  const reasoningEffortByModel = useSettingsStore((s) => s.reasoningEffortByModel)
+  const effortKey = getReasoningEffortKey(providerId, model?.id)
+  const effectiveReasoningEffort = resolveReasoningEffortForModel({
+    reasoningEffort,
+    reasoningEffortByModel,
+    providerId,
+    modelId: model?.id,
+    thinkingConfig: model?.thinkingConfig
+  })
+
+  useEffect(() => {
+    if (!supportsThinking || reasoningEffort === effectiveReasoningEffort) return
+    useSettingsStore.getState().updateSettings({ reasoningEffort: effectiveReasoningEffort })
+  }, [supportsThinking, reasoningEffort, effectiveReasoningEffort])
 
   const toggleThinking = useCallback(() => {
     const store = useSettingsStore.getState()
     if (!store.thinkingEnabled && levels) {
-      store.updateSettings({ thinkingEnabled: true, reasoningEffort: defaultLevel })
+      store.updateSettings({ thinkingEnabled: true, reasoningEffort: effectiveReasoningEffort })
     } else {
       store.updateSettings({ thinkingEnabled: !store.thinkingEnabled })
     }
-  }, [levels, defaultLevel])
+  }, [levels, effectiveReasoningEffort])
 
-  const setEffort = useCallback((level: ReasoningEffortLevel) => {
-    useSettingsStore.getState().updateSettings({ reasoningEffort: level, thinkingEnabled: true })
-  }, [])
+  const setEffort = useCallback(
+    (level: ReasoningEffortLevel) => {
+      const store = useSettingsStore.getState()
+      store.updateSettings({
+        reasoningEffort: level,
+        reasoningEffortByModel: effortKey
+          ? { ...store.reasoningEffortByModel, [effortKey]: level }
+          : store.reasoningEffortByModel,
+        thinkingEnabled: true
+      })
+    },
+    [effortKey]
+  )
 
-  if (!supportsThinking && !supportsFastMode) return null
+  const hasAnySetting = supportsThinking || supportsFastMode || supportsContextCompression
+
+  const contextCompressionPercent = Math.round(
+    clampCompressionThreshold(
+      model?.contextCompressionThreshold ?? DEFAULT_CONTEXT_COMPRESSION_THRESHOLD
+    ) * 100
+  )
+
+  const updateContextCompressionThreshold = useCallback(
+    (value: number) => {
+      if (!model?.id) return
+      const normalized = clampCompressionThreshold(value / 100)
+      const providerStore = useProviderStore.getState()
+      const activeProviderId = providerStore.activeProviderId
+      if (!activeProviderId) return
+      providerStore.updateModel(activeProviderId, model.id, {
+        contextCompressionThreshold: normalized
+      })
+    },
+    [model]
+  )
 
   return (
     <Popover>
       <Tooltip>
         <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <button className="inline-flex items-center justify-center h-8 w-7 rounded-r-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/30">
-              <Settings2 className="size-3" />
-            </button>
-          </PopoverTrigger>
+          <span className="inline-flex">
+            <PopoverTrigger asChild>
+              <button className="inline-flex items-center justify-center h-8 w-7 rounded-r-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/30">
+                <Settings2 className="size-3" />
+              </button>
+            </PopoverTrigger>
+          </span>
         </TooltipTrigger>
         <TooltipContent>{t('topbar.modelSettings')}</TooltipContent>
       </Tooltip>
       <PopoverContent className="w-56 p-2" align="start" side="top" sideOffset={8}>
         <div className="flex flex-col gap-1">
+          {!hasAnySetting && (
+            <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+              {tChat('input.noModelSettings')}
+            </div>
+          )}
           {supportsThinking && (
             <>
               <div className="flex items-center gap-1.5 px-1 pb-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
@@ -174,7 +266,7 @@ function ModelSettingsPopover({
                       type="button"
                       className={cn(
                         'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors text-left',
-                        thinkingEnabled && reasoningEffort === level
+                        thinkingEnabled && effectiveReasoningEffort === level
                           ? 'bg-violet-500/15 text-violet-600 dark:text-violet-400'
                           : 'hover:bg-muted/60 text-foreground/80'
                       )}
@@ -253,6 +345,32 @@ function ModelSettingsPopover({
               </button>
             </>
           )}
+
+          {supportsContextCompression && (
+            <>
+              {(supportsThinking || supportsFastMode) && (
+                <div className="my-1 border-t border-border/50" />
+              )}
+              <div className="flex items-center gap-1.5 px-1 pb-1 pt-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
+                <Settings2 className="size-3" />
+                {tChat('input.contextCompressionThreshold')}
+              </div>
+              <div className="flex items-center gap-2 rounded-md px-2.5 py-2 text-xs text-foreground/80">
+                <input
+                  type="range"
+                  min={Math.round(MIN_CONTEXT_COMPRESSION_THRESHOLD * 100)}
+                  max={Math.round(MAX_CONTEXT_COMPRESSION_THRESHOLD * 100)}
+                  step={1}
+                  value={contextCompressionPercent}
+                  onChange={(e) => updateContextCompressionThreshold(Number(e.target.value))}
+                  className="w-full"
+                />
+                <span className="shrink-0 text-[10px] text-muted-foreground">
+                  {contextCompressionPercent}%
+                </span>
+              </div>
+            </>
+          )}
         </div>
       </PopoverContent>
     </Popover>
@@ -262,6 +380,7 @@ function ModelSettingsPopover({
 export function ModelSwitcher(): React.JSX.Element {
   const { t } = useTranslation('layout')
   const { t: tChat } = useTranslation('chat')
+  const { t: tSettings } = useTranslation('settings')
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
@@ -270,17 +389,72 @@ export function ModelSwitcher(): React.JSX.Element {
   const providers = useProviderStore((s) => s.providers)
   const setActiveProvider = useProviderStore((s) => s.setActiveProvider)
   const setActiveModel = useProviderStore((s) => s.setActiveModel)
-  const hasCustomPrompt = useSettingsStore((s) => !!s.systemPrompt)
+  const quotaByKey = useQuotaStore((s) => s.quotaByKey)
+  const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const sessions = useChatStore((s) => s.sessions)
+  const mainModelSelectionMode = useSettingsStore((s) => s.mainModelSelectionMode)
+  const autoModelSelectionsBySession = useUIStore((s) => s.autoModelSelectionsBySession)
+  const autoModelRoutingStatesBySession = useUIStore((s) => s.autoModelRoutingStatesBySession)
+  const autoSelection = activeSessionId
+    ? (autoModelSelectionsBySession[activeSessionId] ?? null)
+    : null
+  const autoRoutingState = activeSessionId
+    ? (autoModelRoutingStatesBySession[activeSessionId] ?? 'idle')
+    : 'idle'
 
-  const enabledProviders = providers.filter((p) => p.enabled)
-  const activeProvider = providers.find((p) => p.id === activeProviderId)
-  const activeModel = activeProvider?.models.find((m) => m.id === activeModelId)
+  const enabledProviders = providers.filter((p) => isProviderAvailableForModelSelection(p))
+  const activeSession = sessions.find((item) => item.id === activeSessionId)
+  const sessionProviderId = activeSession?.providerId ?? null
+  const sessionModelId = activeSession?.modelId ?? null
+  const isSessionBound = Boolean(sessionProviderId && sessionModelId)
+  const displayProviderId = sessionProviderId ?? activeProviderId
+  const displayModelId = sessionModelId ?? activeModelId
+  const displayProvider = providers.find((p) => p.id === displayProviderId)
+  const displayModel = displayProvider?.models.find((m) => m.id === displayModelId)
+  const isAutoModeActive = !isSessionBound && mainModelSelectionMode === 'auto'
+  const autoResolvedProvider = autoSelection?.providerId
+    ? providers.find((provider) => provider.id === autoSelection.providerId)
+    : null
+  const autoResolvedModel = autoResolvedProvider?.models.find(
+    (model) => model.id === autoSelection?.modelId
+  )
+  const settingsProviderId = isAutoModeActive ? autoResolvedProvider?.id : displayProvider?.id
+  const settingsModel = isAutoModeActive ? (autoResolvedModel ?? undefined) : displayModel
+
+  const codexQuota = useMemo(() => {
+    if (!displayProvider || displayProvider.builtinId !== 'codex-oauth') return null
+    const quota =
+      quotaByKey[displayProvider.id] ||
+      (displayProvider.builtinId ? quotaByKey[displayProvider.builtinId] : undefined) ||
+      quotaByKey['codex'] ||
+      null
+    return quota?.type === 'codex' ? quota : null
+  }, [displayProvider, quotaByKey])
+
+  const copilotQuota = useMemo(() => {
+    if (!displayProvider || displayProvider.builtinId !== 'copilot-oauth') return null
+    const quota =
+      quotaByKey[displayProvider.id] ||
+      (displayProvider.builtinId ? quotaByKey[displayProvider.builtinId] : undefined) ||
+      quotaByKey['copilot'] ||
+      null
+    return quota?.type === 'copilot' ? quota : null
+  }, [displayProvider, quotaByKey])
+
+  const formatPercent = (value?: number): string => {
+    if (value === undefined || Number.isNaN(value)) return '0%'
+    return `${Math.round(value)}%`
+  }
 
   useEffect(() => {
-    if (open) {
+    if (!open) return
+
+    const timer = setTimeout(() => {
       setSearch('')
-      setTimeout(() => searchRef.current?.focus(), 50)
-    }
+      searchRef.current?.focus()
+    }, 50)
+
+    return () => clearTimeout(timer)
   }, [open])
 
   const groups = useMemo<ProviderGroup[]>(() => {
@@ -304,23 +478,51 @@ export function ModelSwitcher(): React.JSX.Element {
       <Popover open={open} onOpenChange={setOpen}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <PopoverTrigger asChild>
-              <button className="inline-flex items-center gap-1 h-8 rounded-l-lg px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors">
-                <ModelIcon
-                  icon={activeModel?.icon}
-                  modelId={activeModelId}
-                  providerBuiltinId={activeProvider?.builtinId}
-                  size={20}
-                />
-                {hasCustomPrompt && (
-                  <span className="size-1.5 rounded-full bg-violet-400 shrink-0" />
-                )}
-                <ChevronDown className="size-2.5 opacity-40" />
-              </button>
-            </PopoverTrigger>
+            <span className="inline-flex">
+              <PopoverTrigger asChild>
+                <button
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-l-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                  aria-label={
+                    isAutoModeActive
+                      ? autoRoutingState === 'routing'
+                        ? t('topbar.autoModelRoutingShort')
+                        : t('topbar.autoModel')
+                      : (displayModel?.name ?? displayModelId ?? t('topbar.noModel'))
+                  }
+                >
+                  {isAutoModeActive ? (
+                    autoRoutingState === 'routing' ? (
+                      <Loader2 size={16} className="animate-spin text-amber-500" />
+                    ) : (
+                      <AutoModelIcon size={16} />
+                    )
+                  ) : (
+                    <ModelIcon
+                      icon={displayModel?.icon}
+                      modelId={displayModelId}
+                      providerBuiltinId={displayProvider?.builtinId}
+                      size={20}
+                    />
+                  )}
+                </button>
+              </PopoverTrigger>
+            </span>
           </TooltipTrigger>
           <TooltipContent side="top">
-            {activeModel?.name || activeModelId || t('topbar.noModel')}
+            {isAutoModeActive
+              ? autoRoutingState === 'routing'
+                ? t('topbar.autoModelRouting')
+                : autoSelection?.modelName
+                  ? t('topbar.autoModelTooltip', {
+                      route: t(
+                        autoSelection.target === 'main'
+                          ? 'topbar.autoModelMain'
+                          : 'topbar.autoModelFast'
+                      ),
+                      model: autoSelection.modelName
+                    })
+                  : t('topbar.autoModelTooltipIdle')
+              : displayModel?.name || displayModelId || t('topbar.noModel')}
           </TooltipContent>
         </Tooltip>
         <PopoverContent className="w-80 p-0 overflow-hidden" align="start" sideOffset={8}>
@@ -336,6 +538,49 @@ export function ModelSwitcher(): React.JSX.Element {
             />
           </div>
           <div className="max-h-[360px] overflow-y-auto p-1">
+            <button
+              className={cn(
+                'mb-2 flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left hover:bg-muted/60 transition-colors group',
+                isAutoModeActive && 'bg-primary/5'
+              )}
+              onClick={() => selectAutoModel(setOpen)}
+            >
+              <span className="mt-0.5 flex size-5 items-center justify-center shrink-0">
+                {isAutoModeActive ? (
+                  <span className="flex size-5 items-center justify-center rounded-full bg-primary/10">
+                    <Check className="size-3 text-primary" />
+                  </span>
+                ) : (
+                  <AutoModelIcon size={18} />
+                )}
+              </span>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span
+                  className={cn(
+                    'truncate text-xs',
+                    isAutoModeActive
+                      ? 'font-semibold text-primary'
+                      : 'text-foreground/80 group-hover:text-foreground'
+                  )}
+                >
+                  {t('topbar.autoModel')}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {autoRoutingState === 'routing'
+                    ? t('topbar.autoModelRouting')
+                    : autoSelection?.modelName
+                      ? t('topbar.autoModelTooltip', {
+                          route: t(
+                            autoSelection.target === 'main'
+                              ? 'topbar.autoModelMain'
+                              : 'topbar.autoModelFast'
+                          ),
+                          model: autoSelection.modelName
+                        })
+                      : t('topbar.autoModelDesc')}
+                </span>
+              </div>
+            </button>
             {groups.length === 0 ? (
               <div className="px-3 py-6 text-center text-xs text-muted-foreground/50">
                 {enabledProviders.length === 0 ? t('topbar.noProviders') : t('topbar.noModels')}
@@ -348,7 +593,10 @@ export function ModelSwitcher(): React.JSX.Element {
                     {provider.name}
                   </div>
                   {models.map((m) => {
-                    const isActive = provider.id === activeProviderId && m.id === activeModelId
+                    const isActive =
+                      !isAutoModeActive &&
+                      provider.id === displayProviderId &&
+                      m.id === displayModelId
                     return (
                       <button
                         key={`${provider.id}-${m.id}`}
@@ -404,8 +652,133 @@ export function ModelSwitcher(): React.JSX.Element {
         </PopoverContent>
       </Popover>
 
+      {/* Quota Indicator */}
+      {codexQuota && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/30 border border-border/10 cursor-help hover:bg-muted/50 transition-colors mx-1">
+              <MonitorSmartphone className="size-3 text-emerald-500" />
+              <div className="flex flex-col leading-none gap-0.5">
+                <div className="h-1 w-10 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-500 transition-all"
+                    style={{ width: `${Math.min(100, codexQuota.primary?.usedPercent ?? 0)}%` }}
+                  />
+                </div>
+                <span className="text-[9px] text-muted-foreground/60 font-medium">
+                  {formatPercent(codexQuota.primary?.usedPercent)}
+                </span>
+              </div>
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="p-3 w-48 space-y-2">
+            <div className="space-y-1">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                {tSettings('provider.codexQuotaPrimary')}
+              </p>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold">
+                  {formatPercent(codexQuota.primary?.usedPercent)}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {codexQuota.primary?.resetAt
+                    ? new Date(codexQuota.primary.resetAt).toLocaleString([], {
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })
+                    : ''}
+                </span>
+              </div>
+              <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500"
+                  style={{ width: `${Math.min(100, codexQuota.primary?.usedPercent ?? 0)}%` }}
+                />
+              </div>
+            </div>
+            {codexQuota.secondary && (
+              <div className="space-y-1 pt-1 border-t">
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  {tSettings('provider.codexQuotaSecondary')}
+                </p>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold">
+                    {formatPercent(codexQuota.secondary.usedPercent)}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-amber-500"
+                    style={{ width: `${Math.min(100, codexQuota.secondary.usedPercent ?? 0)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </TooltipContent>
+        </Tooltip>
+      )}
+      {copilotQuota && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/30 border border-border/10 cursor-help hover:bg-muted/50 transition-colors mx-1">
+              <MonitorSmartphone className="size-3 text-sky-500" />
+              <div className="flex flex-col leading-none gap-0.5">
+                <span className="text-[9px] text-muted-foreground/70 font-medium">
+                  {copilotQuota.sku || 'copilot'}
+                </span>
+                <span className="text-[9px] text-muted-foreground/50">
+                  {copilotQuota.chatEnabled
+                    ? tSettings('provider.copilotChatEnabled')
+                    : tSettings('provider.copilotChatDisabled')}
+                </span>
+              </div>
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="p-3 w-56 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                {tSettings('provider.copilotQuotaSku')}
+              </span>
+              <span className="text-xs font-bold">{copilotQuota.sku || '-'}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                {tSettings('provider.copilotQuotaChat')}
+              </span>
+              <span className="text-xs font-bold">
+                {copilotQuota.chatEnabled
+                  ? tSettings('provider.copilotChatEnabled')
+                  : tSettings('provider.copilotChatDisabled')}
+              </span>
+            </div>
+            {copilotQuota.tokenExpiresAt && (
+              <div className="flex items-center justify-between gap-2 border-t pt-2">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  {tSettings('provider.copilotQuotaTokenExpires')}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {new Date(copilotQuota.tokenExpiresAt).toLocaleString([], {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })}
+                </span>
+              </div>
+            )}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
       {/* Settings icon — model config popover */}
-      <ModelSettingsPopover model={activeModel} provider={activeProvider} t={t} tChat={tChat} />
+      <ModelSettingsPopover
+        model={settingsModel}
+        providerId={settingsProviderId}
+        t={t}
+        tChat={tChat}
+      />
     </div>
   )
 }

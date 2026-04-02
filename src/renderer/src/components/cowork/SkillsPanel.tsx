@@ -1,3 +1,4 @@
+import * as React from 'react'
 import { Sparkles, FolderOpen, Search, Terminal, ListChecks, Brain, Users } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@renderer/components/ui/badge'
@@ -43,8 +44,16 @@ function groupTools(
 
 export function SkillsPanel(): React.JSX.Element {
   const { t } = useTranslation('cowork')
-  const allTools = toolRegistry.getDefinitions()
-  const subAgents = subAgentRegistry.getAll()
+  const allTools = React.useSyncExternalStore(
+    toolRegistry.subscribe.bind(toolRegistry),
+    () => toolRegistry.getDefinitions(),
+    () => toolRegistry.getDefinitions()
+  )
+  const subAgents = React.useSyncExternalStore(
+    subAgentRegistry.subscribe.bind(subAgentRegistry),
+    () => subAgentRegistry.getAll(),
+    () => subAgentRegistry.getAll()
+  )
   const teamToolsEnabled = useSettingsStore((s) => s.teamToolsEnabled)
 
   // Regular tools only (exclude Task and Team tools from the main list)
@@ -56,9 +65,7 @@ export function SkillsPanel(): React.JSX.Element {
       <div className="flex flex-col items-center justify-center py-12 text-center">
         <Sparkles className="mb-3 size-8 text-muted-foreground/40" />
         <p className="text-sm text-muted-foreground">{t('skills.noSkills')}</p>
-        <p className="mt-1 text-xs text-muted-foreground/60">
-          {t('skills.noSkillsDesc')}
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground/60">{t('skills.noSkillsDesc')}</p>
       </div>
     )
   }
@@ -139,12 +146,12 @@ export function SkillsPanel(): React.JSX.Element {
                     agent
                   </span>
                   <span className="ml-auto text-[9px] text-muted-foreground/40">
-                    max {sa.maxIterations} iter
+                    max {sa.maxTurns} iter
                   </span>
                 </div>
                 <p className="text-[10px] text-muted-foreground line-clamp-2">{sa.description}</p>
                 <div className="mt-0.5 flex flex-wrap gap-0.5">
-                  {sa.allowedTools.map((t) => (
+                  {sa.tools.map((t) => (
                     <span
                       key={t}
                       className="rounded bg-violet-500/5 px-1 py-px text-[9px] font-mono text-violet-400/60"

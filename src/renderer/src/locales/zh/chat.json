@@ -1,8 +1,11 @@
 {
   "input": {
     "placeholder": "输入消息...",
+    "placeholderClarify": "描述你的想法，我会先不断追问把需求问透...",
     "placeholderCowork": "让助手帮你处理项目...",
-    "placeholderCode": "描述你想构建的内容...",
+    "placeholderCode": "描述你想构建的内容，例如修复 Bug、写脚本，或使用 /commit 提交仓库...",
+    "placeholderAcp": "描述目标、背景、约束和验收标准；我会先做设计与分派，不会直接写代码...",
+    "placeholderInitWorkspace": "当前工作目录还没有 AGENTS.md，推荐先输入 /init 初始化项目上下文...",
     "noApiKey": "未配置 API Key，点击此处打开设置。",
     "attachImages": "附加图片（也支持粘贴或拖放）",
     "dropImages": "拖放图片或文件",
@@ -10,6 +13,8 @@
     "disableThinking": "关闭深度思考",
     "enableThinking": "启用深度思考",
     "thinkingOff": "关闭",
+    "noModelSettings": "当前模型无额外设置（如深度思考、极速模式）",
+    "contextCompressionThreshold": "上下文压缩阈值",
     "thinkingLevel": "思考: {{level}}",
     "effortDesc": {
       "none": "不推理",
@@ -17,6 +22,7 @@
       "low": "快速推理",
       "medium": "均衡",
       "high": "深度推理",
+      "max": "最高强度",
       "xhigh": "最大深度"
     },
     "selectFolder": "选择工作目录",
@@ -47,7 +53,154 @@
     "sshDirectory": "远程目录",
     "sshDirectoryPlaceholder": "",
     "sshSelect": "选择",
-    "sshConnected": "已连接"
+    "sshConnected": "已连接",
+    "queueTitle": "排队消息",
+    "queuePausedHint": "已暂停，点击继续发送",
+    "queueRunningHint": "当前任务结束后按顺序发送",
+    "queueResume": "继续发送",
+    "queueEditing": "编辑排队消息",
+    "queueImageCount": "{{count}} 张图片",
+    "queueImageOnly": "[仅图片]",
+    "queueCleared": "已清空排队消息",
+    "queueClearConfirmTitle": "清空排队消息？",
+    "queueClearConfirmDesc": "这将删除当前会话中 {{count}} 条待发送消息。",
+    "clearConfirmDescWithQueue": "这将删除此对话中的所有消息，并清空当前会话的 {{count}} 条待发送消息。此操作不可撤销。",
+    "recommendationDefaultChat": "帮我基于当前上下文整理一个更清晰、可直接执行的问题。",
+    "recommendationDefaultClarify": "请继续追问我，直到把目标、约束、边界和验收标准问清楚。",
+    "recommendationDefaultCowork": "基于当前上下文，帮我拆出下一步最值得执行的协作任务。",
+    "recommendationDefaultCode": "基于当前上下文，帮我给出下一步最合适的代码修改目标和实现要求。",
+    "recommendationInitWorkspace": "当前工作目录还没有 AGENTS.md，先帮我执行 /init 初始化项目上下文。",
+    "startAcp": "开始 ACP 会话",
+    "startAcpDesc": "先澄清目标、背景、约束和验收标准，再做架构设计与任务分派，最后再进入实现。",
+    "homeTitleAcp": "ACP 模式",
+    "homeDescAcp": "ACP 模式下先把目标、背景、约束和验收标准问清楚，再进行架构设计与任务拆分，最后才进入编码。"
+  },
+  "guide": {
+    "title": "对话页新人引导",
+    "badge": "对话功能",
+    "subtitle": "快速了解左侧项目/会话、输入区指令与 @ 文件引用，以及右侧执行面板。",
+    "openButton": "查看引导",
+    "bannerTitle": "第一次使用对话页？",
+    "bannerDesc": "花 2 分钟看完这份引导，基本就知道项目、会话、输入区和右侧面板怎么配合用了。",
+    "openDocs": "打开官网帮助",
+    "close": "稍后再看",
+    "startNow": "开始使用",
+    "progress": "第 {{current}} / {{total}} 步",
+    "previous": "上一步",
+    "next": "下一步",
+    "finish": "完成",
+    "skip": "跳过引导",
+    "steps": {
+      "modeClarify": {
+        "title": "这是“澄清”模式",
+        "description": "适合先把需求、边界、约束和验收标准问清楚，再决定如何执行。它更偏向追问、确认和收敛问题。"
+      },
+      "modeCowork": {
+        "title": "这是“协作”模式",
+        "description": "适合通用项目协作：帮你查信息、整理方案、联动工具、处理文件和推进多步骤任务。"
+      },
+      "modeCode": {
+        "title": "这是“编程”模式",
+        "description": "适合直接落代码、修改文件、运行检查并处理工程实现细节。代码类任务优先用这个模式。"
+      },
+      "leftSidebar": {
+        "title": "这是左侧项目与会话区",
+        "description": "这里按“项目 → 会话”组织你的工作。你可以在这里切项目、切历史会话、搜索消息，也能快速回到之前的上下文。"
+      },
+      "sessionActions": {
+        "title": "这里是项目/会话快捷操作",
+        "description": "这里可以新建项目、新建会话、导出会话，也能配合右键菜单完成重命名、置顶、复制、删除等操作。"
+      },
+      "composer": {
+        "title": "这是输入区",
+        "description": "你大多数操作都从这里开始：输入需求、发送消息、上传图片、切模型、开联网、进 Plan Mode。Enter 发送，Shift+Enter 换行。"
+      },
+      "mentions": {
+        "title": "在这里用 @ 引用文件",
+        "description": "在输入框中键入 @，系统会基于当前工作目录搜索文件。选中后会插入结构化文件引用，比手输路径更稳定，也更适合代码任务。"
+      },
+      "commands": {
+        "title": "这里打开命令 / Skill / MCP",
+        "description": "点击这个 +，可以往当前消息里加入命令、Skill、Channels 和 MCP Servers。输入 / 则会触发聊天命令建议。"
+      },
+      "rightPanel": {
+        "title": "这是右侧执行面板",
+        "description": "这里用来盯执行过程和上下文：Steps 看当前步骤，Files 看文件树，Artifacts 看改动产物，Context 看目录、模型、token 和后台命令。"
+      }
+    },
+    "sections": {
+      "leftSidebar": {
+        "title": "左侧：项目与会话",
+        "bullets": [
+          "最左窄栏是应用导航；左侧宽栏才是当前对话的项目与会话列表。",
+          "项目相当于工作空间，可保存项目名、工作目录、SSH 连接和默认模型。",
+          "项目下可管理多条会话，支持新建、重命名、置顶、删除和切换模式。",
+          "会话列表支持按标题和消息内容搜索，旧会话会自动收进历史记录。",
+          "右键项目或会话可进行导出、复制、清空消息、修改目录等操作。"
+        ]
+      },
+      "composer": {
+        "title": "中下：输入区与发送",
+        "bullets": [
+          "输入区支持多行编辑、草稿按会话保留、上下方向键回看历史输入。",
+          "Enter 发送，Shift+Enter 换行；运行中继续发送会进入排队消息。",
+          "底部可切换模型、启用联网、选择 Skill、切换 Plan Mode、上传图片。",
+          "如果当前模式需要工作目录但还没选择，输入区会先提醒你补齐目录。",
+          "魔棒按钮可优化提示词，适合把随手输入整理成更清晰的任务描述。"
+        ]
+      },
+      "mentions": {
+        "title": "输入区：@ 文件引用",
+        "bullets": [
+          "在输入框里键入 @ 会按当前工作目录搜索文件，不用手敲完整路径。",
+          "可用上下键选择候选，Tab 或 Enter 插入，Esc 取消。",
+          "插入后会变成结构化文件引用，已选文件会显示在输入框上方的文件条里。",
+          "文件条支持预览、定位正文引用、单独移除或一键清空。"
+        ]
+      },
+      "commands": {
+        "title": "输入区：/ 命令与 + 菜单",
+        "bullets": [
+          "在输入开头输入 / 会触发命令建议，用来快速套用本地命令模板。",
+          "+ 菜单可视化地加入 Commands、Skills、Channels 和 MCP Servers。",
+          "选中 Skill 后，本次消息会自动带上对应能力前缀，更适合固定工作流。",
+          "Ctrl+K 打开全局命令面板，处理的是界面操作，不是聊天命令本身。"
+        ]
+      },
+      "rightPanel": {
+        "title": "右侧：执行与资源面板",
+        "bullets": [
+          "Steps 显示当前步骤、待办和执行进度，是观察 AI 在做什么的第一入口。",
+          "Plan 用于先规划再执行，适合复杂改动或多文件任务。",
+          "Files 展示本地或 SSH 文件树；Artifacts 汇总本轮改过、写过、删过的文件。",
+          "Team 展示多代理协作状态；Context 汇总目录、模型、token、上下文窗口和后台命令。",
+          "右侧面板可折叠、切标签，也支持拖拽调整宽度。",
+          "某些文件会进一步打开预览面板，可直接看 HTML、Markdown、图片、表格、PDF 等。"
+        ]
+      },
+      "quickStart": {
+        "title": "推荐上手顺序",
+        "bullets": [
+          "先新建项目并绑定工作目录，再开始会话。",
+          "Clarify 适合先问清需求，Cowork 适合通用协作，Code 适合直接改代码。",
+          "做代码任务时优先用 @ 引用文件，再描述目标和约束。",
+          "执行过程中重点看右侧的 Steps、Files、Artifacts 和 Context。",
+          "会话变长后可在 Context 里压缩上下文，减少模型遗忘前文的问题。"
+        ]
+      }
+    }
+  },
+  "askUser": {
+    "title": "需要你的回答",
+    "subtitle": "回答这些问题后，我再继续处理。",
+    "waiting": "等待回答",
+    "previous": "上一步",
+    "next": "下一步",
+    "submit": "提交",
+    "other": "其他",
+    "answerPlaceholder": "输入你的回答…",
+    "answeredTitle": "问题已回答",
+    "answeredSubtitle": "已记录你的选择与补充说明"
   },
   "permission": {
     "title": "需要权限",
@@ -110,13 +263,60 @@
     "imagePlugin": {
       "title": "图片插件",
       "running": "正在执行图片生成 Tool",
+      "waitingRetry": "等待手动重试",
       "completed": "图片生成已完成",
       "failed": "图片生成失败",
       "prompt": "提示词",
       "generating": "正在生成图片...",
+      "retryRequired": "接口限流，等待你点击重试",
+      "retryHint": "当前已生成 {{completed}} / {{total}} 张。主会话会暂停，直到你点击重试后继续。",
+      "retryCaveat": "注意：如果这次是接口直接失败而不是限流，继续重试可能没有效果。",
+      "retryConfirmTitle": "确认继续重试？",
+      "retryConfirmDesc": "当前已生成 {{completed}} / {{total}} 张。只有遇到限流时重试通常才有效；如果接口是直接失败，继续重试可能没有效果。",
+      "retryConfirmAction": "确认重试",
       "result": "生成结果（{{count}} 张）",
       "notes": "补充说明",
       "countValue": "数量 {{count}}"
+    },
+    "desktop": {
+      "running": "桌面操作执行中",
+      "completed": "桌面操作已完成",
+      "failed": "桌面操作失败",
+      "executing": "正在执行桌面操作...",
+      "input": "输入",
+      "output": "输出",
+      "notes": "补充说明",
+      "DesktopScreenshot": {
+        "title": "桌面截图"
+      },
+      "DesktopClick": {
+        "title": "桌面点击"
+      },
+      "DesktopType": {
+        "title": "桌面输入"
+      },
+      "DesktopScroll": {
+        "title": "桌面滚动"
+      },
+      "DesktopWait": {
+        "title": "桌面等待"
+      },
+      "screenshot": {
+        "summary": "{{width}} × {{height}}",
+        "preview": "截图预览"
+      },
+      "click": {
+        "summary": "{{action}} @ ({{x}}, {{y}})"
+      },
+      "scroll": {
+        "summary": "滚动 ({{scrollX}}, {{scrollY}})"
+      },
+      "wait": {
+        "summary": "等待 {{delayMs}}ms"
+      },
+      "type": {
+        "summary": "模式：{{mode}}"
+      }
     }
   },
   "subAgent": {
@@ -133,7 +333,10 @@
     "copyOutput": "复制输出",
     "viewDetails": "查看详情",
     "tok": "tok",
-    "toolCalls": "工具调用"
+    "toolCalls": "工具调用",
+    "summaryEmpty": "暂无摘要",
+    "openInRunsRunning": "在右侧执行列表中查看实时进展",
+    "openInRunsDone": "在右侧执行列表中查看完整记录"
   },
   "teamEvent": {
     "teamCreated": "团队已创建",
@@ -147,6 +350,7 @@
   "todo": {
     "tasksDone": "{{completed}} / {{total}} 个任务完成",
     "moreTasks": "还有 {{count}} 个任务...",
+    "showEarlierTasks": "展开前面的 {{count}} 个任务",
     "showLess": "收起"
   },
   "thinking": {
@@ -158,17 +362,45 @@
   "messageList": {
     "startConversation": "开始对话",
     "startConversationDesc": "随意提问 — 纯对话，无工具。",
+    "startClarify": "开始澄清需求",
+    "startClarifyDesc": "先把目标、约束、风险和遗漏问清楚，再进入规划。默认偏向追问和澄清，但权限与编程模式一致。",
     "startCowork": "开始协作会话",
     "startCoworkDesc": "选择工作目录，然后让助手帮你处理项目。",
     "startCoding": "开始编程",
     "startCodingDesc": "描述你想构建的内容，助手将为你编写代码。",
+    "homeModelUnavailable": "未选择模型",
+    "homeCurrentModel": "当前模型：{{model}}",
+    "homeTitleChat": "开始对话",
+    "homeTitleClarify": "先把需求说清楚",
+    "homeTitleCowork": "进入项目一起处理",
+    "homeTitleCode": "开始写代码",
+    "homeTitleAcp": "开始 ACP 协作",
+    "homeDescAcp": "开始 ACP 模式，聚焦架构确认、约束澄清和执行拆分。",
+    "homeDescAutoChat": "发送后会按内容复杂度自动选择更合适的模型来回复。",
+    "homeDescAutoClarify": "发送后会自动挑选更适合追问、澄清和收敛方案的模型。",
+    "homeDescAutoCowork": "发送后会自动挑选更适合读项目、改文件和调用工具的模型。",
+    "homeDescAutoCode": "发送后会自动挑选更适合写代码、重构和分析问题的模型。",
+    "homeDescChatGeneral": "适合日常对话、写作整理和轻量问题。",
+    "homeDescChatVision": "适合日常对话，也能结合图片内容快速回答。",
+    "homeDescClarifyGeneral": "适合连续提问、梳理目标和补齐约束。",
+    "homeDescClarifyThinking": "更适合深入追问、拆解问题和收敛方案。",
+    "homeDescCoworkGeneral": "适合进入项目上下文，协助阅读、整理和推进任务。",
+    "homeDescCoworkTools": "更适合联动工具处理项目任务，读文件、改代码和执行工作流。",
+    "homeDescCodeGeneral": "适合生成代码、写脚本和完成常规开发任务。",
+    "homeDescCodeVision": "除了写代码，也适合结合截图或图片一起分析问题。",
+    "homeDescCodeThinking": "更适合复杂实现、重构、调试和多步骤代码任务。",
+    "homeAutoMeta": "发送后自动匹配更合适的模型",
     "tipDropFiles": "提示：将文件拖入输入框以引用其路径",
     "explainAsync": "解释 async/await 的工作原理",
     "compareRest": "比较 REST 和 GraphQL",
     "writeRegex": "写一个邮箱验证正则表达式",
+    "clarifyIdea": "通过连续提问帮我把这个产品想法问透",
+    "challengeAssumptions": "挑战这个方案里的隐含假设和模糊表述",
+    "exploreRisks": "找出这个方向的边界条件、失败模式和二阶影响",
     "summarizeProject": "总结项目结构",
     "findBugs": "查找并修复潜在 Bug",
     "addErrorHandling": "给主模块添加错误处理",
+    "useCommitCommand": "使用 /commit 提交仓库",
     "reviewCodebase": "审查代码库并提出改进建议",
     "addTests": "给主模块添加测试",
     "refactorError": "重构以改善错误处理",
@@ -234,6 +466,9 @@
     "req": "请求 {{count}}",
     "ttft": "首 token",
     "tps": "TPS",
+    "regenerateReference": "重新生成参考",
+    "continueToolExecution": "继续执行",
+    "continueToolExecutionHint": "检测到上次停在工具执行，点击后会在这条消息里继续，不会新增 AI 消息",
     "imageError": {
       "titleTimeout": "图片生成超时",
       "descTimeout": "请求已超过 10 分钟。建议简化提示词、降低复杂度后重试。",
@@ -247,6 +482,20 @@
       "descUnknown": "生成过程中发生未知错误，请稍后重试。",
       "details": "查看技术详情"
     }
+  },
+  "messageActions": {
+    "translate": "翻译",
+    "readAloud": "语音朗读",
+    "share": "分享",
+    "collapse": "收起消息",
+    "expand": "展开消息",
+    "deleteAndRegenerate": "删除并重新生成",
+    "sentToTranslator": "已填入翻译页",
+    "copiedForShare": "已复制到剪贴板，可直接分享",
+    "shareFailed": "分享失败",
+    "speechNotSupported": "当前环境不支持语音朗读",
+    "collapsedMessage": "已收起消息",
+    "imagesCollapsed": "{{count}} 张图片"
   },
   "toolGroup": {
     "readFiles": "读取了 {{count}} 个文件",

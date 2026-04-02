@@ -29,15 +29,12 @@ import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { registerPluginTools, isPluginToolsRegistered } from '@renderer/lib/channel/plugin-tools'
 import { DEFAULT_PLUGIN_PERMISSIONS } from '@renderer/lib/channel/types'
-import {
-  joinFsPath,
-  loadOptionalMemoryFile,
-  loadGlobalMemorySnapshot
-} from '@renderer/lib/agent/memory-files'
-import type { UnifiedMessage, ProviderConfig } from '@renderer/lib/api/types'
+import { loadLayeredMemorySnapshot } from '@renderer/lib/agent/memory-files'
+import type { UnifiedMessage, ProviderConfig, ContentBlock } from '@renderer/lib/api/types'
 import type { AgentLoopConfig } from '@renderer/lib/agent/types'
 import type { ToolContext } from '@renderer/lib/tools/tool-types'
 import { hasPendingSessionMessagesForSession } from '@renderer/hooks/use-chat-actions'
+import { recordUsageEvent } from '@renderer/lib/usage-analytics'
 
 interface PluginAutoReplyTask {
   sessionId: string
@@ -60,6 +57,28 @@ interface PluginAutoReplyTask {
 }
 
 const PLUGIN_STREAM_DELTA_FLUSH_MS = 66
+const PLUGIN_PROCESSING_ACK_MESSAGE = '已收到消息，正在处理，请稍候。'
+
+function buildPluginMessageSessionKey(pluginId: string, chatId: string): string {
+  return `plugin:${pluginId}:chat:${encodeURIComponent(chatId)}`
+}
+
+function shouldReplaceSessionTitle(
+  currentTitle: string | undefined,
+  nextTitle: string | undefined
+): boolean {
+  const current = (currentTitle ?? '').trim()
+  const next = (nextTitle ?? '').trim()
+  if (!next || current === next) return false
+
+  return (
+    current.length === 0 ||
+    current === 'New Conversation' ||
+    current === 'New Chat' ||
+    /^oc_/i.test(current) ||
+    /^Plugin\s+/i.test(current)
+  )
+}
 
 async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const { sessionId, pluginId, pluginType, chatId, supportsStreaming } = task
@@ -83,16 +102,33 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     return
   }
 
+  const shouldReplyToIncomingMessage =
+    pluginType === 'qq-bot' && task.chatType === 'group' && Boolean(task.messageId)
+  const shouldUseStreamingReply = supportsStreaming && features.streamingReply
+
   const sendChannelNotice = async (message: string): Promise<void> => {
     try {
       await ipcClient.invoke(IPC.PLUGIN_EXEC, {
         pluginId,
-        action: 'sendMessage',
-        params: { chatId, content: message }
+        action: shouldReplyToIncomingMessage ? 'replyMessage' : 'sendMessage',
+        params: shouldReplyToIncomingMessage
+          ? { messageId: task.messageId, content: message }
+          : { chatId, content: message }
       })
     } catch (err) {
       console.error('[PluginAutoReply] Failed to send notice:', err)
     }
+  }
+
+  let immediateAckSent = false
+  const sendImmediateAck = async (): Promise<void> => {
+    if (immediateAckSent) return
+    immediateAckSent = true
+    await sendChannelNotice(PLUGIN_PROCESSING_ACK_MESSAGE)
+  }
+
+  if (!shouldUseStreamingReply) {
+    await sendImmediateAck()
   }
 
   // ── Provider config (with per-channel model override) ──
@@ -190,17 +226,21 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
   // ── Start CardKit streaming card (only if streamingReply feature enabled) ──
   let streamingActive = false
-  if (supportsStreaming && features.streamingReply) {
+  if (shouldUseStreamingReply) {
     try {
       const res = (await ipcClient.invoke('plugin:stream:start', {
         pluginId,
         chatId,
-        initialContent: ' Thinking...',
+        initialContent: PLUGIN_PROCESSING_ACK_MESSAGE,
         messageId: task.messageId
       })) as { ok: boolean }
       streamingActive = !!res?.ok
+      if (!streamingActive) {
+        await sendImmediateAck()
+      }
     } catch (err) {
       console.warn('[PluginAutoReply] Failed to start streaming card:', err)
+      await sendImmediateAck()
     }
   }
 
@@ -281,8 +321,10 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       if (dbSession) {
         const newSession = {
           id: sessionId,
-          title: dbSession.title || resolvedTitle,
-          mode: (dbSession.mode as 'chat' | 'cowork' | 'code') || 'cowork',
+          title: shouldReplaceSessionTitle(dbSession.title, resolvedTitle)
+            ? resolvedTitle
+            : dbSession.title || resolvedTitle,
+          mode: (dbSession.mode as 'chat' | 'clarify' | 'cowork' | 'code') || 'cowork',
           messages: [],
           messageCount: 0,
           messagesLoaded: true,
@@ -292,7 +334,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
           workingFolder: dbSession.working_folder || channelWorkDir,
           sshConnectionId: dbSession.ssh_connection_id ?? channelSshConnectionId,
           pluginId,
-          externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
+          externalChatId: buildPluginMessageSessionKey(pluginId, task.chatId),
           providerId: dbSession.provider_id || channelMeta?.providerId || undefined,
           modelId: dbSession.model_id || channelMeta?.model || undefined
         }
@@ -320,7 +362,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       workingFolder: channelWorkDir,
       sshConnectionId: channelSshConnectionId,
       pluginId,
-      externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
+      externalChatId: buildPluginMessageSessionKey(pluginId, task.chatId),
       providerId: channelMeta?.providerId || undefined,
       modelId: channelMeta?.model || undefined
     }
@@ -360,7 +402,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   }
 
   // Update session title in store if we have a better name now
-  if (session && /^oc_/.test(session.title) && resolvedTitle && !/^oc_/.test(resolvedTitle)) {
+  if (session && shouldReplaceSessionTitle(session.title, resolvedTitle)) {
     useChatStore.setState((state) => {
       const s = state.sessions.find((s) => s.id === sessionId)
       if (s) s.title = resolvedTitle
@@ -375,133 +417,92 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
   // ── Build tools (same as main agent's cowork branch) ──
   const allToolDefs = toolRegistry.getDefinitions()
+  const cachedPromptSnapshot = session.promptSnapshot
+  const canReusePromptSnapshot =
+    !!cachedPromptSnapshot &&
+    cachedPromptSnapshot.mode === 'cowork' &&
+    cachedPromptSnapshot.planMode === false &&
+    cachedPromptSnapshot.workingFolder === session.workingFolder &&
+    cachedPromptSnapshot.projectId === session.projectId &&
+    cachedPromptSnapshot.sshConnectionId === session.sshConnectionId
 
-  // ── Build system prompt with channel context ──
-  const settings = useSettingsStore.getState()
-  let userPrompt = settings.systemPrompt || ''
+  let effectiveToolDefs = allToolDefs
+  let systemPrompt = cachedPromptSnapshot?.systemPrompt ?? ''
 
-  // Inject active channel metadata
-  const activeChannels = useChannelStore.getState().getActiveChannels()
-  if (activeChannels.length > 0) {
-    const channelLines: string[] = ['\n## Active Channels']
-    for (const c of activeChannels) {
-      channelLines.push(`- **${c.name}** (channel_id: \`${c.id}\`, type: ${c.type})`)
-      if (c.userSystemPrompt?.trim()) {
-        channelLines.push(`  Channel instructions: ${c.userSystemPrompt.trim()}`)
-      }
-      const desc = useChannelStore.getState().getDescriptor(c.type)
-      const toolNames = desc?.tools ?? []
-      if (toolNames.length > 0) {
-        const enabled = toolNames.filter((name) => c.tools?.[name] !== false)
-        const disabled = toolNames.filter((name) => c.tools?.[name] === false)
-        channelLines.push(`  Enabled tools: ${enabled.length > 0 ? enabled.join(', ') : 'none'}`)
-        if (disabled.length > 0) {
-          channelLines.push(`  Disabled tools: ${disabled.join(', ')}`)
-        }
-      }
-    }
-    channelLines.push('', 'Use the channel_id value as plugin_id when calling Plugin* tools.')
-    userPrompt = userPrompt ? `${userPrompt}\n${channelLines.join('\n')}` : channelLines.join('\n')
+  if (!canReusePromptSnapshot) {
+    // ── Build system prompt with channel context ──
+    const settings = useSettingsStore.getState()
+    let userPrompt = settings.systemPrompt || ''
+
+    const channelDescriptor = channelMeta
+      ? useChannelStore.getState().getDescriptor(channelMeta.type)
+      : undefined
+    const channelToolNames = channelDescriptor?.tools ?? []
+    const enabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] !== false)
+
+    const channelCtx = [
+      `\n## Channel Auto-Reply Context`,
+      `Channel: ${channelMeta?.name ?? pluginType} (channel_id: \`${pluginId}\`)`,
+      `Chat ID: \`${chatId}\``,
+      `Chat Type: ${task.chatType ?? 'unknown'}`,
+      `Sender: ${task.senderName || task.senderId} (id: ${task.senderId})`,
+      enabledTools.length > 0 ? `Available channel tools: ${enabledTools.join(', ')}` : '',
+      `Reply directly to this incoming message in a natural way.`,
+      `If you need channel tools, use plugin_id="${pluginId}" and chat_id="${chatId}".`
+    ]
+      .filter(Boolean)
+      .join('\n')
+    userPrompt = userPrompt ? `${userPrompt}\n${channelCtx}` : channelCtx
+
+    const memorySnapshot = await loadLayeredMemorySnapshot(ipcClient, {
+      workingFolder: session.workingFolder,
+      scope: 'shared'
+    })
+    const sshConnection = session.sshConnectionId
+      ? useSshStore
+          .getState()
+          .connections.find((connection) => connection.id === session.sshConnectionId)
+      : undefined
+    const environmentContext = resolvePromptEnvironmentContext({
+      sshConnectionId: session.sshConnectionId,
+      workingFolder: session.workingFolder,
+      sshConnection
+    })
+
+    systemPrompt = buildSystemPrompt({
+      mode: 'cowork',
+      workingFolder: session.workingFolder,
+      sessionId,
+      userRules: userPrompt,
+      toolDefs: allToolDefs,
+      language: settings.language,
+      memorySnapshot,
+      sessionScope: 'shared',
+      environmentContext
+    })
+
+    useChatStore.getState().setSessionPromptSnapshot(sessionId, {
+      mode: 'cowork',
+      planMode: false,
+      systemPrompt,
+      toolDefs: allToolDefs,
+      projectId: session.projectId,
+      workingFolder: session.workingFolder,
+      sshConnectionId: session.sshConnectionId
+    })
+  } else {
+    effectiveToolDefs = cachedPromptSnapshot.toolDefs.slice()
   }
-
-  // Inject channel session auto-reply context
-  // (channelMeta already resolved above from useChannelStore)
-  const isFeishu = isFeishuChannel
-
-  const channelDescriptor = channelMeta
-    ? useChannelStore.getState().getDescriptor(channelMeta.type)
-    : undefined
-  const channelToolNames = channelDescriptor?.tools ?? []
-  const enabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] !== false)
-  const disabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] === false)
-
-  const channelCtx = [
-    `\n## Channel Auto-Reply Context`,
-    `This session is handling messages from channel **${channelMeta?.name ?? pluginType}** (channel_id: \`${pluginId}\`).`,
-    `Chat ID: \`${chatId}\``,
-    `Chat Type: ${task.chatType ?? 'unknown'}`,
-    `Sender: ${task.senderName || task.senderId} (id: ${task.senderId})`,
-    `Enabled tools: ${enabledTools.length > 0 ? enabledTools.join(', ') : 'none'}`,
-    disabledTools.length > 0 ? `Disabled tools: ${disabledTools.join(', ')}` : '',
-    `Your response will be streamed directly to the user in real-time via the channel.`,
-    `Just respond naturally — the streaming pipeline handles delivery automatically.`,
-    `If you need to send an additional message, use PluginSendMessage with plugin_id="${pluginId}" and chat_id="${chatId}".`,
-
-    // ── File Generation & Delivery Guidelines ──
-    `\n### Generating & Delivering Files`,
-    `When the user asks you to generate reports, documents, spreadsheets, code files, or any deliverable content:`,
-    `1. **Use the Write tool** to create the file in the working folder (e.g. \`report.md\`, \`analysis.csv\`, \`summary.html\`, \`data.json\`). Choose the most appropriate format for the content.`,
-    `2. **Send the file directly to the user** via the plugin so they receive it without extra steps:`,
-    isFeishu
-      ? `   - Use **FeishuSendFile** (plugin_id="${pluginId}", chat_id="${chatId}") to deliver the generated file.`
-      : `   - Use **PluginSendMessage** to share the file content or a download-ready summary with the user.`,
-    isFeishu
-      ? `   - Use **FeishuSendImage** if the deliverable is an image (chart, screenshot, diagram).`
-      : '',
-    `3. **Also provide a brief summary** in your text response so the user knows what the file contains without opening it.`,
-    `4. **Format guidelines**: Prefer Markdown (.md) for reports and documentation, CSV for tabular data, HTML for rich formatted reports, JSON for structured data. Use the format that best serves the user's needs.`,
-    `5. **Do NOT paste entire file contents as chat messages** when the content is long (>30 lines). Write it to a file and send the file instead — this provides a much better user experience.`,
-
-    isFeishu
-      ? [
-          `\n### Feishu Media Tools`,
-          `You can send images and files to this chat:`,
-          `- **FeishuSendImage**: Send an image (local path or URL). plugin_id="${pluginId}", chat_id="${chatId}"`,
-          `- **FeishuSendFile**: Send a file (pdf, doc, xls, ppt, mp4, etc.). plugin_id="${pluginId}", chat_id="${chatId}"`,
-          `For @mentions, fetch member open_id via **FeishuListChatMembers** and call **FeishuAtMember** (plain '@' text will not mention).`,
-          `Always prefer sending files over pasting long content in messages.`
-        ].join('\n')
-      : '',
-    channelMeta?.userSystemPrompt?.trim()
-      ? `\nChannel-specific instructions: ${channelMeta.userSystemPrompt.trim()}`
-      : ''
-  ]
-    .filter(Boolean)
-    .join('\n')
-  userPrompt = userPrompt ? `${userPrompt}\n${channelCtx}` : channelCtx
-
-  // Load AGENTS.md memory file from working directory
-  let agentsMemory: string | undefined
-  if (session.workingFolder) {
-    const projectMemoryPath = joinFsPath(session.workingFolder, 'AGENTS.md')
-    agentsMemory = await loadOptionalMemoryFile(ipcClient, projectMemoryPath)
-  }
-
-  const globalMemorySnapshot = await loadGlobalMemorySnapshot(ipcClient)
-  const globalMemory = globalMemorySnapshot.content
-  const globalMemoryPath = globalMemorySnapshot.path
-  const sshConnection = session.sshConnectionId
-    ? useSshStore
-        .getState()
-        .connections.find((connection) => connection.id === session.sshConnectionId)
-    : undefined
-  const environmentContext = resolvePromptEnvironmentContext({
-    sshConnectionId: session.sshConnectionId,
-    workingFolder: session.workingFolder,
-    sshConnection
-  })
-
-  const systemPrompt = buildSystemPrompt({
-    mode: 'cowork',
-    workingFolder: session.workingFolder,
-    userSystemPrompt: userPrompt,
-    toolDefs: allToolDefs,
-    language: settings.language,
-    agentsMemory,
-    globalMemory,
-    globalMemoryPath,
-    environmentContext
-  })
 
   // ── Build user message ──
-  let userContent: string | Array<Record<string, unknown>> = effectiveContent
+  let userContent: UnifiedMessage['content'] = effectiveContent
   if (task.images?.length) {
     if (supportsVision) {
-      const blocks: Array<Record<string, unknown>> = []
+      const blocks: ContentBlock[] = []
       for (const img of task.images) {
         blocks.push({
           type: 'image',
-          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+          source: { type: 'base64', mediaType: img.mediaType, data: img.base64 }
         })
       }
       if (effectiveContent) {
@@ -517,7 +518,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const userMsg: UnifiedMessage = {
     id: nanoid(),
     role: 'user',
-    content: userContent as string,
+    content: userContent,
     createdAt: Date.now()
   }
 
@@ -547,7 +548,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const loopConfig: AgentLoopConfig = {
     maxIterations: 15,
     provider: agentProviderConfig,
-    tools: allToolDefs,
+    tools: effectiveToolDefs,
     systemPrompt,
     workingFolder: session.workingFolder,
     signal: ac.signal
@@ -748,6 +749,38 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         })
         break
 
+      case 'message_end':
+        if (event.usage) {
+          useChatStore.getState().updateMessage(sessionId, assistantMsgId, {
+            usage: {
+              ...event.usage,
+              contextTokens: event.usage.contextTokens ?? event.usage.inputTokens
+            },
+            ...(event.providerResponseId ? { providerResponseId: event.providerResponseId } : {})
+          })
+          void recordUsageEvent({
+            sessionId,
+            messageId: assistantMsgId,
+            sourceKind: 'plugin',
+            providerId: agentProviderConfig.providerId,
+            modelId: agentProviderConfig.model,
+            usage: {
+              ...event.usage,
+              contextTokens: event.usage.contextTokens ?? event.usage.inputTokens
+            },
+            timing: event.timing,
+            providerResponseId: event.providerResponseId,
+            createdAt: Date.now(),
+            meta: {
+              pluginId,
+              chatId,
+              chatType: task.chatType,
+              senderId: task.senderId
+            }
+          })
+        }
+        break
+
       case 'iteration_end':
         // Append tool_result user message so next iteration has proper context
         if (event.toolResults && event.toolResults.length > 0) {
@@ -818,15 +851,19 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     await sendChannelNotice(fallbackMessage)
   }
 
-  // Non-streaming fallback: send the final text via plugin sendMessage
+  // Non-streaming fallback: send the final text via plugin reply/send
   if (!streamingActive && fullText.trim()) {
     try {
       await ipcClient.invoke('plugin:exec', {
         pluginId,
-        action: 'sendMessage',
-        params: { chatId, content: fullText }
+        action: shouldReplyToIncomingMessage ? 'replyMessage' : 'sendMessage',
+        params: shouldReplyToIncomingMessage
+          ? { messageId: task.messageId, content: fullText }
+          : { chatId, content: fullText }
       })
-      console.log(`[PluginAutoReply] Sent non-streaming reply for ${pluginId}:${chatId}`)
+      console.log(
+        `[PluginAutoReply] Sent non-streaming ${shouldReplyToIncomingMessage ? 'reply' : 'message'} for ${pluginId}:${chatId}`
+      )
     } catch (err) {
       console.error('[PluginAutoReply] Failed to send non-streaming reply:', err)
     }

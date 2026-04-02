@@ -1,8 +1,21 @@
-import { app, shell, BrowserWindow, ipcMain, Menu, Tray, clipboard, nativeImage } from 'electron'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  Tray,
+  clipboard,
+  nativeImage,
+  dialog,
+  session
+} from 'electron'
 
-import { join } from 'path'
-import { mkdirSync } from 'fs'
+import { join, extname } from 'path'
+import { mkdirSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
+import { randomUUID } from 'crypto'
+import { spawn } from 'child_process'
 
 // Delay import of @electron-toolkit/utils to avoid accessing app before ready
 let electronApp: any
@@ -10,6 +23,7 @@ let optimizer: any
 let is: any
 
 import icon from '../../resources/icon.png?asset'
+import icon_mac from '../../resources/icon-mac.png?asset'
 
 import { registerFsHandlers } from './ipc/fs-handlers'
 import { registerAgentChangeHandlers } from './ipc/agent-change-handlers'
@@ -23,24 +37,33 @@ import { registerSettingsHandlers } from './ipc/settings-handlers'
 import { registerSkillsHandlers } from './ipc/skills-handlers'
 import { registerAgentsHandlers } from './ipc/agents-handlers'
 import { registerPromptsHandlers } from './ipc/prompts-handlers'
+import { registerCommandsHandlers } from './ipc/commands-handlers'
 import { registerProcessManagerHandlers, killAllManagedProcesses } from './ipc/process-manager'
 import { registerDbHandlers } from './ipc/db-handlers'
 import { registerConfigHandlers } from './ipc/secure-key-store'
 import { registerChannelHandlers, autoStartChannels } from './ipc/channel-handlers'
 import { ChannelManager } from './channels/channel-manager'
-import { registerMcpHandlers } from './ipc/mcp-handlers'
+import { autoConnectMcpServers, registerMcpHandlers } from './ipc/mcp-handlers'
 import { registerCronHandlers } from './ipc/cron-handlers'
+import { registerInputHandlers } from './ipc/input-handlers'
 import { registerNotifyHandlers } from './ipc/notify-handlers'
+import { registerScreenshotHandlers } from './ipc/screenshot-handlers'
 import { registerWebSearchHandlers } from './ipc/web-search-handlers'
 import { registerOauthHandlers } from './ipc/oauth-handlers'
+import { registerImageGifHandlers } from './ipc/image-gif-handlers'
+import { registerGitHandlers } from './ipc/git-handlers'
+import { registerWikiHandlers } from './ipc/wiki-handlers'
+import { registerMigrationHandlers } from './ipc/migration-handlers'
 import { loadPersistedJobs, cancelAllJobs } from './cron/cron-scheduler'
 import { McpManager } from './mcp/mcp-manager'
 import { closeDb } from './db/database'
 import { registerSshHandlers, closeAllSshSessions } from './ipc/ssh-handlers'
 import { writeCrashLog, getCrashLogDir } from './crash-logger'
 import { setupAutoUpdater } from './updater'
+import { safeSendToWindow } from './window-ipc'
 
 import { createFeishuService } from './channels/providers/feishu/feishu-service'
+import { FeishuApi } from './channels/providers/feishu/feishu-api'
 import { createDingTalkService } from './channels/providers/dingtalk/dingtalk-service'
 import { createTelegramService } from './channels/providers/telegram/telegram-service'
 import { parseTelegramWsMessage } from './channels/providers/telegram/parse-ws-message'
@@ -52,6 +75,7 @@ import { createWeComService } from './channels/providers/wecom/wecom-service'
 import { parseWeComWsMessage } from './channels/providers/wecom/parse-ws-message'
 import { createQQService } from './channels/providers/qq/qq-service'
 import { parseQQWsMessage } from './channels/providers/qq/parse-ws-message'
+import { createWeixinService } from './channels/providers/weixin/weixin-service'
 import { setPluginManager } from './channels/auto-reply'
 
 const channelManager = new ChannelManager()
@@ -70,6 +94,7 @@ channelManager.registerFactory('wecom-bot', createWeComService)
 channelManager.registerParser('wecom-bot', parseWeComWsMessage)
 channelManager.registerFactory('qq-bot', createQQService)
 channelManager.registerParser('qq-bot', parseQQWsMessage)
+channelManager.registerFactory('weixin-official', createWeixinService)
 
 const mcpManager = new McpManager()
 
@@ -77,8 +102,260 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuiting = false
 
+const GENERATED_IMAGES_DIR = 'generated-images'
+const MACOS_SHELL_ENV_TIMEOUT_MS = 4000
+const SHELL_ENV_LINE_RE = /^[A-Za-z_][A-Za-z0-9_]*=/
+const SHELL_ENV_SKIP_KEYS = new Set(['PWD', 'OLDPWD', 'SHLVL', '_'])
+const SYSTEM_PROXY_ENV_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']
+
+function getEnvProxyUrl(): string | null {
+  for (const key of SYSTEM_PROXY_ENV_KEYS) {
+    const value = process.env[key]?.trim()
+    if (value) return value
+  }
+  return null
+}
+
+async function configureSystemProxy(): Promise<void> {
+  try {
+    const { readSettings } = await import('./ipc/settings-handlers')
+    const saved = readSettings().systemProxyUrl
+    const proxyUrl = (typeof saved === 'string' && saved.trim()) ? saved.trim() : getEnvProxyUrl()
+
+    await session.defaultSession.setProxy({ proxyRules: proxyUrl || '' })
+    console.log(proxyUrl ? `[Main] System proxy configured: ${proxyUrl}` : '[Main] No system proxy')
+  } catch (err) {
+    console.error('[Main] Failed to configure system proxy:', err)
+  }
+}
+
+function parseShellEnvironmentOutput(output: string): Record<string, string> {
+  const nextEnv: Record<string, string> = {}
+  const lines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+
+  for (const line of lines) {
+    if (!SHELL_ENV_LINE_RE.test(line)) continue
+    const separatorIndex = line.indexOf('=')
+    if (separatorIndex <= 0) continue
+
+    const key = line.slice(0, separatorIndex)
+    if (SHELL_ENV_SKIP_KEYS.has(key)) continue
+
+    nextEnv[key] = line.slice(separatorIndex + 1)
+  }
+
+  return nextEnv
+}
+
+async function syncMacOSShellEnvironment(): Promise<void> {
+  if (process.platform !== 'darwin') return
+
+  const shellPath = process.env.SHELL?.trim() || '/bin/zsh'
+
+  await new Promise<void>((resolve) => {
+    let settled = false
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    const child = spawn(shellPath, ['-l', '-i', '-c', '/usr/bin/env'], {
+      cwd: homedir(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env
+    })
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        finish()
+      }
+    }, MACOS_SHELL_ENV_TIMEOUT_MS)
+
+    child.stdout?.on('data', (data: Buffer) => {
+      stdout += data.toString('utf8')
+    })
+
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString('utf8')
+    })
+
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      console.warn('[Main] Failed to load macOS shell environment:', error)
+      finish()
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timer)
+
+      if (timedOut) {
+        console.warn('[Main] Timed out while loading macOS shell environment')
+        finish()
+        return
+      }
+
+      if (code !== 0) {
+        console.warn(
+          `[Main] macOS shell environment exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`
+        )
+        finish()
+        return
+      }
+
+      const shellEnv = parseShellEnvironmentOutput(stdout)
+      if (Object.keys(shellEnv).length === 0) {
+        console.warn('[Main] macOS shell environment output was empty')
+        finish()
+        return
+      }
+
+      Object.assign(process.env, shellEnv)
+      finish()
+    })
+  })
+}
+
+function getGeneratedImagesDir(): string {
+  const dir = join(app.getPath('userData'), GENERATED_IMAGES_DIR)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function guessMimeTypeFromExtension(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.webp':
+      return 'image/webp'
+    case '.gif':
+      return 'image/gif'
+    case '.bmp':
+      return 'image/bmp'
+    case '.svg':
+      return 'image/svg+xml'
+    default:
+      return 'image/png'
+  }
+}
+
+function guessExtensionFromMimeType(mediaType?: string): string {
+  switch ((mediaType || '').toLowerCase()) {
+    case 'image/jpeg':
+      return '.jpg'
+    case 'image/webp':
+      return '.webp'
+    case 'image/gif':
+      return '.gif'
+    case 'image/bmp':
+      return '.bmp'
+    case 'image/svg+xml':
+      return '.svg'
+    default:
+      return '.png'
+  }
+}
+
+function persistGeneratedImageFile(args: {
+  buffer: Buffer
+  mediaType?: string
+  sourceUrl?: string
+}): { filePath: string; mediaType: string; data: string } {
+  const urlExt = args.sourceUrl ? extname(args.sourceUrl.split('?')[0]) : ''
+  const mediaType =
+    args.mediaType && args.mediaType !== 'url'
+      ? args.mediaType
+      : guessMimeTypeFromExtension(urlExt || '.png')
+  const fileExt = urlExt || guessExtensionFromMimeType(mediaType)
+  const filePath = join(getGeneratedImagesDir(), `${Date.now()}-${randomUUID()}${fileExt}`)
+  writeFileSync(filePath, args.buffer)
+  return {
+    filePath,
+    mediaType,
+    data: args.buffer.toString('base64')
+  }
+}
+
 function recordCrash(event: string, details: unknown): void {
   writeCrashLog(event, details)
+}
+
+function getWindowDiagnosticContext(window: BrowserWindow): Record<string, unknown> {
+  const webContents = window.webContents
+  return {
+    windowId: window.id,
+    webContentsId: webContents.id,
+    url: webContents.getURL(),
+    title: window.getTitle(),
+    isVisible: window.isVisible(),
+    processId: webContents.getProcessId()
+  }
+}
+
+function attachWindowCrashLogging(window: BrowserWindow): void {
+  const webContents = window.webContents
+  let attemptedOomReload = false
+
+  webContents.on('render-process-gone', (_event, details) => {
+    const crashInfo = {
+      ...getWindowDiagnosticContext(window),
+      details
+    }
+    console.error('[Main] Window render process gone:', crashInfo)
+    recordCrash('window_render_process_gone', crashInfo)
+
+    // One automatic reload after OOM may recover a white screen; avoid loops if memory stays tight.
+    if (details.reason === 'oom' && !attemptedOomReload) {
+      attemptedOomReload = true
+      setTimeout(() => {
+        try {
+          if (window.isDestroyed()) return
+          window.reload()
+        } catch (err) {
+          console.warn('[Main] Post-OOM window reload failed:', err)
+        }
+      }, 400)
+    }
+  })
+
+  webContents.on('unresponsive', () => {
+    const hangInfo = getWindowDiagnosticContext(window)
+    console.error('[Main] Renderer became unresponsive:', hangInfo)
+    recordCrash('window_renderer_unresponsive', hangInfo)
+  })
+
+  webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3) return
+      const failInfo = {
+        ...getWindowDiagnosticContext(window),
+        validatedURL,
+        errorCode,
+        errorDescription
+      }
+      console.error('[Main] Renderer failed to load:', failInfo)
+      recordCrash('window_did_fail_load', failInfo)
+    }
+  )
+
+  webContents.on('preload-error', (_event, preloadPath, error) => {
+    const preloadInfo = {
+      ...getWindowDiagnosticContext(window),
+      preloadPath,
+      error
+    }
+    console.error('[Main] Renderer preload error:', preloadInfo)
+    recordCrash('window_preload_error', preloadInfo)
+  })
 }
 
 function configureChromiumCachePaths(): void {
@@ -93,6 +370,15 @@ function configureChromiumCachePaths(): void {
   } catch (error) {
     console.error('[Main] Failed to configure Chromium cache paths:', error)
     recordCrash('configure_chromium_cache_failed', { error })
+  }
+}
+
+/** Raise V8 old-space limit (default ~4GB) to reduce renderer OOM on long sessions. Must run before ready. */
+function configureRendererHeapLimit(): void {
+  try {
+    app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192')
+  } catch (error) {
+    console.warn('[Main] Failed to set renderer heap limit:', error)
   }
 }
 
@@ -113,14 +399,14 @@ function showMainWindow(): void {
 }
 
 function getTrayIcon() {
-  const image = nativeImage.createFromPath(icon)
-
   if (process.platform === 'darwin') {
+    const image = nativeImage.createFromPath(icon_mac)
     const resized = image.resize({ width: 18, height: 18 })
     resized.setTemplateImage(true)
     return resized
   }
 
+  const image = nativeImage.createFromPath(icon)
   return image
 }
 
@@ -206,9 +492,9 @@ function createWindow(): void {
 
   // Forward maximize state changes to renderer
 
-  window.on('maximize', () => window.webContents.send('window:maximized', true))
+  window.on('maximize', () => safeSendToWindow(window, 'window:maximized', true))
 
-  window.on('unmaximize', () => window.webContents.send('window:maximized', false))
+  window.on('unmaximize', () => safeSendToWindow(window, 'window:maximized', false))
 
   window.on('ready-to-show', () => {
     window.show()
@@ -236,44 +522,6 @@ function createWindow(): void {
 
     return { action: 'deny' }
   })
-
-  window.webContents.on('render-process-gone', (_event, details) => {
-    const crashInfo = {
-      windowId: window.id,
-      webContentsId: window.webContents.id,
-      url: window.webContents.getURL(),
-      details
-    }
-    console.error('[Main] Window render process gone:', crashInfo)
-    recordCrash('window_render_process_gone', crashInfo)
-  })
-
-  window.webContents.on('unresponsive', () => {
-    const hangInfo = {
-      windowId: window.id,
-      webContentsId: window.webContents.id,
-      url: window.webContents.getURL()
-    }
-    console.error('[Main] Renderer became unresponsive:', hangInfo)
-    recordCrash('window_renderer_unresponsive', hangInfo)
-  })
-
-  window.webContents.on(
-    'did-fail-load',
-    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-      if (!isMainFrame || errorCode === -3) return
-      const failInfo = {
-        windowId: window.id,
-        webContentsId: window.webContents.id,
-        url: window.webContents.getURL(),
-        validatedURL,
-        errorCode,
-        errorDescription
-      }
-      console.error('[Main] Renderer failed to load:', failInfo)
-      recordCrash('window_did_fail_load', failInfo)
-    }
-  )
 
   // HMR for renderer base on electron-vite cli.
 
@@ -314,6 +562,7 @@ app.on('before-quit', () => {
 })
 
 configureChromiumCachePaths()
+configureRendererHeapLimit()
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
@@ -325,12 +574,15 @@ if (gotSingleInstanceLock) {
     showMainWindow()
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // Import @electron-toolkit/utils after app is ready
     const utils = require('@electron-toolkit/utils')
     electronApp = utils.electronApp
     optimizer = utils.optimizer
     is = utils.is
+
+    await syncMacOSShellEnvironment()
+    await configureSystemProxy()
 
     recordCrash('app_started', {
       userDataPath: app.getPath('userData'),
@@ -338,7 +590,8 @@ if (gotSingleInstanceLock) {
     })
     console.log(`[CrashLogger] Logs will be written to ${getCrashLogDir()}`)
 
-    // Set app user model id for windows (required for notifications to work)
+    // Set app identity for Windows integration
+    app.setName('OpenCoWork')
     electronApp.setAppUserModelId('com.opencowork.app')
 
     // Default open or close DevTools by F12 in development
@@ -349,6 +602,7 @@ if (gotSingleInstanceLock) {
 
     app.on('browser-window-created', (_, window) => {
       optimizer.watchWindowShortcuts(window)
+      attachWindowCrashLogging(window)
     })
 
     // IPC test
@@ -371,6 +625,7 @@ if (gotSingleInstanceLock) {
     registerSkillsHandlers()
     registerAgentsHandlers()
     registerPromptsHandlers()
+    registerCommandsHandlers()
     registerProcessManagerHandlers()
     registerDbHandlers()
     registerConfigHandlers()
@@ -378,10 +633,16 @@ if (gotSingleInstanceLock) {
     registerChannelHandlers(channelManager)
     registerMcpHandlers(mcpManager)
     registerCronHandlers()
+    registerScreenshotHandlers()
+    registerInputHandlers()
     loadPersistedJobs()
     registerNotifyHandlers()
     registerWebSearchHandlers()
     registerOauthHandlers()
+    registerImageGifHandlers()
+    registerGitHandlers()
+    registerWikiHandlers()
+    registerMigrationHandlers()
 
     // Clipboard: write PNG image from base64 data
     ipcMain.handle('clipboard:write-image', (_event, args: { data: string }) => {
@@ -396,8 +657,77 @@ if (gotSingleInstanceLock) {
       }
     })
 
+    ipcMain.handle(
+      'image:persist-generated',
+      async (
+        _event,
+        args: { data?: string; mediaType?: string; url?: string }
+      ): Promise<{ filePath?: string; mediaType?: string; data?: string; error?: string }> => {
+        try {
+          let buffer: Buffer
+          if (typeof args.data === 'string' && args.data.trim()) {
+            buffer = Buffer.from(args.data, 'base64')
+          } else if (typeof args.url === 'string' && args.url.trim()) {
+            buffer = await FeishuApi.downloadUrl(args.url)
+          } else {
+            return { error: 'Missing image data or url' }
+          }
+
+          return persistGeneratedImageFile({
+            buffer,
+            mediaType: args.mediaType,
+            sourceUrl: args.url
+          })
+        } catch (err) {
+          return { error: String(err) }
+        }
+      }
+    )
+
+    ipcMain.handle('image:fetch-base64', async (_event, args: { url: string }) => {
+      try {
+        const buffer = await FeishuApi.downloadUrl(args.url)
+        const fileExt = extname(args.url.split('?')[0]).toLowerCase()
+        const mimeType =
+          fileExt === '.jpg' || fileExt === '.jpeg'
+            ? 'image/jpeg'
+            : fileExt === '.webp'
+              ? 'image/webp'
+              : fileExt === '.gif'
+                ? 'image/gif'
+                : 'image/png'
+        return { data: buffer.toString('base64'), mimeType }
+      } catch (err) {
+        return { error: String(err) }
+      }
+    })
+
+    ipcMain.handle(
+      'image:download',
+      async (_event, args: { url: string; defaultName?: string }) => {
+        const win = BrowserWindow.getFocusedWindow()
+        if (!win) return { canceled: true }
+        try {
+          const buffer = await FeishuApi.downloadUrl(args.url)
+          const rawName =
+            args.defaultName?.trim() ||
+            `image-${Date.now()}${extname(args.url.split('?')[0]) || '.png'}`
+          const result = await dialog.showSaveDialog(win, {
+            defaultPath: rawName,
+            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }]
+          })
+          if (result.canceled || !result.filePath) return { canceled: true }
+          writeFileSync(result.filePath, buffer)
+          return { success: true, filePath: result.filePath }
+        } catch (err) {
+          return { error: String(err) }
+        }
+      }
+    )
+
     // Auto-start plugins with autoStart feature enabled
     void autoStartChannels(channelManager)
+    void autoConnectMcpServers(mcpManager)
 
     createWindow()
 

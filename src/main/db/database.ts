@@ -9,20 +9,31 @@ const DB_PATH = path.join(DATA_DIR, 'data.db')
 
 let db: Database.Database | null = null
 
-function hasColumn(
-  database: Database.Database,
-  tableName: string,
-  columnName: string,
-): boolean {
+function hasColumn(database: Database.Database, tableName: string, columnName: string): boolean {
   try {
     const safeTable = tableName.replace(/"/g, '""')
-    const rows = database
-      .prepare(`PRAGMA table_info("${safeTable}")`)
-      .all() as Array<{ name: string }>
+    const rows = database.prepare(`PRAGMA table_info("${safeTable}")`).all() as Array<{
+      name: string
+    }>
     return rows.some((row) => row.name === columnName)
   } catch {
     return false
   }
+}
+
+function ensureColumn(
+  database: Database.Database,
+  tableName: string,
+  columnName: string,
+  definition: string
+): void {
+  if (hasColumn(database, tableName, columnName)) {
+    return
+  }
+
+  const safeTable = tableName.replace(/"/g, '""')
+  const safeColumn = columnName.replace(/"/g, '""')
+  database.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeColumn}" ${definition}`)
 }
 
 function sanitizeProjectName(rawName: string): string {
@@ -102,7 +113,7 @@ function ensureDefaultLocalProject(database: Database.Database): ProjectRecord {
     ssh_connection_id: null,
     plugin_id: null,
     created_at: now,
-    updated_at: now,
+    updated_at: now
   }
 
   database
@@ -133,13 +144,13 @@ function migrateSessionsToProjects(database: Database.Database): void {
         WHERE project_id IS NULL`
     )
     .all() as Array<{
-      id: string
-      working_folder: string | null
-      ssh_connection_id: string | null
-      plugin_id: string | null
-      created_at: number
-      updated_at: number
-    }>
+    id: string
+    working_folder: string | null
+    ssh_connection_id: string | null
+    plugin_id: string | null
+    created_at: number
+    updated_at: number
+  }>
 
   const defaultProject = ensureDefaultLocalProject(database)
   if (sessionsWithoutProject.length === 0) {
@@ -164,9 +175,7 @@ function migrateSessionsToProjects(database: Database.Database): void {
     `INSERT INTO projects (id, name, working_folder, ssh_connection_id, plugin_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-  const setSessionProjectStmt = database.prepare(
-    `UPDATE sessions SET project_id = ? WHERE id = ?`
-  )
+  const setSessionProjectStmt = database.prepare(`UPDATE sessions SET project_id = ? WHERE id = ?`)
   const setSessionDefaultProjectStmt = database.prepare(
     `UPDATE sessions
         SET project_id = ?,
@@ -201,7 +210,7 @@ function migrateSessionsToProjects(database: Database.Database): void {
           ssh_connection_id: session.ssh_connection_id ?? null,
           plugin_id: session.plugin_id ?? null,
           created_at: createdAt,
-          updated_at: updatedAt,
+          updated_at: updatedAt
         }
 
         insertProjectStmt.run(
@@ -246,6 +255,7 @@ export function getDb(): Database.Database {
       mode TEXT NOT NULL DEFAULT 'chat',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
+      message_count INTEGER NOT NULL DEFAULT 0,
       working_folder TEXT,
       pinned INTEGER DEFAULT 0
     );
@@ -312,8 +322,33 @@ export function getDb(): Database.Database {
   }
 
   // Migration: add provider_id and model_id columns for per-session provider binding
-  try { db.exec(`ALTER TABLE sessions ADD COLUMN provider_id TEXT`) } catch { /* exists */ }
-  try { db.exec(`ALTER TABLE sessions ADD COLUMN model_id TEXT`) } catch { /* exists */ }
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN provider_id TEXT`)
+  } catch {
+    /* exists */
+  }
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN model_id TEXT`)
+  } catch {
+    /* exists */
+  }
+
+  // Migration: add pinned column to sessions if missing
+  if (!hasColumn(db, 'sessions', 'pinned')) {
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0`)
+    } catch {
+      /* exists */
+    }
+  }
+
+  ensureColumn(db, 'sessions', 'message_count', 'INTEGER NOT NULL DEFAULT 0')
+  db.exec(
+    `UPDATE sessions
+        SET message_count = (
+          SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id
+        )`
+  )
 
   // --- Plans table ---
   db.exec(`
@@ -358,51 +393,133 @@ export function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_tasks_plan ON tasks(plan_id);
   `)
 
+  // --- Draw Runs table ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS draw_runs (
+      id TEXT PRIMARY KEY,
+      prompt TEXT NOT NULL,
+      provider_name TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'image',
+      meta_json TEXT,
+      created_at INTEGER NOT NULL,
+      is_generating INTEGER NOT NULL DEFAULT 0,
+      images_json TEXT NOT NULL DEFAULT '[]',
+      error_json TEXT,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_draw_runs_created_at ON draw_runs(created_at DESC);
+  `)
+
+  ensureColumn(db, 'draw_runs', 'mode', "TEXT NOT NULL DEFAULT 'image'")
+  ensureColumn(db, 'draw_runs', 'meta_json', 'TEXT')
+
+  // --- QQ wakeup windows table ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS qq_wakeup_windows (
+      plugin_id TEXT NOT NULL,
+      open_id TEXT NOT NULL,
+      period_key TEXT NOT NULL,
+      source_message_id TEXT,
+      source_timestamp INTEGER NOT NULL,
+      sent_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (plugin_id, open_id, period_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_qq_wakeup_windows_open_id
+      ON qq_wakeup_windows(plugin_id, open_id, sent_at DESC);
+  `)
+
   // --- Cron Jobs table ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS cron_jobs (
-      id               TEXT PRIMARY KEY,
-      name             TEXT NOT NULL,
+      id                   TEXT PRIMARY KEY,
+      name                 TEXT NOT NULL,
 
-      schedule_kind    TEXT NOT NULL,
-      schedule_at      INTEGER,
-      schedule_every   INTEGER,
-      schedule_expr    TEXT,
-      schedule_tz      TEXT DEFAULT 'UTC',
+      schedule_kind        TEXT NOT NULL,
+      schedule_at          INTEGER,
+      schedule_every       INTEGER,
+      schedule_expr        TEXT,
+      schedule_tz          TEXT DEFAULT 'UTC',
 
-      prompt           TEXT NOT NULL,
-      agent_id         TEXT,
-      model            TEXT,
-      working_folder   TEXT,
-      session_id       TEXT,
+      prompt               TEXT NOT NULL,
+      agent_id             TEXT,
+      model                TEXT,
+      working_folder       TEXT,
+      session_id           TEXT,
+      source_session_title TEXT,
+      source_project_id    TEXT,
+      source_project_name  TEXT,
+      source_provider_id   TEXT,
 
-      delivery_mode    TEXT DEFAULT 'desktop',
-      delivery_target  TEXT,
+      delivery_mode        TEXT DEFAULT 'desktop',
+      delivery_target      TEXT,
 
-      enabled          INTEGER DEFAULT 1,
-      delete_after_run INTEGER DEFAULT 0,
-      max_iterations   INTEGER DEFAULT 15,
+      enabled              INTEGER DEFAULT 1,
+      delete_after_run     INTEGER DEFAULT 0,
+      max_iterations       INTEGER DEFAULT 15,
+      deleted_at           INTEGER,
 
-      last_fired_at    INTEGER,
-      fire_count       INTEGER DEFAULT 0,
-      created_at       INTEGER NOT NULL,
-      updated_at       INTEGER NOT NULL,
+      last_fired_at        INTEGER,
+      fire_count           INTEGER DEFAULT 0,
+      created_at           INTEGER NOT NULL,
+      updated_at           INTEGER NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS cron_runs (
-      id               TEXT PRIMARY KEY,
-      job_id           TEXT NOT NULL,
-      started_at       INTEGER NOT NULL,
-      finished_at      INTEGER,
-      status           TEXT DEFAULT 'running',
-      tool_call_count  INTEGER DEFAULT 0,
-      output_summary   TEXT,
-      error            TEXT,
+      id                          TEXT PRIMARY KEY,
+      job_id                      TEXT NOT NULL,
+      started_at                  INTEGER NOT NULL,
+      finished_at                 INTEGER,
+      status                      TEXT DEFAULT 'running',
+      tool_call_count             INTEGER DEFAULT 0,
+      output_summary              TEXT,
+      error                       TEXT,
+      scheduled_for               INTEGER,
+      job_name_snapshot           TEXT,
+      prompt_snapshot             TEXT,
+      source_session_id_snapshot  TEXT,
+      source_session_title_snapshot TEXT,
+      source_project_id_snapshot  TEXT,
+      source_project_name_snapshot TEXT,
+      source_provider_id_snapshot TEXT,
+      model_snapshot              TEXT,
+      working_folder_snapshot     TEXT,
+      delivery_mode_snapshot      TEXT,
+      delivery_target_snapshot    TEXT,
       FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS cron_run_messages (
+      id            TEXT PRIMARY KEY,
+      run_id        TEXT NOT NULL,
+      role          TEXT NOT NULL,
+      content       TEXT NOT NULL,
+      usage         TEXT,
+      message_source TEXT,
+      sort_order    INTEGER NOT NULL,
+      created_at    INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES cron_runs(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS cron_run_logs (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL,
+      timestamp   INTEGER NOT NULL,
+      type        TEXT NOT NULL,
+      content     TEXT NOT NULL,
+      sort_order  INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES cron_runs(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_cron_runs_job ON cron_runs(job_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_cron_runs_started_at ON cron_runs(started_at);
+    CREATE INDEX IF NOT EXISTS idx_cron_run_messages_run ON cron_run_messages(run_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_cron_run_logs_run ON cron_run_logs(run_id, sort_order);
   `)
 
   // --- SSH Groups table ---
@@ -451,6 +568,7 @@ export function getDb(): Database.Database {
       working_folder TEXT,
       ssh_connection_id TEXT,
       plugin_id TEXT,
+      pinned INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -459,14 +577,181 @@ export function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_projects_plugin_id ON projects(plugin_id);
   `)
 
+  // --- Wiki tables ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_documents (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
+      content_markdown TEXT NOT NULL DEFAULT '',
+      generation_mode TEXT NOT NULL DEFAULT 'full',
+      last_generated_commit_id TEXT,
+      parent_id TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      level INTEGER NOT NULL DEFAULT 0,
+      is_leaf INTEGER NOT NULL DEFAULT 1,
+      source_files_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(project_id, name),
+      UNIQUE(project_id, slug),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_id) REFERENCES wiki_documents(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_sections (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      anchor TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      content_markdown TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES wiki_documents(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_section_sources (
+      id TEXT PRIMARY KEY,
+      section_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      symbol_hint TEXT,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (section_id) REFERENCES wiki_sections(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_project_state (
+      project_id TEXT PRIMARY KEY,
+      wiki_enabled INTEGER NOT NULL DEFAULT 0,
+      wiki_search_enabled INTEGER NOT NULL DEFAULT 0,
+      last_full_generated_commit_id TEXT,
+      last_incremental_generated_commit_id TEXT,
+      last_exported_at INTEGER,
+      last_generation_status TEXT NOT NULL DEFAULT 'idle',
+      last_generation_error TEXT,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_generation_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      base_commit_id TEXT,
+      head_commit_id TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      affected_documents_json TEXT NOT NULL DEFAULT '[]',
+      output_summary TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_wiki_documents_project ON wiki_documents(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wiki_sections_document ON wiki_sections(document_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_wiki_section_sources_section ON wiki_section_sources(section_id);
+    CREATE INDEX IF NOT EXISTS idx_wiki_generation_runs_project ON wiki_generation_runs(project_id, created_at DESC);
+  `)
+
+  ensureColumn(db, 'wiki_documents', 'parent_id', 'TEXT')
+  ensureColumn(db, 'wiki_documents', 'sort_order', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'wiki_documents', 'level', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'wiki_documents', 'is_leaf', 'INTEGER NOT NULL DEFAULT 1')
+  ensureColumn(db, 'wiki_documents', 'source_files_json', "TEXT NOT NULL DEFAULT '[]'")
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_wiki_documents_parent ON wiki_documents(project_id, parent_id, sort_order)'
+  )
+
+  // --- Usage Events table ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS usage_events (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL,
+      request_started_at INTEGER,
+      request_finished_at INTEGER,
+      session_id TEXT,
+      message_id TEXT,
+      project_id TEXT,
+      source_kind TEXT NOT NULL,
+      provider_id TEXT,
+      provider_name TEXT,
+      provider_type TEXT,
+      provider_builtin_id TEXT,
+      provider_base_url TEXT,
+      model_id TEXT,
+      model_name TEXT,
+      model_category TEXT,
+      request_type TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      billable_input_tokens INTEGER,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER,
+      cache_read_tokens INTEGER,
+      reasoning_tokens INTEGER,
+      context_tokens INTEGER,
+      input_price REAL,
+      output_price REAL,
+      cache_creation_price REAL,
+      cache_hit_price REAL,
+      input_cost_usd REAL,
+      output_cost_usd REAL,
+      cache_creation_cost_usd REAL,
+      cache_hit_cost_usd REAL,
+      total_cost_usd REAL,
+      ttft_ms REAL,
+      total_ms REAL,
+      tps REAL,
+      provider_response_id TEXT,
+      request_debug_json TEXT,
+      usage_raw_json TEXT,
+      meta_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_usage_events_created_at ON usage_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_provider_created_at ON usage_events(provider_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_model_created_at ON usage_events(model_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_session_created_at ON usage_events(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_source_kind ON usage_events(source_kind);
+  `)
+
+  // Migration: add pinned column to projects if missing (before creating index on it)
+  if (!hasColumn(db, 'projects', 'pinned')) {
+    try {
+      db.exec(`ALTER TABLE projects ADD COLUMN pinned INTEGER DEFAULT 0`)
+    } catch {
+      /* exists */
+    }
+  }
+  if (hasColumn(db, 'projects', 'pinned')) {
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_projects_pinned_updated_at ON projects(pinned, updated_at DESC)`
+    )
+  }
+
   // Migration: add ssh_connection_id to sessions for remote working directory
   if (!hasColumn(db, 'sessions', 'ssh_connection_id')) {
-    try { db.exec(`ALTER TABLE sessions ADD COLUMN ssh_connection_id TEXT`) } catch { /* exists */ }
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN ssh_connection_id TEXT`)
+    } catch {
+      /* exists */
+    }
   }
 
   // Migration: add project_id to sessions
   if (!hasColumn(db, 'sessions', 'project_id')) {
-    try { db.exec(`ALTER TABLE sessions ADD COLUMN project_id TEXT`) } catch { /* exists */ }
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN project_id TEXT`)
+    } catch {
+      /* exists */
+    }
   }
   if (hasColumn(db, 'sessions', 'project_id')) {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id)`)
@@ -474,20 +759,108 @@ export function getDb(): Database.Database {
     console.warn('[DB] Skip idx_sessions_project_id: sessions.project_id is missing')
   }
 
+  if (!hasColumn(db, 'sessions', 'long_running_mode')) {
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN long_running_mode INTEGER DEFAULT 0`)
+    } catch {
+      /* exists */
+    }
+  }
+
   // Backfill projects and project_id for legacy sessions
   migrateSessionsToProjects(db)
 
-  // Migration: add plugin columns to cron_jobs if missing
-  try { db.exec(`ALTER TABLE cron_jobs ADD COLUMN plugin_id TEXT`) } catch { /* exists */ }
-  try { db.exec(`ALTER TABLE cron_jobs ADD COLUMN plugin_chat_id TEXT`) } catch { /* exists */ }
-  if (!hasColumn(db, 'cron_jobs', 'session_id')) {
-    try { db.exec(`ALTER TABLE cron_jobs ADD COLUMN session_id TEXT`) } catch { /* ignore */ }
+  // Migration: add plugin/source/delete columns to cron_jobs if missing
+  try {
+    db.exec(`ALTER TABLE cron_jobs ADD COLUMN plugin_id TEXT`)
+  } catch {
+    /* exists */
+  }
+  try {
+    db.exec(`ALTER TABLE cron_jobs ADD COLUMN plugin_chat_id TEXT`)
+  } catch {
+    /* exists */
+  }
+  const cronJobColumns = [
+    'session_id',
+    'source_session_title',
+    'source_project_id',
+    'source_project_name',
+    'source_provider_id',
+    'deleted_at'
+  ] as const
+  for (const column of cronJobColumns) {
+    if (!hasColumn(db, 'cron_jobs', column)) {
+      try {
+        db.exec(
+          `ALTER TABLE cron_jobs ADD COLUMN ${column} ${column === 'deleted_at' ? 'INTEGER' : 'TEXT'}`
+        )
+      } catch {
+        /* ignore */
+      }
+    }
   }
   if (hasColumn(db, 'cron_jobs', 'session_id')) {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_cron_jobs_session ON cron_jobs(session_id)`)
   } else {
     console.warn('[DB] Skip idx_cron_jobs_session: cron_jobs.session_id is missing')
   }
+  if (hasColumn(db, 'cron_jobs', 'deleted_at')) {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_cron_jobs_deleted_at ON cron_jobs(deleted_at)`)
+  }
+
+  // Migration: add snapshot columns to cron_runs if missing
+  const cronRunColumns: Array<{ name: string; type: string }> = [
+    { name: 'scheduled_for', type: 'INTEGER' },
+    { name: 'job_name_snapshot', type: 'TEXT' },
+    { name: 'prompt_snapshot', type: 'TEXT' },
+    { name: 'source_session_id_snapshot', type: 'TEXT' },
+    { name: 'source_session_title_snapshot', type: 'TEXT' },
+    { name: 'source_project_id_snapshot', type: 'TEXT' },
+    { name: 'source_project_name_snapshot', type: 'TEXT' },
+    { name: 'source_provider_id_snapshot', type: 'TEXT' },
+    { name: 'model_snapshot', type: 'TEXT' },
+    { name: 'working_folder_snapshot', type: 'TEXT' },
+    { name: 'delivery_mode_snapshot', type: 'TEXT' },
+    { name: 'delivery_target_snapshot', type: 'TEXT' }
+  ]
+  for (const column of cronRunColumns) {
+    if (!hasColumn(db, 'cron_runs', column.name)) {
+      try {
+        db.exec(`ALTER TABLE cron_runs ADD COLUMN ${column.name} ${column.type}`)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cron_runs_started_at ON cron_runs(started_at)`)
+
+  // Migration: ensure transcript/log tables exist for cron runs
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cron_run_messages (
+      id             TEXT PRIMARY KEY,
+      run_id         TEXT NOT NULL,
+      role           TEXT NOT NULL,
+      content        TEXT NOT NULL,
+      usage          TEXT,
+      message_source TEXT,
+      sort_order     INTEGER NOT NULL,
+      created_at     INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES cron_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cron_run_messages_run ON cron_run_messages(run_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS cron_run_logs (
+      id         TEXT PRIMARY KEY,
+      run_id     TEXT NOT NULL,
+      timestamp  INTEGER NOT NULL,
+      type       TEXT NOT NULL,
+      content    TEXT NOT NULL,
+      sort_order INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES cron_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cron_run_logs_run ON cron_run_logs(run_id, sort_order);
+  `)
 
   return db
 }

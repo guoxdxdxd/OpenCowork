@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { X, Code2, Eye, RefreshCw, Save, Copy, Check, Bot } from 'lucide-react'
+import { X, Code2, Eye, RefreshCw, Save, Copy, Check, Bot, ExternalLink } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { useFileWatcher } from '@renderer/hooks/use-file-watcher'
 import { viewerRegistry } from '@renderer/lib/preview/viewer-registry'
-import { createMarkdownComponents } from '@renderer/lib/preview/viewers/markdown-viewer'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { createMarkdownComponents } from '@renderer/lib/preview/viewers/markdown-components'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,10 +18,10 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
-  AlertDialogTitle,
+  AlertDialogTitle
 } from '@renderer/components/ui/alert-dialog'
 
-export function PreviewPanel(): React.JSX.Element {
+export function PreviewPanel({ embedded = false }: { embedded?: boolean }): React.JSX.Element {
   const { t } = useTranslation('layout')
   const state = useUIStore((s) => s.previewPanelState)
   const closePreviewPanel = useUIStore((s) => s.closePreviewPanel)
@@ -34,15 +34,12 @@ export function PreviewPanel(): React.JSX.Element {
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [pendingClose, setPendingClose] = useState(false)
 
-  const handleContentChange = useCallback(
-    (newContent: string) => {
-      setContent(newContent)
-      setModified(true)
-    },
-    [setContent]
-  )
+  const handleContentChange = (newContent: string): void => {
+    setContent(newContent)
+    setModified(true)
+  }
 
-  const handleSave = useCallback(async () => {
+  const handleSave = async (): Promise<void> => {
     if (!state?.filePath) return
     try {
       const channel = state.sshConnectionId ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
@@ -54,43 +51,52 @@ export function PreviewPanel(): React.JSX.Element {
     } catch (err) {
       console.error('[PreviewPanel] Save failed:', err)
     }
-  }, [state?.filePath, state?.sshConnectionId, content])
+  }
 
-  const handleClose = useCallback(() => {
+  const handleOpenInSystem = async (): Promise<void> => {
+    if (!state?.filePath || state.sshConnectionId) return
+    try {
+      await ipcClient.invoke(IPC.SHELL_OPEN_PATH, state.filePath)
+    } catch (err) {
+      console.error('[PreviewPanel] Open in system app failed:', err)
+    }
+  }
+
+  const handleClose = (): void => {
     if (modified) {
       setPendingClose(true)
       setShowSaveDialog(true)
     } else {
       closePreviewPanel()
     }
-  }, [modified, closePreviewPanel])
+  }
 
-  const handleSaveDialogConfirm = useCallback(async () => {
+  const handleSaveDialogConfirm = async (): Promise<void> => {
     await handleSave()
     setShowSaveDialog(false)
     if (pendingClose) {
       setPendingClose(false)
       closePreviewPanel()
     }
-  }, [handleSave, pendingClose, closePreviewPanel])
+  }
 
-  const handleSaveDialogDiscard = useCallback(() => {
+  const handleSaveDialogDiscard = (): void => {
     setShowSaveDialog(false)
     setModified(false)
     if (pendingClose) {
       setPendingClose(false)
       closePreviewPanel()
     }
-  }, [pendingClose, closePreviewPanel])
+  }
 
   const [copied, setCopied] = useState(false)
-  const handleCopyMarkdown = useCallback(() => {
+  const handleCopyMarkdown = (): void => {
     if (state?.markdownContent) {
       navigator.clipboard.writeText(state.markdownContent)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     }
-  }, [state?.markdownContent])
+  }
 
   // --- Resize logic ---
   const MIN_WIDTH = 320
@@ -102,13 +108,16 @@ export function PreviewPanel(): React.JSX.Element {
   const startWidthRef = useRef(DEFAULT_WIDTH)
   const [isDragging, setIsDragging] = useState(false)
 
-  const onResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    draggingRef.current = true
-    startXRef.current = e.clientX
-    startWidthRef.current = panelWidth
-    setIsDragging(true)
-  }, [panelWidth])
+  const onResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      draggingRef.current = true
+      startXRef.current = e.clientX
+      startWidthRef.current = panelWidth
+      setIsDragging(true)
+    },
+    [panelWidth]
+  )
 
   useEffect(() => {
     if (!isDragging) return
@@ -136,18 +145,27 @@ export function PreviewPanel(): React.JSX.Element {
   const ViewerComponent = viewerDef?.component
 
   const fileName = isMarkdown
-    ? (state.markdownTitle || t('preview.markdownPreview'))
-    : state.filePath ? state.filePath.split(/[\/\\]/).pop() || state.filePath : t('preview.devServer')
+    ? state.markdownTitle || t('preview.markdownPreview')
+    : state.filePath
+      ? state.filePath.split(/[\\/]/).pop() || state.filePath
+      : t('preview.devServer')
+  const canOpenInSystem =
+    !isMarkdown && state.source === 'file' && !!state.filePath && !state.sshConnectionId
 
   return (
-    <div className="relative flex min-w-0 h-full flex-col border-l bg-background" style={{ width: panelWidth }}>
+    <div
+      className="relative flex min-h-0 h-full min-w-0 flex-col bg-background"
+      style={embedded ? undefined : { width: panelWidth }}
+    >
       {/* Left-edge resize handle */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-20 hover:bg-primary/20 active:bg-primary/30 transition-colors"
-        onMouseDown={onResizeStart}
-      />
+      {!embedded && (
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-20 hover:bg-primary/20 active:bg-primary/30 transition-colors"
+          onMouseDown={onResizeStart}
+        />
+      )}
       {/* Overlay to prevent iframe from stealing mouse events during drag */}
-      {isDragging && <div className="absolute inset-0 z-10" />}
+      {isDragging && !embedded && <div className="absolute inset-0 z-10" />}
       {/* Header */}
       <div className="flex h-10 items-center gap-2 border-b px-3">
         {isMarkdown && <Bot className="size-3.5 text-violet-500 shrink-0" />}
@@ -156,30 +174,36 @@ export function PreviewPanel(): React.JSX.Element {
         <div className="flex-1" />
 
         {/* View mode toggle (file HTML / Markdown) */}
-        {state.source === 'file' && (state.viewerType === 'html' || state.viewerType === 'markdown') && (
-          <div className="flex items-center rounded-md border p-0.5">
-            <Button
-              variant={state.viewMode === 'preview' ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-5 gap-1 px-2 text-[10px]"
-              onClick={() => setViewMode('preview')}
-            >
-              <Eye className="size-3" /> {t('preview.preview')}
-            </Button>
-            <Button
-              variant={state.viewMode === 'code' ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-5 gap-1 px-2 text-[10px]"
-              onClick={() => setViewMode('code')}
-            >
-              <Code2 className="size-3" /> {t('preview.code')}
-            </Button>
-          </div>
-        )}
+        {state.source === 'file' &&
+          (state.viewerType === 'html' || state.viewerType === 'markdown') && (
+            <div className="flex items-center rounded-md border p-0.5">
+              <Button
+                variant={state.viewMode === 'preview' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-5 gap-1 px-2 text-[10px]"
+                onClick={() => setViewMode('preview')}
+              >
+                <Eye className="size-3" /> {t('preview.preview')}
+              </Button>
+              <Button
+                variant={state.viewMode === 'code' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-5 gap-1 px-2 text-[10px]"
+                onClick={() => setViewMode('code')}
+              >
+                <Code2 className="size-3" /> {t('preview.code')}
+              </Button>
+            </div>
+          )}
 
         {/* Markdown copy button */}
         {isMarkdown && (
-          <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-xs" onClick={handleCopyMarkdown}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs"
+            onClick={handleCopyMarkdown}
+          >
             {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
             {copied ? t('preview.copied') : t('action.copy', { ns: 'common' })}
           </Button>
@@ -196,32 +220,50 @@ export function PreviewPanel(): React.JSX.Element {
             <RefreshCw className="size-3" />
           </Button>
         )}
-        <Button variant="ghost" size="sm" className="h-6 px-1" onClick={handleClose}>
+        {canOpenInSystem && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs"
+            onClick={handleOpenInSystem}
+          >
+            <ExternalLink className="size-3" />
+            {t('preview.openInSystem')}
+          </Button>
+        )}
+        <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-xs" onClick={handleClose}>
           <X className="size-3.5" />
+          {t('action.close', { ns: 'common' })}
         </Button>
       </div>
 
       {/* Viewer content */}
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {isMarkdown ? (
           <div className="size-full overflow-y-auto p-6">
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={createMarkdownComponents()}
-              >
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents()}>
                 {state.markdownContent || ''}
               </ReactMarkdown>
             </div>
           </div>
         ) : ViewerComponent ? (
-          <ViewerComponent
-            filePath={state.filePath}
-            content={content}
-            viewMode={state.viewMode}
-            onContentChange={handleContentChange}
-            sshConnectionId={state.sshConnectionId}
-          />
+          <Suspense
+            fallback={
+              <div className="flex size-full items-center justify-center gap-2 text-sm text-muted-foreground">
+                <RefreshCw className="size-4 animate-spin" />
+                Loading preview...
+              </div>
+            }
+          >
+            <ViewerComponent
+              filePath={state.filePath}
+              content={content}
+              viewMode={state.viewMode}
+              onContentChange={handleContentChange}
+              sshConnectionId={state.sshConnectionId}
+            />
+          </Suspense>
         ) : (
           <div className="flex size-full items-center justify-center text-sm text-muted-foreground">
             {t('preview.noViewer')}
@@ -239,8 +281,12 @@ export function PreviewPanel(): React.JSX.Element {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={handleSaveDialogDiscard}>{t('preview.discard')}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleSaveDialogConfirm}>{t('action.save', { ns: 'common' })}</AlertDialogAction>
+            <AlertDialogCancel onClick={handleSaveDialogDiscard}>
+              {t('preview.discard')}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleSaveDialogConfirm}>
+              {t('action.save', { ns: 'common' })}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
