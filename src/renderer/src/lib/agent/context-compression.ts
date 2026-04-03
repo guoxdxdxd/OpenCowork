@@ -28,8 +28,15 @@ export const DEFAULT_CONTEXT_COMPRESSION_THRESHOLD = 0.8
 export const MIN_CONTEXT_COMPRESSION_THRESHOLD = 0.3
 export const MAX_CONTEXT_COMPRESSION_THRESHOLD = 0.9
 
+/** Number of recent messages to preserve after full compression */
+const PRESERVE_RECENT_COUNT = 4
 /** Pre-compression: keep tool results from last N messages */
 const TOOL_RESULT_KEEP_RECENT = 6
+/** Max retry attempts for compression failures */
+const MAX_COMPRESS_RETRIES = 2
+/** Max consecutive auto-compact failures before circuit-breaking */
+const MAX_CONSECUTIVE_FAILURES = 3
+
 /** Placeholder for cleared tool results */
 const CLEARED_TOOL_RESULT_PLACEHOLDER = i18n.t('contextCompression.clearedToolResult', {
   ns: 'agent'
@@ -37,6 +44,13 @@ const CLEARED_TOOL_RESULT_PLACEHOLDER = i18n.t('contextCompression.clearedToolRe
 /** Placeholder for cleared thinking blocks */
 const CLEARED_THINKING_PLACEHOLDER = i18n.t('contextCompression.clearedThinking', { ns: 'agent' })
 const COMPRESSION_SYSTEM_PROMPT = i18n.t('contextCompression.systemPrompt', { ns: 'agent' })
+
+/** Circuit breaker: track consecutive failures (module-level, resets on success) */
+let consecutiveFailures = 0
+
+export function resetCompressionFailures(): void {
+  consecutiveFailures = 0
+}
 
 // --- Public API ---
 
@@ -75,9 +89,11 @@ export function resolveCompressionContextLength(
 
 /**
  * Check whether full compression should be triggered.
+ * Includes circuit breaker: after MAX_CONSECUTIVE_FAILURES, stops triggering.
  */
 export function shouldCompress(inputTokens: number, config: CompressionConfig): boolean {
   if (!config.enabled || config.contextLength <= 0) return false
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return false
   return inputTokens / config.contextLength >= config.threshold
 }
 
@@ -93,7 +109,8 @@ export function shouldPreCompress(inputTokens: number, config: CompressionConfig
 }
 
 /**
- * Lightweight pre-compression: clear stale tool results and old thinking blocks.
+ * Lightweight pre-compression: clear stale tool results, old thinking blocks, and
+ * replace image/document blocks with markers in older messages.
  * No API call needed — just truncates content in-place.
  * Returns a new message array with stale content cleared.
  */
@@ -122,6 +139,11 @@ export function preCompressMessages(messages: UnifiedMessage[]): UnifiedMessage[
         changed = true
         return { ...block, thinking: CLEARED_THINKING_PLACEHOLDER }
       }
+      // Replace image blocks with marker to save tokens
+      if (block.type === 'image') {
+        changed = true
+        return { type: 'text', text: '[image]' } as ContentBlock
+      }
       return block
     })
 
@@ -130,10 +152,14 @@ export function preCompressMessages(messages: UnifiedMessage[]): UnifiedMessage[
 }
 
 /**
- * Compress messages into a single structured memory message.
+ * Compress messages while preserving recent conversation context.
  *
- * The resulting history is replaced by exactly one user message so future turns
- * continue from a single compressed context.
+ * Unlike the previous approach that collapsed everything into 1 message,
+ * this keeps the last PRESERVE_RECENT_COUNT messages intact and only
+ * summarizes the older portion. The boundary is adjusted to avoid splitting
+ * tool_use/tool_result pairs.
+ *
+ * Result: [boundaryMarker, summaryMessage, ...preservedRecentMessages]
  */
 export async function compressMessages(
   messages: UnifiedMessage[],
@@ -145,44 +171,183 @@ export async function compressMessages(
 ): Promise<{ messages: UnifiedMessage[]; result: CompressionResult }> {
   const originalCount = messages.length
 
-  if (originalCount < 2) {
+  if (originalCount < PRESERVE_RECENT_COUNT + 2) {
     return {
       messages,
       result: { compressed: false, originalCount, newCount: originalCount }
     }
   }
 
-  const originalTaskMsg = findOriginalTaskMessage(messages)
-  const serialized = serializeCompressionInput(messages, originalTaskMsg?.content, pinnedContext)
-  const summary = await callSummarizer(serialized, providerConfig, signal, focusPrompt)
+  // Find safe boundary that doesn't split tool_use/tool_result pairs
+  const preserveCount = _preserveCount ?? PRESERVE_RECENT_COUNT
+  const boundaryIdx = findSafeCompactBoundary(messages, messages.length - preserveCount)
 
-  const summaryMsg: UnifiedMessage = {
-    id: nanoid(),
-    role: 'user',
-    content: i18n.t('contextCompression.summaryMessage', {
-      ns: 'agent',
-      count: originalCount,
-      summary
-    }),
-    createdAt: Date.now()
-  }
+  const messagesToCompress = messages.slice(0, boundaryIdx)
+  const messagesToPreserve = messages.slice(boundaryIdx)
 
-  return {
-    messages: [summaryMsg],
-    result: {
-      compressed: true,
-      originalCount,
-      newCount: 1
+  if (messagesToCompress.length < 2) {
+    return {
+      messages,
+      result: { compressed: false, originalCount, newCount: originalCount }
     }
   }
+
+  // Retry logic with exponential backoff
+  let lastError: Error | null = null
+  for (let attempt = 0; attempt <= MAX_COMPRESS_RETRIES; attempt++) {
+    try {
+      const inputMessages = attempt === 0
+        ? messagesToCompress
+        : truncateOldestMessages(messagesToCompress, attempt)
+
+      const originalTaskMsg = findOriginalTaskMessage(inputMessages)
+      const serialized = serializeCompressionInput(inputMessages, originalTaskMsg?.content, pinnedContext)
+      const rawSummary = await callSummarizer(serialized, providerConfig, signal, focusPrompt)
+      const summary = formatCompactSummary(rawSummary)
+
+      // Create summary message (boundary info encoded in the summary itself)
+      const summaryMsg: UnifiedMessage = {
+        id: nanoid(),
+        role: 'user',
+        content: i18n.t('contextCompression.summaryMessage', {
+          ns: 'agent',
+          count: messagesToCompress.length,
+          summary
+        }),
+        createdAt: Date.now()
+      }
+
+      // Reset circuit breaker on success
+      consecutiveFailures = 0
+
+      const newMessages = [summaryMsg, ...messagesToPreserve]
+      return {
+        messages: newMessages,
+        result: {
+          compressed: true,
+          originalCount,
+          newCount: newMessages.length
+        }
+      }
+    } catch (err) {
+      lastError = err as Error
+      console.error(`[Context Compression] Attempt ${attempt + 1} failed:`, err)
+      if (attempt < MAX_COMPRESS_RETRIES) {
+        // Exponential backoff: 1.5s, 3s
+        await new Promise((r) => setTimeout(r, BASE_RETRY_DELAY_MS * Math.pow(2, attempt)))
+      }
+    }
+  }
+
+  // All retries exhausted — increment circuit breaker
+  consecutiveFailures++
+  console.error(
+    `[Context Compression] All retries failed (consecutive: ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`,
+    lastError
+  )
+
+  return {
+    messages,
+    result: { compressed: false, originalCount, newCount: originalCount }
+  }
 }
+
+const BASE_RETRY_DELAY_MS = 1_500
 
 // --- Internal helpers ---
 
 /**
- * Find a clean Zone B start boundary that doesn't split tool exchanges.
- * Walk backwards from the initial boundary until no tool_result blocks reference
- * tool_use IDs that would be outside Zone B (i.e. in the compression zone).
+ * Find a safe boundary index that doesn't split tool_use/tool_result pairs.
+ * Walks backward from initialBoundary until we find a point where no
+ * tool_result in the preserved portion references a tool_use in the compressed portion.
+ */
+function findSafeCompactBoundary(messages: UnifiedMessage[], initialBoundary: number): number {
+  let boundary = Math.max(1, Math.min(initialBoundary, messages.length - 1))
+
+  // Collect tool_use IDs in the compressed portion (before boundary)
+  // and tool_result references in the preserved portion (at/after boundary)
+  for (let attempts = 0; attempts < 10; attempts++) {
+    const compressedToolUseIds = new Set<string>()
+    for (let i = 0; i < boundary; i++) {
+      const msg = messages[i]
+      if (typeof msg.content === 'string') continue
+      for (const block of msg.content as ContentBlock[]) {
+        if (block.type === 'tool_use' && block.id) {
+          compressedToolUseIds.add(block.id)
+        }
+      }
+    }
+
+    // Check if any preserved message references a compressed tool_use
+    let hasSplit = false
+    for (let i = boundary; i < messages.length; i++) {
+      const msg = messages[i]
+      if (typeof msg.content === 'string') continue
+      for (const block of msg.content as ContentBlock[]) {
+        if (block.type === 'tool_result' && block.toolUseId && compressedToolUseIds.has(block.toolUseId)) {
+          hasSplit = true
+          break
+        }
+      }
+      if (hasSplit) break
+    }
+
+    if (!hasSplit) return boundary
+
+    // Move boundary back to include the orphaned tool_use
+    boundary = Math.max(1, boundary - 1)
+  }
+
+  return boundary
+}
+
+/**
+ * Truncate oldest non-system messages for retry attempts.
+ * Each attempt drops ~25% of messages from the front.
+ */
+function truncateOldestMessages(messages: UnifiedMessage[], attempt: number): UnifiedMessage[] {
+  const dropCount = Math.ceil(messages.length * 0.25 * attempt)
+  const result: UnifiedMessage[] = []
+  let dropped = 0
+  for (const msg of messages) {
+    if (msg.role === 'system' || msg.role === 'user' && msg === messages[0]) {
+      result.push(msg) // Always keep system/first message
+      continue
+    }
+    if (dropped < dropCount) {
+      dropped++
+      continue
+    }
+    result.push(msg)
+  }
+  return result.length >= 2 ? result : messages
+}
+
+/**
+ * Strip <analysis> drafting scratchpad and extract <summary> content.
+ * The analysis phase improves summary quality but has no value in the final context.
+ */
+function formatCompactSummary(rawSummary: string): string {
+  let result = rawSummary
+
+  // Strip analysis section
+  result = result.replace(/<analysis>[\s\S]*?<\/analysis>/i, '')
+
+  // Extract summary content if wrapped in tags
+  const summaryMatch = result.match(/<summary>([\s\S]*?)<\/summary>/i)
+  if (summaryMatch) {
+    result = summaryMatch[1] || ''
+  }
+
+  // Clean up whitespace
+  result = result.replace(/\n\n+/g, '\n\n').trim()
+
+  return result
+}
+
+/**
+ * Serialize messages into a structured text representation for the summarizer.
+ * Includes original task, pinned context (plan), and full conversation history.
  */
 function serializeCompressionInput(
   messages: UnifiedMessage[],
@@ -357,6 +522,12 @@ async function callSummarizer(
   result = result.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
 
   if (!result) {
+    throw new Error(i18n.t('contextCompression.emptyResultError', { ns: 'agent' }))
+  }
+
+  // Validate that we got a meaningful summary (not just tags)
+  const stripped = result.replace(/<\/?(?:analysis|summary)>/gi, '').trim()
+  if (!stripped) {
     throw new Error(i18n.t('contextCompression.emptyResultError', { ns: 'agent' }))
   }
 

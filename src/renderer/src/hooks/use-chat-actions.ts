@@ -190,15 +190,67 @@ function extractToolResultText(content?: ToolResultContent): string {
     .trim()
 }
 
+function extractApiErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null
+
+  const record = payload as Record<string, unknown>
+  if (typeof record.message === 'string' && record.message.trim()) {
+    return record.message.trim()
+  }
+
+  const error = record.error
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim()
+  }
+
+  if (error && typeof error === 'object') {
+    const nestedError = error as Record<string, unknown>
+    if (typeof nestedError.message === 'string' && nestedError.message.trim()) {
+      return nestedError.message.trim()
+    }
+    if (typeof nestedError.error === 'string' && nestedError.error.trim()) {
+      return nestedError.error.trim()
+    }
+  }
+
+  return null
+}
+
+function parseJsonErrorCandidate(candidate: string): unknown | null {
+  const trimmed = candidate.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return null
+  }
+}
+
 function normalizeContinuationErrorMessage(message: string): string {
   const trimmed = message.trim()
   if (!trimmed) return 'Tool continuation failed'
 
-  if (/No tool output found for function call/i.test(trimmed)) {
-    return `继续执行失败：模型要求补交之前 function call 的 tool 输出，但当前会话里没有对应结果。原始错误：${trimmed}`
+  const withoutHttpPrefix = trimmed.replace(/^HTTP\s+\d{3}:\s*/i, '').trim()
+  const withoutProviderPrefix = withoutHttpPrefix
+    .replace(/^(?:OpenAI response error|Response error|API error):\s*/i, '')
+    .trim()
+
+  for (const candidate of [withoutProviderPrefix, withoutHttpPrefix, trimmed]) {
+    const parsed = parseJsonErrorCandidate(candidate)
+    const extracted = extractApiErrorMessage(parsed)
+    if (!extracted) continue
+    if (/No tool output found for function call/i.test(extracted)) {
+      return '模型要求补交之前 function call 的 tool 输出，但当前会话里没有对应结果'
+    }
+    return extracted
   }
 
-  return trimmed
+  if (/No tool output found for function call/i.test(withoutProviderPrefix)) {
+    return '模型要求补交之前 function call 的 tool 输出，但当前会话里没有对应结果'
+  }
+
+  return withoutProviderPrefix || withoutHttpPrefix || trimmed
 }
 
 function reconcileSubAgentCompletionFromTaskToolCall(
@@ -2821,18 +2873,25 @@ export function useChatActions(): {
                 })
                 break
 
-              case 'error':
+              case 'error': {
                 streamDeltaBuffer.flushNow()
+                const errorMessage = normalizeContinuationErrorMessage(event.error.message)
                 console.error('[Agent Loop Error]', event.error)
-                toast.error('Agent Error', { description: event.error.message })
+                toast.error('Agent Error', { description: errorMessage })
+                useChatStore
+                  .getState()
+                  .appendTextDelta(sessionId!, assistantMsgId, `\n\n> **Error:** ${errorMessage}`)
                 break
+              }
             }
           }
         } catch (err) {
           streamDeltaBuffer?.flushNow()
           console.error('[Agent Loop Exception]', err)
           if (!abortController.signal.aborted) {
-            const errMsg = err instanceof Error ? err.message : String(err)
+            const errMsg = normalizeContinuationErrorMessage(
+              err instanceof Error ? err.message : String(err)
+            )
             console.error('[Agent Loop Exception]', err)
             toast.error('Agent failed', { description: errMsg })
             useChatStore
@@ -3170,18 +3229,17 @@ export function useChatActions(): {
       handedOffToSendMessage = true
       await sendMessage('', undefined, 'continue', sessionId, undefined, resumedAssistantMessageId)
     } catch (err) {
-      const normalizedMessage = normalizeContinuationErrorMessage(
-        err instanceof Error ? err.message : String(err)
-      )
+      const rawMessage = err instanceof Error ? err.message : String(err)
+      const normalizedMessage = normalizeContinuationErrorMessage(rawMessage)
+      const apiErrorDetail =
+        rawMessage.includes('{') && rawMessage.includes('}')
+          ? normalizeContinuationErrorMessage(rawMessage.replace(/^.*?(\{.*\})\s*$/s, '$1'))
+          : normalizedMessage
       console.error('[Continue Tool Execution]', err)
-      toast.error('继续执行失败', { description: normalizedMessage })
+      toast.error('继续执行失败', { description: apiErrorDetail })
       useChatStore
         .getState()
-        .appendTextDelta(
-          sessionId,
-          resumedAssistantMessageId,
-          `\n\n> **Error:** ${normalizedMessage}`
-        )
+        .appendTextDelta(sessionId, resumedAssistantMessageId, `\n\n> **Error:** ${apiErrorDetail}`)
     } finally {
       if (!handedOffToSendMessage) {
         if (useChatStore.getState().streamingMessages[sessionId] === resumedAssistantMessageId) {
