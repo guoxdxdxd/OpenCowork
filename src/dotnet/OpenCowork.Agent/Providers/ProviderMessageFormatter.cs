@@ -523,20 +523,14 @@ internal static class ProviderMessageFormatter
                 {
                     ["type"] = "tool_result",
                     ["tool_use_id"] = toolResult.ToolUseId,
-                    ["content"] = ToJsonNode(toolResult.GetContentValue())
+                    ["content"] = FormatAnthropicToolResultContent(toolResult.GetContentValue())
                 };
                 return true;
             case ImageBlock image:
                 node = new JsonObject
                 {
                     ["type"] = "image",
-                    ["source"] = new JsonObject
-                    {
-                        ["type"] = image.Source.Type,
-                        ["media_type"] = image.Source.MediaType,
-                        ["data"] = image.Source.Data,
-                        ["url"] = image.Source.Url
-                    }
+                    ["source"] = BuildAnthropicImageSource(image)
                 };
                 return true;
             default:
@@ -584,6 +578,146 @@ internal static class ProviderMessageFormatter
     private static JsonNode FormatOpenAiToolResultContent(object? content)
     {
         return ToJsonNode(content) ?? JsonValue.Create(string.Empty)!;
+    }
+
+    private static JsonNode FormatAnthropicToolResultContent(object? content)
+    {
+        return content switch
+        {
+            null => JsonValue.Create(string.Empty)!,
+            string text => ParseJsonString(text),
+            JsonElement element => FormatAnthropicToolResultContent(element),
+            JsonNode node => FormatAnthropicToolResultContent(node),
+            IEnumerable<ContentBlock> blocks => FormatAnthropicToolResultContent(blocks.ToList()),
+            _ => ParseJsonString(JsonSerializer.Serialize(content))
+        };
+    }
+
+    private static JsonNode FormatAnthropicToolResultContent(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+            return ParseJsonString(element.GetString() ?? string.Empty);
+
+        if (element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return JsonValue.Create(string.Empty)!;
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            try
+            {
+                var blocks = ContentBlockJson.DeserializeList(element);
+                if (blocks.Count == element.GetArrayLength()
+                    && TryFormatAnthropicToolResultBlocks(blocks, out var array))
+                {
+                    return array;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return ParseJsonString(element.GetRawText());
+    }
+
+    private static JsonNode FormatAnthropicToolResultContent(JsonNode node)
+    {
+        if (node is null)
+            return JsonValue.Create(string.Empty)!;
+
+        if (node is JsonValue value && TryReadJsonString(value, out var text))
+            return ParseJsonString(text);
+
+        try
+        {
+            var element = JsonSerializer.Deserialize(node.ToJsonString(), AppJsonContext.Default.JsonElement);
+            return FormatAnthropicToolResultContent(element);
+        }
+        catch
+        {
+            return ParseJsonString(node.ToJsonString());
+        }
+    }
+
+    private static JsonNode FormatAnthropicToolResultContent(List<ContentBlock> blocks)
+    {
+        return TryFormatAnthropicToolResultBlocks(blocks, out var array)
+            ? array
+            : ParseJsonString(SerializeToolResultContent(blocks));
+    }
+
+    private static bool TryFormatAnthropicToolResultBlocks(
+        IEnumerable<ContentBlock> blocks,
+        out JsonArray array)
+    {
+        array = new JsonArray();
+        foreach (var block in blocks)
+        {
+            if (!TryFormatAnthropicToolResultBlock(block, out var node) || node is null)
+            {
+                array = new JsonArray();
+                return false;
+            }
+
+            array.Add(node);
+        }
+
+        return true;
+    }
+
+    private static bool TryFormatAnthropicToolResultBlock(ContentBlock block, out JsonNode? node)
+    {
+        switch (block)
+        {
+            case TextBlock text:
+                node = new JsonObject
+                {
+                    ["type"] = "text",
+                    ["text"] = text.Text
+                };
+                return true;
+            case ImageBlock image when (image.Source.Type == "base64" && !string.IsNullOrWhiteSpace(image.Source.Data))
+                || (image.Source.Type == "url" && !string.IsNullOrWhiteSpace(image.Source.Url)):
+                node = new JsonObject
+                {
+                    ["type"] = "image",
+                    ["source"] = BuildAnthropicImageSource(image)
+                };
+                return true;
+            default:
+                node = null;
+                return false;
+        }
+    }
+
+    private static JsonObject BuildAnthropicImageSource(ImageBlock image)
+    {
+        var source = new JsonObject
+        {
+            ["type"] = image.Source.Type
+        };
+
+        if (!string.IsNullOrWhiteSpace(image.Source.MediaType))
+            source["media_type"] = image.Source.MediaType;
+
+        if (image.Source.Type == "base64")
+            source["data"] = image.Source.Data;
+        else if (image.Source.Type == "url")
+            source["url"] = image.Source.Url;
+
+        return source;
+    }
+
+    private static bool TryReadJsonString(JsonValue value, out string text)
+    {
+        if (value.TryGetValue<string>(out var stringValue))
+        {
+            text = stringValue;
+            return true;
+        }
+
+        text = string.Empty;
+        return false;
     }
 
     private static bool TryFormatGeminiPart(

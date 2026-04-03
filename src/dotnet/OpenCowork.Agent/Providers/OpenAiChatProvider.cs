@@ -126,20 +126,35 @@ public sealed class OpenAiChatProvider : ILlmProvider
             }, null, 1500, Timeout.Infinite);
         }
 
+        await using var chunkEnumerator = SseStreamReader.ReadAsync<OpenAiChatChunk>(
+            stream,
+            static (eventType, data) =>
+            {
+                if (data.IsEmpty || SseStreamReader.IsDoneSentinel(data))
+                    return null;
+
+                return JsonSerializer.Deserialize(data,
+                    AppJsonContext.Default.OpenAiChatChunk);
+            },
+            streamCts.Token).GetAsyncEnumerator();
+
         try
         {
-            await foreach (var chunk in SseStreamReader.ReadAsync<OpenAiChatChunk>(
-                stream,
-                static (eventType, data) =>
-                {
-                    if (data.IsEmpty || SseStreamReader.IsDoneSentinel(data))
-                        return null;
-
-                    return JsonSerializer.Deserialize(data,
-                        AppJsonContext.Default.OpenAiChatChunk);
-                },
-                streamCts.Token))
+            while (true)
             {
+                OpenAiChatChunk chunk;
+                try
+                {
+                    if (!await chunkEnumerator.MoveNextAsync())
+                        break;
+
+                    chunk = chunkEnumerator.Current;
+                }
+                catch (OperationCanceledException) when (compatTerminalTimeoutTriggered && !ct.IsCancellationRequested)
+                {
+                    break;
+                }
+
                 ClearCompatTerminalTimer();
 
                 if (chunk.Usage is not null)
@@ -342,9 +357,6 @@ public sealed class OpenAiChatProvider : ILlmProvider
                         break;
                 }
             }
-        }
-        catch (OperationCanceledException) when (compatTerminalTimeoutTriggered && !ct.IsCancellationRequested)
-        {
         }
         finally
         {
