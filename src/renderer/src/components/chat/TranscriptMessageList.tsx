@@ -30,27 +30,25 @@ function getToolResultsLookup(
   messages: UnifiedMessage[]
 ): Map<string, Map<string, { content: ToolResultContent; isError?: boolean }>> {
   const lookup = new Map<string, Map<string, { content: ToolResultContent; isError?: boolean }>>()
-  let trailingToolResults:
-    | Map<string, { content: ToolResultContent; isError?: boolean }>
-    | undefined
+  let currentAssistantMessageId: string | null = null
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (isToolResultOnlyUserMessage(message)) {
-      if (!trailingToolResults) trailingToolResults = new Map()
-      collectToolResults(message.content as ContentBlock[], trailingToolResults)
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      currentAssistantMessageId = message.id
       continue
     }
 
-    if (
-      message.role === 'assistant' &&
-      Array.isArray(message.content) &&
-      trailingToolResults &&
-      trailingToolResults.size > 0
-    ) {
-      lookup.set(message.id, trailingToolResults)
+    if (isToolResultOnlyUserMessage(message) && currentAssistantMessageId) {
+      let results = lookup.get(currentAssistantMessageId)
+      if (!results) {
+        results = new Map()
+        lookup.set(currentAssistantMessageId, results)
+      }
+      collectToolResults(message.content as ContentBlock[], results)
+      continue
     }
-    trailingToolResults = undefined
+
+    currentAssistantMessageId = null
   }
 
   return lookup

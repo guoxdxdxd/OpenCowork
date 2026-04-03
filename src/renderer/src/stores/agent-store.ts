@@ -24,7 +24,6 @@ const MAX_IMAGE_BASE64_CHARS = 4_096
 const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 12_000
 const MAX_BACKGROUND_PROCESS_ENTRIES = 60
 const MAX_RUN_CHANGESETS = 40
-const MAX_FILE_SNAPSHOT_TEXT_CHARS = 30_000
 const BACKGROUND_PROCESS_OUTPUT_FLUSH_MS = 80
 const MAX_SUBAGENT_TRANSCRIPT_MESSAGES = 120
 
@@ -292,23 +291,23 @@ function upsertSubAgentHistory(history: SubAgentState[], sa: SubAgentState): voi
   if (existingIndex !== -1) {
     const existing = history[existingIndex]
     if (
-      existing.status === snapshot.status &&
-      existing.isRunning === snapshot.isRunning &&
-      existing.success === snapshot.success &&
-      existing.startedAt === snapshot.startedAt &&
-      existing.completedAt === snapshot.completedAt &&
-      existing.error === snapshot.error &&
-      existing.reportStatus === snapshot.reportStatus &&
-      existing.title === snapshot.title &&
-      existing.summary === snapshot.summary &&
-      existing.model === snapshot.model &&
-      existing.provider === snapshot.provider &&
+      existing.name === snapshot.name &&
+      existing.displayName === snapshot.displayName &&
       existing.toolUseId === snapshot.toolUseId &&
       existing.sessionId === snapshot.sessionId &&
-      existing.sessionTitle === snapshot.sessionTitle &&
-      existing.inputText === snapshot.inputText &&
-      existing.thinking === snapshot.thinking &&
-      existing.outputText === snapshot.outputText &&
+      existing.description === snapshot.description &&
+      existing.prompt === snapshot.prompt &&
+      existing.isRunning === snapshot.isRunning &&
+      existing.success === snapshot.success &&
+      existing.errorMessage === snapshot.errorMessage &&
+      existing.iteration === snapshot.iteration &&
+      existing.streamingText === snapshot.streamingText &&
+      existing.currentAssistantMessageId === snapshot.currentAssistantMessageId &&
+      existing.report === snapshot.report &&
+      existing.reportStatus === snapshot.reportStatus &&
+      existing.startedAt === snapshot.startedAt &&
+      existing.completedAt === snapshot.completedAt &&
+      JSON.stringify(existing.usage) === JSON.stringify(snapshot.usage) &&
       existing.transcript.length === snapshot.transcript.length &&
       existing.toolCalls.length === snapshot.toolCalls.length
     ) {
@@ -597,25 +596,6 @@ export interface AgentRunChangeSet {
   changes: AgentRunFileChange[]
   createdAt: number
   updatedAt: number
-}
-
-function truncateFileSnapshot(snapshot: AgentFileSnapshot): AgentFileSnapshot {
-  if (!snapshot.text || snapshot.text.length <= MAX_FILE_SNAPSHOT_TEXT_CHARS) return snapshot
-  return {
-    ...snapshot,
-    text: `${snapshot.text.slice(0, MAX_FILE_SNAPSHOT_TEXT_CHARS)}\n... [truncated, ${snapshot.text.length} chars total]`
-  }
-}
-
-function truncateChangeSet(changeset: AgentRunChangeSet): AgentRunChangeSet {
-  return {
-    ...changeset,
-    changes: changeset.changes.map((change) => ({
-      ...change,
-      before: truncateFileSnapshot(change.before),
-      after: truncateFileSnapshot(change.after)
-    }))
-  }
 }
 
 function isAgentChangeError(value: unknown): value is { error: string } {
@@ -1070,7 +1050,7 @@ export const useAgentStore = create<AgentStore>()(
           if (isAgentChangeError(result)) return
           set((state) => {
             if (result && typeof result === 'object' && 'runId' in result) {
-              state.runChangesByRunId[runId] = truncateChangeSet(result as AgentRunChangeSet)
+              state.runChangesByRunId[runId] = result as AgentRunChangeSet
               trimRunChangesMap(state.runChangesByRunId)
             } else {
               delete state.runChangesByRunId[runId]
@@ -1092,7 +1072,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
+              state.runChangesByRunId[runId] = changeset
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1113,7 +1093,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
+              state.runChangesByRunId[runId] = changeset
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1134,7 +1114,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
+              state.runChangesByRunId[runId] = changeset
               trimRunChangesMap(state.runChangesByRunId)
             }
           })
@@ -1158,7 +1138,7 @@ export const useAgentStore = create<AgentStore>()(
               : undefined
           set((state) => {
             if (changeset) {
-              state.runChangesByRunId[runId] = truncateChangeSet(changeset)
+              state.runChangesByRunId[runId] = changeset
               trimRunChangesMap(state.runChangesByRunId)
             }
           })

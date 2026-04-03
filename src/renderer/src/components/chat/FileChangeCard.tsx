@@ -281,6 +281,8 @@ function ChangeStats({
       computeDiff(trackedChange.before.text ?? '', trackedChange.after.text ?? '')
     )
   }, [trackedChange])
+  const resolvedEdit = React.useMemo(() => resolveEditPayload(input), [input])
+  const resolvedWrite = React.useMemo(() => resolveWritePayload(input), [input])
 
   if (trackedChange) {
     if (trackedChange.op === 'create') {
@@ -305,26 +307,29 @@ function ChangeStats({
   }
 
   if (name === 'Write') {
-    const content = typeof input.content === 'string' ? input.content : ''
-    const lines = lineCount(content)
     return (
       <span className="flex items-center gap-1.5 text-[10px]">
         <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-green-500 font-medium">
           {t('fileChange.new')}
         </span>
-        <span className="text-green-400/70">+{lines}</span>
+        <span className="text-green-400/70">+{resolvedWrite.lineTotal}</span>
       </span>
     )
   }
   if (name === 'Edit') {
-    const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
-    const newStr = typeof input.new_string === 'string' ? input.new_string : ''
-    if (!oldStr && !newStr) return null
-    const stats = summarizeDiff(computeDiff(oldStr, newStr))
+    if (!resolvedEdit.oldPreview && !resolvedEdit.newPreview) return null
+    const stats =
+      resolvedEdit.oldText || resolvedEdit.newText
+        ? summarizeDiff(computeDiff(resolvedEdit.oldText, resolvedEdit.newText))
+        : null
     return (
       <span className="flex items-center gap-1 text-[10px]">
-        <span className="text-green-400/70">+{stats.added}</span>
-        <span className="text-red-400/70">-{stats.deleted}</span>
+        <span className="text-green-400/70">
+          +{stats ? stats.added : Math.max(0, resolvedEdit.newChars - resolvedEdit.oldChars)}
+        </span>
+        <span className="text-red-400/70">
+          -{stats ? stats.deleted : Math.max(0, resolvedEdit.oldChars - resolvedEdit.newChars)}
+        </span>
       </span>
     )
   }
@@ -488,11 +493,24 @@ function PendingEditPreview({ input }: { input: Record<string, unknown> }): Reac
   const explanation = input.explanation ? String(input.explanation) : null
   const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
   const newStr = typeof input.new_string === 'string' ? input.new_string : ''
-  const hasCounts = oldStr.length > 0 || newStr.length > 0
-  const stats = React.useMemo(() => summarizeDiff(computeDiff(oldStr, newStr)), [oldStr, newStr])
+  const oldPreview =
+    typeof input.old_string_preview === 'string' ? input.old_string_preview : oldStr
+  const newPreview =
+    typeof input.new_string_preview === 'string' ? input.new_string_preview : newStr
+  const oldChars =
+    typeof input.old_string_chars === 'number' ? input.old_string_chars : oldStr.length
+  const newChars =
+    typeof input.new_string_chars === 'number' ? input.new_string_chars : newStr.length
+  const showingExcerpt = Boolean(input.old_string_truncated || input.new_string_truncated)
+  const hasCounts = oldChars > 0 || newChars > 0
+  const canDiff = oldStr.length > 0 || newStr.length > 0
+  const stats = React.useMemo(
+    () => (canDiff ? summarizeDiff(computeDiff(oldStr, newStr)) : null),
+    [canDiff, oldStr, newStr]
+  )
 
   return (
-    <div className="px-3 py-2 space-y-1.5 text-[11px] text-muted-foreground/70">
+    <div className="px-3 py-2 space-y-2 text-[11px] text-muted-foreground/70">
       <div className="flex flex-wrap items-center gap-2">
         {filePath && (
           <span
@@ -504,11 +522,46 @@ function PendingEditPreview({ input }: { input: Record<string, unknown> }): Reac
         )}
         {hasCounts && (
           <span className="text-[10px] text-muted-foreground/50">
-            -{stats.deleted} / +{stats.added} lines
+            {stats
+              ? `-${stats.deleted} / +${stats.added} lines`
+              : `${oldChars} → ${newChars} chars`}
           </span>
         )}
       </div>
       {explanation && <p className="text-[11px] text-muted-foreground/60">{explanation}</p>}
+      {showingExcerpt && (
+        <p className="text-[10px] text-muted-foreground/45">
+          Showing excerpt for long edit payload
+        </p>
+      )}
+      {(oldPreview || newPreview) && (
+        <div className="grid gap-2 md:grid-cols-2">
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground/45">
+              old_string
+            </div>
+            <pre
+              className="overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-2 text-[11px] text-foreground/75 dark:bg-zinc-950 dark:text-zinc-300/75"
+              style={{ fontFamily: MONO_FONT, maxHeight: '180px' }}
+            >
+              {oldPreview || '(empty)'}
+              {input.old_string_truncated ? '\n…' : ''}
+            </pre>
+          </div>
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground/45">
+              new_string
+            </div>
+            <pre
+              className="overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-2 text-[11px] text-foreground/75 dark:bg-zinc-950 dark:text-zinc-300/75"
+              style={{ fontFamily: MONO_FONT, maxHeight: '180px' }}
+            >
+              {newPreview || '(empty)'}
+              {input.new_string_truncated ? '\n…' : ''}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -559,6 +612,64 @@ function PendingWritePreview({
   )
 }
 
+interface ResolvedEditPayload {
+  oldText: string
+  newText: string
+  oldPreview: string
+  newPreview: string
+  oldChars: number
+  newChars: number
+  oldTruncated: boolean
+  newTruncated: boolean
+}
+
+interface ResolvedWritePayload {
+  text: string
+  preview: string
+  lineTotal: number
+}
+
+function resolveEditPayload(input: Record<string, unknown>): ResolvedEditPayload {
+  const oldText = typeof input.old_string === 'string' ? input.old_string : ''
+  const newText = typeof input.new_string === 'string' ? input.new_string : ''
+  const oldPreview =
+    typeof input.old_string_preview === 'string' ? input.old_string_preview : oldText
+  const newPreview =
+    typeof input.new_string_preview === 'string' ? input.new_string_preview : newText
+  const oldChars =
+    typeof input.old_string_chars === 'number' ? input.old_string_chars : oldText.length
+  const newChars =
+    typeof input.new_string_chars === 'number' ? input.new_string_chars : newText.length
+  const oldTruncated = Boolean(input.old_string_truncated)
+  const newTruncated = Boolean(input.new_string_truncated)
+
+  return {
+    oldText,
+    newText,
+    oldPreview,
+    newPreview,
+    oldChars,
+    newChars,
+    oldTruncated,
+    newTruncated
+  }
+}
+
+function resolveWritePayload(input: Record<string, unknown>): ResolvedWritePayload {
+  const text = typeof input.content === 'string' ? input.content : ''
+  const preview = typeof input.content_preview === 'string' ? input.content_preview : text
+  const lineTotal =
+    typeof input.content_lines === 'number'
+      ? input.content_lines
+      : text
+        ? lineCount(text)
+        : preview
+          ? lineCount(preview)
+          : 0
+
+  return { text, preview, lineTotal }
+}
+
 function trackedStatusLabel(change: AgentRunFileChange): string {
   if (change.status === 'accepted') return 'Accepted'
   if (change.status === 'reverted') return 'Reverted'
@@ -596,14 +707,19 @@ export function FileChangeCard({
   const [isAcceptingFile, setIsAcceptingFile] = React.useState(false)
   const [isRollingBackFile, setIsRollingBackFile] = React.useState(false)
 
-  // Auto-collapse when tool completes successfully
+  // Auto-collapse successful non-Write file actions
   const prevStatusRef = React.useRef(status)
   React.useEffect(() => {
-    if (prevStatusRef.current !== 'completed' && status === 'completed' && !error) {
+    if (
+      name !== 'Write' &&
+      prevStatusRef.current !== 'completed' &&
+      status === 'completed' &&
+      !error
+    ) {
       setCollapsed(true)
     }
     prevStatusRef.current = status
-  }, [status, error])
+  }, [name, status, error])
 
   const filePath = String(input.file_path ?? input.path ?? '')
   const elapsed =
@@ -611,6 +727,8 @@ export function FileChangeCard({
   const outputStr = typeof output === 'string' ? output : undefined
   const isFileActionable =
     trackedChange?.status === 'open' || trackedChange?.status === 'conflicted'
+  const resolvedEdit = React.useMemo(() => resolveEditPayload(input), [input])
+  const resolvedWrite = React.useMemo(() => resolveWritePayload(input), [input])
   const parsedOutput = outputStr ? decodeStructuredToolResult(outputStr) : null
   const isSuccess = !!(
     parsedOutput &&
@@ -735,9 +853,17 @@ export function FileChangeCard({
               !trackedChange &&
               status !== 'streaming' &&
               status !== 'running' &&
-              !!input.old_string &&
-              !!input.new_string && (
-                <InlineDiff oldStr={String(input.old_string)} newStr={String(input.new_string)} />
+              !!(resolvedEdit.oldPreview || resolvedEdit.newPreview) &&
+              !(resolvedEdit.oldTruncated || resolvedEdit.newTruncated) && (
+                <InlineDiff oldStr={resolvedEdit.oldText} newStr={resolvedEdit.newText} />
+              )}
+            {name === 'Edit' &&
+              !trackedChange &&
+              status !== 'streaming' &&
+              status !== 'running' &&
+              !!(resolvedEdit.oldPreview || resolvedEdit.newPreview) &&
+              (resolvedEdit.oldTruncated || resolvedEdit.newTruncated) && (
+                <PendingEditPreview input={input} />
               )}
 
             {/* Write: new file content or overwrite diff */}
@@ -763,9 +889,9 @@ export function FileChangeCard({
               !trackedChange &&
               status !== 'streaming' &&
               status !== 'running' &&
-              !!input.content && (
+              !!resolvedWrite.preview && (
                 <NewFileContent
-                  content={String(input.content)}
+                  content={resolvedWrite.text || resolvedWrite.preview}
                   filePath={filePath}
                   isStreaming={false}
                 />

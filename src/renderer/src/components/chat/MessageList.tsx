@@ -93,10 +93,6 @@ interface VirtualMessageRowProps {
 }
 
 const messageLookupCache = new WeakMap<UnifiedMessage[], Map<string, UnifiedMessage>>()
-const toolResultsLookupCache = new WeakMap<
-  UnifiedMessage[],
-  Map<string, Map<string, { content: ToolResultContent; isError?: boolean }>>
->()
 
 function getMessageLookup(messages: UnifiedMessage[]): Map<string, UnifiedMessage> {
   const cached = messageLookupCache.get(messages)
@@ -112,34 +108,28 @@ function getMessageLookup(messages: UnifiedMessage[]): Map<string, UnifiedMessag
 function getToolResultsLookup(
   messages: UnifiedMessage[]
 ): Map<string, Map<string, { content: ToolResultContent; isError?: boolean }>> {
-  const cached = toolResultsLookupCache.get(messages)
-  if (cached) return cached
-
   const next = new Map<string, Map<string, { content: ToolResultContent; isError?: boolean }>>()
-  let trailingToolResults:
-    | Map<string, { content: ToolResultContent; isError?: boolean }>
-    | undefined
+  let currentAssistantMessageId: string | null = null
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (isToolResultOnlyUserMessage(message)) {
-      if (!trailingToolResults) trailingToolResults = new Map()
-      collectToolResults(message.content as ContentBlock[], trailingToolResults)
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      currentAssistantMessageId = message.id
       continue
     }
 
-    if (
-      message.role === 'assistant' &&
-      Array.isArray(message.content) &&
-      trailingToolResults &&
-      trailingToolResults.size > 0
-    ) {
-      next.set(message.id, trailingToolResults)
+    if (isToolResultOnlyUserMessage(message) && currentAssistantMessageId) {
+      let results = next.get(currentAssistantMessageId)
+      if (!results) {
+        results = new Map()
+        next.set(currentAssistantMessageId, results)
+      }
+      collectToolResults(message.content as ContentBlock[], results)
+      continue
     }
-    trailingToolResults = undefined
+
+    currentAssistantMessageId = null
   }
 
-  toolResultsLookupCache.set(messages, next)
   return next
 }
 
@@ -249,16 +239,20 @@ const VirtualMessageRow = React.memo(function VirtualMessageRow({
   onEditUserMessage,
   onDeleteMessage
 }: VirtualMessageRowProps): React.JSX.Element | null {
-  const { message, toolResults, isStreaming } = useChatStore(
+  const { activeMessages, isStreaming } = useChatStore(
     useShallow((s) => {
       const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
-      const activeMessages = activeSession?.messages ?? EMPTY_MESSAGES
       return {
-        message: getMessageLookup(activeMessages).get(messageId) ?? null,
-        toolResults: getToolResultsLookup(activeMessages).get(messageId),
+        activeMessages: activeSession?.messages ?? EMPTY_MESSAGES,
         isStreaming: s.streamingMessageId === messageId
       }
     })
+  )
+
+  const message = React.useMemo(() => getMessageLookup(activeMessages).get(messageId) ?? null, [activeMessages, messageId])
+  const toolResults = React.useMemo(
+    () => getToolResultsLookup(activeMessages).get(messageId),
+    [activeMessages, messageId]
   )
 
   if (!message) return null

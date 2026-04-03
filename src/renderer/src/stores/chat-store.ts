@@ -7,7 +7,6 @@ import type {
   TextBlock,
   ThinkingBlock,
   ToolUseBlock,
-  ToolResultContent,
   ToolDefinition
 } from '../lib/api/types'
 import { ipcClient } from '../lib/ipc/ipc-client'
@@ -18,7 +17,6 @@ import { usePlanStore } from './plan-store'
 import { useUIStore } from './ui-store'
 import { useProviderStore } from './provider-store'
 import { useSettingsStore } from './settings-store'
-import { isStructuredToolErrorText } from '@renderer/lib/tools/tool-result-format'
 
 export type SessionMode = 'chat' | 'clarify' | 'cowork' | 'code' | 'acp'
 
@@ -400,36 +398,64 @@ function rowToMessage(row: MessageRow): UnifiedMessage {
   }
 }
 
-function isLikelyToolErrorContent(content: ToolResultContent): boolean {
-  if (typeof content !== 'string') return false
-  return isStructuredToolErrorText(content)
-}
-
 function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
   messages: UnifiedMessage[]
   changed: boolean
 } {
+  if (messages.length === 0) {
+    return { messages, changed: false }
+  }
+
+  let tailStart = messages.length
+  while (tailStart > 0) {
+    const message = messages[tailStart - 1]
+    if (
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.every((block) => block.type === 'tool_result')
+    ) {
+      tailStart -= 1
+      continue
+    }
+    break
+  }
+
+  if (tailStart === 0) {
+    return { messages, changed: false }
+  }
+
+  const assistantIndex = tailStart - 1
+  const assistantMessage = messages[assistantIndex]
+  if (assistantMessage.role !== 'assistant' || !Array.isArray(assistantMessage.content)) {
+    return { messages, changed: false }
+  }
+
   const toolUseIds = new Set<string>()
   const toolResultIds = new Set<string>()
-  const erroredToolIds = new Set<string>()
 
-  for (const msg of messages) {
-    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) continue
-    for (const block of msg.content as ContentBlock[]) {
-      if (block.type === 'tool_use') {
-        toolUseIds.add(block.id)
-        continue
-      }
-      if (block.type === 'tool_result') {
-        toolResultIds.add(block.toolUseId)
-        if (block.isError || isLikelyToolErrorContent(block.content)) {
-          erroredToolIds.add(block.toolUseId)
-        }
-      }
+  for (const block of assistantMessage.content as ContentBlock[]) {
+    if (block.type === 'tool_use') {
+      toolUseIds.add(block.id)
     }
   }
 
-  const stripIds = new Set<string>(erroredToolIds)
+  for (let index = assistantIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (
+      message.role !== 'user' ||
+      !Array.isArray(message.content) ||
+      !message.content.every((block) => block.type === 'tool_result')
+    ) {
+      return { messages, changed: false }
+    }
+
+    for (const block of message.content as ContentBlock[]) {
+      if (block.type !== 'tool_result') continue
+      toolResultIds.add(block.toolUseId)
+    }
+  }
+
+  const stripIds = new Set<string>()
   for (const id of toolUseIds) {
     if (!toolResultIds.has(id)) stripIds.add(id)
   }
@@ -442,26 +468,51 @@ function sanitizeToolBlocksForResend(messages: UnifiedMessage[]): {
   }
 
   let changed = false
-  const sanitized = messages.flatMap((msg) => {
-    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return [msg]
-
-    const blocks = msg.content as ContentBlock[]
-    const filtered = blocks.filter((block) => {
-      if (block.type === 'tool_use') return !stripIds.has(block.id)
-      if (block.type === 'tool_result') return !stripIds.has(block.toolUseId)
-      return true
-    })
-
-    if (filtered.length === blocks.length) {
-      return [msg]
-    }
-
-    changed = true
-    if (filtered.length === 0) return []
-    return [{ ...msg, content: filtered }]
+  const nextMessages = [...messages]
+  const filteredAssistantBlocks = (assistantMessage.content as ContentBlock[]).filter((block) => {
+    if (block.type === 'tool_use') return !stripIds.has(block.id)
+    return true
   })
 
-  return { messages: sanitized, changed }
+  if (filteredAssistantBlocks.length !== assistantMessage.content.length) {
+    changed = true
+    if (filteredAssistantBlocks.length === 0) {
+      nextMessages.splice(assistantIndex, 1)
+    } else {
+      nextMessages[assistantIndex] = { ...assistantMessage, content: filteredAssistantBlocks }
+    }
+  }
+
+  const resultMessageIndexesToRemove: number[] = []
+  for (let index = assistantIndex + 1; index < nextMessages.length; index += 1) {
+    const message = nextMessages[index]
+    if (
+      message.role !== 'user' ||
+      !Array.isArray(message.content) ||
+      !message.content.every((block) => block.type === 'tool_result')
+    ) {
+      break
+    }
+
+    const filteredBlocks = (message.content as ContentBlock[]).filter(
+      (block) => block.type !== 'tool_result' || !stripIds.has(block.toolUseId)
+    )
+
+    if (filteredBlocks.length !== message.content.length) {
+      changed = true
+      if (filteredBlocks.length === 0) {
+        resultMessageIndexesToRemove.push(index)
+      } else {
+        nextMessages[index] = { ...message, content: filteredBlocks }
+      }
+    }
+  }
+
+  for (let i = resultMessageIndexesToRemove.length - 1; i >= 0; i -= 1) {
+    nextMessages.splice(resultMessageIndexesToRemove[i], 1)
+  }
+
+  return changed ? { messages: nextMessages, changed: true } : { messages, changed: false }
 }
 
 export const useChatStore = create<ChatStore>()(
