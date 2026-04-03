@@ -121,6 +121,18 @@ public sealed class AnthropicUsage
 
     [JsonPropertyName("cache_read_input_tokens")]
     public int? CacheReadInputTokens { get; init; }
+
+    [JsonPropertyName("cache_creation")]
+    public AnthropicCacheCreationUsage? CacheCreation { get; init; }
+}
+
+public sealed class AnthropicCacheCreationUsage
+{
+    [JsonPropertyName("ephemeral_5m_input_tokens")]
+    public int? Ephemeral5mInputTokens { get; init; }
+
+    [JsonPropertyName("ephemeral_1h_input_tokens")]
+    public int? Ephemeral1hInputTokens { get; init; }
 }
 
 public sealed class AnthropicError
@@ -182,7 +194,7 @@ public sealed class OpenAiChatDelta
 public sealed class OpenAiToolCallDelta
 {
     [JsonPropertyName("index")]
-    public int Index { get; init; }
+    public int? Index { get; init; }
 
     [JsonPropertyName("id")]
     public string? Id { get; init; }
@@ -216,6 +228,15 @@ public sealed class OpenAiUsage
 
     [JsonPropertyName("total_tokens")]
     public int? TotalTokens { get; init; }
+
+    [JsonPropertyName("completion_tokens_details")]
+    public OpenAiCompletionTokensDetails? CompletionTokensDetails { get; init; }
+}
+
+public sealed class OpenAiCompletionTokensDetails
+{
+    [JsonPropertyName("reasoning_tokens")]
+    public int? ReasoningTokens { get; init; }
 }
 
 // --- Gemini SSE Payload Types ---
@@ -236,6 +257,9 @@ public sealed class GeminiCandidate
 
     [JsonPropertyName("finishReason")]
     public string? FinishReason { get; init; }
+
+    [JsonPropertyName("finish_reason")]
+    public string? FinishReasonCompat { get; init; }
 }
 
 public sealed class GeminiContent
@@ -252,6 +276,12 @@ public sealed class GeminiPart
     [JsonPropertyName("text")]
     public string? Text { get; init; }
 
+    [JsonPropertyName("inlineData")]
+    public GeminiInlineData? InlineData { get; init; }
+
+    [JsonPropertyName("inline_data")]
+    public GeminiInlineData? InlineDataCompat { get; init; }
+
     [JsonPropertyName("functionCall")]
     public GeminiFunctionCall? FunctionCall { get; init; }
 
@@ -266,6 +296,18 @@ public sealed class GeminiPart
 
     [JsonPropertyName("thought_signature")]
     public string? ThoughtSignatureCompat { get; init; }
+}
+
+public sealed class GeminiInlineData
+{
+    [JsonPropertyName("mimeType")]
+    public string? MimeType { get; init; }
+
+    [JsonPropertyName("mime_type")]
+    public string? MimeTypeCompat { get; init; }
+
+    [JsonPropertyName("data")]
+    public string? Data { get; init; }
 }
 
 public sealed class GeminiFunctionCall
@@ -287,4 +329,7 @@ public sealed class GeminiUsageMetadata
 
     [JsonPropertyName("totalTokenCount")]
     public int? TotalTokenCount { get; init; }
+
+    [JsonPropertyName("thoughtsTokenCount")]
+    public int? ThoughtsTokenCount { get; init; }
 }

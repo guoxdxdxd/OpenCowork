@@ -20,10 +20,11 @@ public static class PartialJsonParser
         result = null;
         if (utf8Json.IsEmpty) return false;
 
-        // Fast path: try full parse (convert to ReadOnlyMemory for JsonDocument)
+        // Fast path: try full parse using Utf8JsonReader (zero-copy, no heap allocation)
         try
         {
-            using var doc = JsonDocument.Parse(new ReadOnlyMemory<byte>(utf8Json.ToArray()));
+            var reader = new Utf8JsonReader(utf8Json);
+            using var doc = JsonDocument.ParseValue(ref reader);
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
 
             result = new Dictionary<string, JsonElement>();

@@ -30,7 +30,9 @@ public static class ContextCompression
 
     /// <summary>
     /// Pre-compress by replacing long tool results and thinking blocks in older messages.
-    /// Preserves the last 6 messages. Does not call the LLM.
+    /// Preserves the last 6 messages. When the list exceeds 30 messages, drops the oldest
+    /// non-system messages beyond the preserve window to actually free memory.
+    /// Does not call the LLM.
     /// </summary>
     public static List<UnifiedMessage> PreCompressMessages(List<UnifiedMessage> messages)
     {
@@ -39,15 +41,28 @@ public static class ContextCompression
         var result = new List<UnifiedMessage>(messages.Count);
         var preserveFrom = messages.Count - 6;
 
+        // When message list grows very large, drop oldest non-system messages
+        // to prevent unbounded memory growth. Keep system message + last 20.
+        var dropBefore = 0;
+        if (messages.Count > 30)
+        {
+            dropBefore = messages.Count - 20;
+        }
+
         for (var i = 0; i < messages.Count; i++)
         {
+            var msg = messages[i];
+
+            // Always keep system messages
+            if (i < dropBefore && msg.Role != "system")
+                continue;
+
             if (i >= preserveFrom)
             {
-                result.Add(messages[i]);
+                result.Add(msg);
                 continue;
             }
 
-            var msg = messages[i];
             var blocks = msg.Content;
             if (blocks is null || blocks.Count == 0)
             {

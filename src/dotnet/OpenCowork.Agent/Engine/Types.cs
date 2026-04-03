@@ -534,6 +534,9 @@ public sealed class AgentErrorEvent : AgentEvent
 {
     protected override string TypeValue => "error";
     public required string Message { get; init; }
+    public string? ErrorType { get; init; }
+    public string? Details { get; init; }
+    public string? StackTrace { get; init; }
 }
 
 public sealed class ErrorEvent : AgentEvent

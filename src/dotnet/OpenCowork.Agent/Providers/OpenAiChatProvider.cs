@@ -27,9 +27,10 @@ public sealed class OpenAiChatProvider : ILlmProvider
         var requestStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         long? firstTokenAt = null;
         var outputTokens = 0;
+        var emittedMessageEnd = false;
 
-        var baseUrl = (config.BaseUrl ?? "https://api.openai.com").TrimEnd('/');
-        var url = $"{baseUrl}/v1/chat/completions";
+        var baseUrl = (config.BaseUrl ?? "https://api.openai.com/v1").TrimEnd('/');
+        var url = $"{baseUrl}/chat/completions";
 
         var headers = new Dictionary<string, string>
         {
@@ -76,178 +77,339 @@ public sealed class OpenAiChatProvider : ILlmProvider
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
 
-        // Tool call accumulators (by tool call index)
-        var toolIds = new Dictionary<int, string>();
-        var toolNames = new Dictionary<int, string>();
-        var toolArgs = new Dictionary<int, StringBuilder>();
-        var toolExtraContents = new Dictionary<int, ToolCallExtraContent>();
+        // Tool call accumulators (by tool call key)
+        var toolIds = new Dictionary<string, string>();
+        var toolNames = new Dictionary<string, string>();
+        var toolArgs = new Dictionary<string, StringBuilder>();
+        var toolExtraContents = new Dictionary<string, ToolCallExtraContent>();
+        var startedToolKeys = new HashSet<string>();
         string? lastGoogleThinkingSignature = null;
 
-        await foreach (var chunk in SseStreamReader.ReadAsync<OpenAiChatChunk>(
-            stream,
-            static (eventType, data) =>
-            {
-                if (data.IsEmpty || SseStreamReader.IsDoneSentinel(data))
-                    return null;
-
-                return JsonSerializer.Deserialize(data,
-                    AppJsonContext.Default.OpenAiChatChunk);
-            },
-            ct))
+        static string GetToolKey(OpenAiToolCallDelta toolCall)
         {
-            if (chunk.Usage is not null)
+            if (!string.IsNullOrWhiteSpace(toolCall.Id))
+                return $"id:{toolCall.Id}";
+
+            if (toolCall.Index.HasValue)
+                return $"index:{toolCall.Index.Value}";
+
+            return $"synthetic:{Guid.NewGuid():N}";
+        }
+        var isOpenAi = baseUrl.StartsWith("https://api.openai.com", StringComparison.OrdinalIgnoreCase)
+            || baseUrl.StartsWith("http://api.openai.com", StringComparison.OrdinalIgnoreCase);
+        using var streamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Timer? compatTerminalTimer = null;
+        var compatTerminalTimeoutTriggered = false;
+
+        void ClearCompatTerminalTimer()
+        {
+            compatTerminalTimer?.Dispose();
+            compatTerminalTimer = null;
+            compatTerminalTimeoutTriggered = false;
+        }
+
+        void ScheduleCompatTerminalClose()
+        {
+            if (isOpenAi || compatTerminalTimer is not null)
+                return;
+
+            compatTerminalTimer = new Timer(_ =>
             {
-                outputTokens = chunk.Usage.CompletionTokens ?? 0;
-            }
-
-            if (chunk.Choices is null || chunk.Choices.Count == 0) continue;
-
-            var choice = chunk.Choices[0];
-            var delta = choice.Delta;
-
-            if (delta is null) continue;
-
-            // Text content
-            if (delta.Content is not null)
-            {
-                firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                yield return new StreamEvent { Type = "text_delta", Text = delta.Content };
-            }
-
-            // Reasoning content (thinking)
-            if (delta.ReasoningContent is not null)
-            {
-                firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                yield return new StreamEvent { Type = "thinking_delta", Thinking = delta.ReasoningContent };
-            }
-
-            if (!string.IsNullOrWhiteSpace(delta.ReasoningEncryptedContent)
-                && delta.ReasoningEncryptedContent != lastGoogleThinkingSignature)
-            {
-                lastGoogleThinkingSignature = delta.ReasoningEncryptedContent;
-                yield return new StreamEvent
+                compatTerminalTimeoutTriggered = true;
+                try
                 {
-                    Type = "thinking_encrypted",
-                    ThinkingEncryptedContent = delta.ReasoningEncryptedContent,
-                    ThinkingEncryptedProvider = "google"
-                };
-            }
-
-            // Tool calls
-            if (delta.ToolCalls is not null)
-            {
-                foreach (var tc in delta.ToolCalls)
+                    streamCts.Cancel();
+                }
+                catch
                 {
-                    firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    var idx = tc.Index;
+                }
+            }, null, 1500, Timeout.Infinite);
+        }
 
-                    var extraContent = tc.ExtraContent ?? (tc.ExtraContent is null && !string.IsNullOrWhiteSpace(lastGoogleThinkingSignature)
-                        ? new ToolCallExtraContent
+        try
+        {
+            await foreach (var chunk in SseStreamReader.ReadAsync<OpenAiChatChunk>(
+                stream,
+                static (eventType, data) =>
+                {
+                    if (data.IsEmpty || SseStreamReader.IsDoneSentinel(data))
+                        return null;
+
+                    return JsonSerializer.Deserialize(data,
+                        AppJsonContext.Default.OpenAiChatChunk);
+                },
+                streamCts.Token))
+            {
+                ClearCompatTerminalTimer();
+
+                if (chunk.Usage is not null)
+                {
+                    outputTokens = chunk.Usage.CompletionTokens ?? outputTokens;
+                }
+
+                if (chunk.Choices is null || chunk.Choices.Count == 0)
+                {
+                    if (chunk.Usage is not null && !emittedMessageEnd)
+                    {
+                        var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        emittedMessageEnd = true;
+                        yield return new StreamEvent
                         {
-                            Google = new GoogleToolCallExtraContent
+                            Type = "message_end",
+                            Usage = CreateTokenUsage(chunk.Usage),
+                            Timing = CreateTiming(requestStartedAt, firstTokenAt, outputTokens, completedAt)
+                        };
+                    }
+                    continue;
+                }
+
+                var choice = chunk.Choices[0];
+                var delta = choice.Delta;
+
+                if (delta is not null)
+                {
+                    if (delta.Content is not null)
+                    {
+                        firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        yield return new StreamEvent { Type = "text_delta", Text = delta.Content };
+                    }
+
+                    if (delta.ReasoningContent is not null)
+                    {
+                        firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        yield return new StreamEvent { Type = "thinking_delta", Thinking = delta.ReasoningContent };
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(delta.ReasoningEncryptedContent)
+                        && delta.ReasoningEncryptedContent != lastGoogleThinkingSignature)
+                    {
+                        lastGoogleThinkingSignature = delta.ReasoningEncryptedContent;
+                        yield return new StreamEvent
+                        {
+                            Type = "thinking_encrypted",
+                            ThinkingEncryptedContent = delta.ReasoningEncryptedContent,
+                            ThinkingEncryptedProvider = "google"
+                        };
+                    }
+
+                    if (delta.ToolCalls is not null)
+                    {
+                        foreach (var tc in delta.ToolCalls)
+                        {
+                            firstTokenAt ??= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            var toolKey = GetToolKey(tc);
+
+                            if (!toolArgs.ContainsKey(toolKey))
+                                toolArgs[toolKey] = new StringBuilder();
+                            if (!toolNames.ContainsKey(toolKey))
+                                toolNames[toolKey] = string.Empty;
+
+                            var extraContent = tc.ExtraContent ?? (tc.ExtraContent is null && !string.IsNullOrWhiteSpace(lastGoogleThinkingSignature)
+                                ? new ToolCallExtraContent
+                                {
+                                    Google = new GoogleToolCallExtraContent
+                                    {
+                                        ThoughtSignature = lastGoogleThinkingSignature
+                                    }
+                                }
+                                : null);
+
+                            if (extraContent is not null)
                             {
-                                ThoughtSignature = lastGoogleThinkingSignature
+                                toolExtraContents[toolKey] = extraContent;
+                                if (extraContent.Google?.ThoughtSignature is { Length: > 0 } thoughtSignature
+                                    && thoughtSignature != lastGoogleThinkingSignature)
+                                {
+                                    lastGoogleThinkingSignature = thoughtSignature;
+                                    yield return new StreamEvent
+                                    {
+                                        Type = "thinking_encrypted",
+                                        ThinkingEncryptedContent = thoughtSignature,
+                                        ThinkingEncryptedProvider = "google"
+                                    };
+                                }
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(tc.Function?.Name))
+                                toolNames[toolKey] = tc.Function.Name;
+
+                            if (!string.IsNullOrWhiteSpace(tc.Id))
+                                toolIds[toolKey] = tc.Id;
+
+                            if (toolIds.TryGetValue(toolKey, out var toolId)
+                                && !startedToolKeys.Contains(toolKey))
+                            {
+                                startedToolKeys.Add(toolKey);
+                                yield return new StreamEvent
+                                {
+                                    Type = "tool_call_start",
+                                    ToolCallId = toolId,
+                                    ToolName = toolNames.GetValueOrDefault(toolKey),
+                                    ToolCallExtraContent = toolExtraContents.GetValueOrDefault(toolKey)
+                                };
+                            }
+
+                            if (tc.Function?.Arguments is not null)
+                            {
+                                if (!toolIds.TryGetValue(toolKey, out toolId))
+                                    continue;
+
+                                toolArgs[toolKey].Append(tc.Function.Arguments);
+                                yield return new StreamEvent
+                                {
+                                    Type = "tool_call_delta",
+                                    ToolCallId = toolId,
+                                    ArgumentsDelta = tc.Function.Arguments
+                                };
                             }
                         }
-                        : null);
-
-                    if (extraContent is not null)
-                    {
-                        toolExtraContents[idx] = extraContent;
-                        if (extraContent.Google?.ThoughtSignature is { Length: > 0 } thoughtSignature
-                            && thoughtSignature != lastGoogleThinkingSignature)
-                        {
-                            lastGoogleThinkingSignature = thoughtSignature;
-                            yield return new StreamEvent
-                            {
-                                Type = "thinking_encrypted",
-                                ThinkingEncryptedContent = thoughtSignature,
-                                ThinkingEncryptedProvider = "google"
-                            };
-                        }
-                    }
-
-                    if (tc.Id is not null)
-                    {
-                        toolIds[idx] = tc.Id;
-                        toolNames[idx] = tc.Function?.Name ?? "";
-                        toolArgs[idx] = new StringBuilder();
-
-                        yield return new StreamEvent
-                        {
-                            Type = "tool_call_start",
-                            ToolCallId = tc.Id,
-                            ToolName = tc.Function?.Name,
-                            ToolCallExtraContent = toolExtraContents.GetValueOrDefault(idx)
-                        };
-                    }
-
-                    if (tc.Function?.Arguments is not null)
-                    {
-                        if (toolArgs.TryGetValue(idx, out var buf))
-                            buf.Append(tc.Function.Arguments);
-
-                        yield return new StreamEvent
-                        {
-                            Type = "tool_call_delta",
-                            ToolCallId = toolIds.GetValueOrDefault(idx),
-                            ArgumentsDelta = tc.Function.Arguments
-                        };
                     }
                 }
-            }
 
-            // Finish reason
-            if (choice.FinishReason is not null)
-            {
-                // Flush tool calls
-                foreach (var (idx, id) in toolIds)
+                var finishReason = choice.FinishReason;
+                if (finishReason is null)
+                    continue;
+
+                if ((finishReason == "tool_calls" || finishReason == "function_call") && toolIds.Count > 0)
                 {
-                    var raw = toolArgs.GetValueOrDefault(idx)?.ToString()?.Trim() ?? "";
-                    Dictionary<string, JsonElement>? input = null;
-                    if (!string.IsNullOrEmpty(raw))
+                    foreach (var (toolKey, id) in toolIds)
                     {
-                        try { input = JsonSerializer.Deserialize(raw, AppJsonContext.Default.DictionaryStringJsonElement); }
-                        catch { /* ignore */ }
+                        yield return CreateToolCallEndEvent(toolKey, id, toolNames, toolArgs, toolExtraContents);
+                    }
+                    toolIds.Clear();
+                    toolNames.Clear();
+                    toolArgs.Clear();
+                    toolExtraContents.Clear();
+                    startedToolKeys.Clear();
+
+                    if (chunk.Usage is null)
+                        ScheduleCompatTerminalClose();
+                    else
+                        break;
+                }
+                else if (finishReason != "tool_calls" && finishReason != "function_call" && toolIds.Count > 0)
+                {
+                    foreach (var (toolKey, id) in toolIds)
+                    {
+                        yield return CreateToolCallEndEvent(toolKey, id, toolNames, toolArgs, toolExtraContents);
+                    }
+                    toolIds.Clear();
+                    toolNames.Clear();
+                    toolArgs.Clear();
+                    toolExtraContents.Clear();
+                    startedToolKeys.Clear();
+
+                    if (!emittedMessageEnd)
+                    {
+                        var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        emittedMessageEnd = true;
+                        yield return new StreamEvent
+                        {
+                            Type = "message_end",
+                            StopReason = finishReason,
+                            Usage = chunk.Usage is not null ? CreateTokenUsage(chunk.Usage) : null,
+                            Timing = CreateTiming(requestStartedAt, firstTokenAt, outputTokens, completedAt)
+                        };
                     }
 
+                    if (!isOpenAi && chunk.Usage is null)
+                        ScheduleCompatTerminalClose();
+                    else if (!isOpenAi)
+                        break;
+                }
+                else if (!emittedMessageEnd && finishReason == "stop")
+                {
+                    var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    emittedMessageEnd = true;
                     yield return new StreamEvent
                     {
-                        Type = "tool_call_end",
-                        ToolCallId = id,
-                        ToolName = toolNames.GetValueOrDefault(idx),
-                        ToolCallInput = input ?? new Dictionary<string, JsonElement>(),
-                        ToolCallExtraContent = toolExtraContents.GetValueOrDefault(idx)
+                        Type = "message_end",
+                        StopReason = finishReason,
+                        Usage = chunk.Usage is not null ? CreateTokenUsage(chunk.Usage) : null,
+                        Timing = CreateTiming(requestStartedAt, firstTokenAt, outputTokens, completedAt)
                     };
-                }
-                toolIds.Clear();
-                toolNames.Clear();
-                toolArgs.Clear();
-                toolExtraContents.Clear();
 
-                var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                yield return new StreamEvent
+                    if (!isOpenAi && chunk.Usage is null)
+                        ScheduleCompatTerminalClose();
+                    else if (!isOpenAi)
+                        break;
+                }
+                else if (!isOpenAi && (finishReason == "length" || finishReason == "content_filter"))
                 {
-                    Type = "message_end",
-                    StopReason = choice.FinishReason,
-                    Usage = chunk.Usage is not null
-                        ? new TokenUsage
-                        {
-                            InputTokens = chunk.Usage.PromptTokens ?? 0,
-                            OutputTokens = chunk.Usage.CompletionTokens ?? 0
-                        }
-                        : null,
-                    Timing = new RequestTiming
-                    {
-                        TotalMs = completedAt - requestStartedAt,
-                        TtftMs = firstTokenAt.HasValue ? firstTokenAt.Value - requestStartedAt : null,
-                        Tps = outputTokens > 1 && firstTokenAt.HasValue
-                            ? (outputTokens - 1) / ((completedAt - firstTokenAt.Value) / 1000.0)
-                            : null
-                    }
-                };
+                    if (chunk.Usage is null)
+                        ScheduleCompatTerminalClose();
+                    else
+                        break;
+                }
             }
         }
+        catch (OperationCanceledException) when (compatTerminalTimeoutTriggered && !ct.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            ClearCompatTerminalTimer();
+        }
+
+        if (toolIds.Count > 0)
+        {
+            foreach (var (toolKey, id) in toolIds)
+            {
+                yield return CreateToolCallEndEvent(toolKey, id, toolNames, toolArgs, toolExtraContents);
+            }
+        }
+    }
+
+    private static StreamEvent CreateToolCallEndEvent(
+        string toolKey,
+        string id,
+        Dictionary<string, string> toolNames,
+        Dictionary<string, StringBuilder> toolArgs,
+        Dictionary<string, ToolCallExtraContent> toolExtraContents)
+    {
+        var raw = toolArgs.GetValueOrDefault(toolKey)?.ToString()?.Trim() ?? string.Empty;
+        var input = ProviderMessageFormatter.ParseToolInputObject(raw);
+
+        return new StreamEvent
+        {
+            Type = "tool_call_end",
+            ToolCallId = id,
+            ToolName = toolNames.GetValueOrDefault(toolKey),
+            ToolCallInput = input,
+            ToolCallExtraContent = toolExtraContents.GetValueOrDefault(toolKey)
+        };
+    }
+
+    private static TokenUsage CreateTokenUsage(OpenAiUsage usage)
+    {
+        return new TokenUsage
+        {
+            InputTokens = usage.PromptTokens ?? 0,
+            OutputTokens = usage.CompletionTokens ?? 0,
+            ReasoningTokens = usage.CompletionTokensDetails?.ReasoningTokens
+        };
+    }
+
+    private static RequestTiming CreateTiming(long requestStartedAt, long? firstTokenAt, int outputTokens, long completedAt)
+    {
+        return new RequestTiming
+        {
+            TotalMs = completedAt - requestStartedAt,
+            TtftMs = firstTokenAt.HasValue ? firstTokenAt.Value - requestStartedAt : null,
+            Tps = ComputeTps(outputTokens, firstTokenAt, completedAt)
+        };
+    }
+
+    private static double? ComputeTps(int outputTokens, long? firstTokenAt, long completedAt)
+    {
+        if (!firstTokenAt.HasValue || outputTokens <= 0)
+            return null;
+
+        var durationMs = completedAt - firstTokenAt.Value;
+        if (durationMs <= 0)
+            return null;
+
+        return outputTokens / (durationMs / 1000.0);
     }
 
     private static RequestDebugInfo CreateRequestDebugInfo(string url, string method, Dictionary<string, string> headers, byte[] bodyBytes, ProviderConfig config)
@@ -279,10 +441,21 @@ public sealed class OpenAiChatProvider : ILlmProvider
     {
         var body = new JsonObject
         {
+            ["model"] = config.Model,
             ["messages"] = ProviderMessageFormatter.FormatOpenAiChatMessages(messages, config.SystemPrompt, config),
             ["stream"] = true,
             ["stream_options"] = new JsonObject { ["include_usage"] = true }
         };
+
+        if (config.EnablePromptCache != false)
+        {
+            var cacheKey = !string.IsNullOrWhiteSpace(config.PromptCacheKey)
+                ? config.PromptCacheKey
+                : !string.IsNullOrWhiteSpace(config.SessionId)
+                    ? config.SessionId
+                    : "open-cowork";
+            body["prompt_cache_key"] = cacheKey;
+        }
 
         if (tools.Count > 0)
         {
@@ -304,7 +477,39 @@ public sealed class OpenAiChatProvider : ILlmProvider
             body["tool_choice"] = "auto";
         }
 
+        if (config.Temperature is not null)
+            body["temperature"] = config.Temperature;
+        if (config.ServiceTier is not null)
+            body["service_tier"] = config.ServiceTier;
+        if (config.MaxTokens is not null)
+        {
+            var isReasoningModel = config.Model.StartsWith("o", StringComparison.OrdinalIgnoreCase)
+                && config.Model.Length > 1
+                && char.IsDigit(config.Model[1]);
+            body[isReasoningModel ? "max_completion_tokens" : "max_tokens"] = config.MaxTokens;
+        }
+
+        if (config.ThinkingEnabled == true && config.ThinkingConfig is not null)
+        {
+            foreach (var (key, value) in config.ThinkingConfig.BodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
+
+            if (config.ThinkingConfig.ReasoningEffortLevels?.Count > 0 && !string.IsNullOrWhiteSpace(config.ReasoningEffort))
+                body["reasoning_effort"] = config.ReasoningEffort;
+
+            if (config.ThinkingConfig.ForceTemperature is not null)
+                body["temperature"] = config.ThinkingConfig.ForceTemperature;
+        }
+        else if (config.ThinkingEnabled != true && config.ThinkingConfig?.DisabledBodyParams is { Count: > 0 } disabledBodyParams)
+        {
+            foreach (var (key, value) in disabledBodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
+        }
+
         ProviderMessageFormatter.ApplyRequestOverrides(body, config);
-        return Encoding.UTF8.GetBytes(body.ToJsonString());
+        using var ms = new System.IO.MemoryStream();
+        using (var w = new System.Text.Json.Utf8JsonWriter(ms))
+        { body.WriteTo(w); }
+        return ms.ToArray();
     }
 }

@@ -72,6 +72,13 @@ public static class SseStreamReader
                 { CharSet = "utf-8" };
         }
 
-        return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        try
+        {
+            return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new HttpRequestException($"Failed to send {method} {url}: {ex.Message}", ex, ex.StatusCode);
+        }
     }
 }

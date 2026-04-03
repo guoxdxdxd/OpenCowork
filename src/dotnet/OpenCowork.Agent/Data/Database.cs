@@ -22,7 +22,7 @@ public sealed class Database : IDisposable
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared
+            Cache = SqliteCacheMode.Default
         }.ToString();
     }
 
@@ -35,7 +35,13 @@ public sealed class Database : IDisposable
         _connection.Open();
 
         using var pragmaCmd = _connection.CreateCommand();
-        pragmaCmd.CommandText = "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;";
+        pragmaCmd.CommandText = """
+                PRAGMA journal_mode = WAL;
+                PRAGMA foreign_keys = ON;
+                PRAGMA cache_size = -2000;
+                PRAGMA mmap_size = 0;
+                PRAGMA temp_store = MEMORY;
+                """;
         pragmaCmd.ExecuteNonQuery();
 
         return _connection;

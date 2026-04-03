@@ -100,7 +100,7 @@ internal static class ProviderMessageFormatter
         return normalized;
     }
 
-    public static JsonArray FormatAnthropicMessages(List<UnifiedMessage> messages)
+    public static JsonArray FormatAnthropicMessages(List<UnifiedMessage> messages, bool promptCacheEnabled = false)
     {
         var normalized = NormalizeMessagesForToolReplay(messages, "Anthropic");
         var formatted = new JsonArray();
@@ -137,6 +137,9 @@ internal static class ProviderMessageFormatter
                 ["content"] = content
             });
         }
+
+        if (promptCacheEnabled)
+            ApplyAnthropicMessageCacheBreakpoint(formatted);
 
         return formatted;
     }
@@ -440,6 +443,50 @@ internal static class ProviderMessageFormatter
         }
     }
 
+    private static void ApplyAnthropicMessageCacheBreakpoint(JsonArray messages)
+    {
+        for (var messageIndex = messages.Count - 1; messageIndex >= 0; messageIndex--)
+        {
+            if (messages[messageIndex] is not JsonObject message)
+                continue;
+
+            var content = message["content"];
+            if (content is JsonValue textValue)
+            {
+                var text = textValue.ToJsonString().Trim('"');
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                message["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = text,
+                        ["cache_control"] = new JsonObject { ["type"] = "ephemeral" }
+                    }
+                };
+                return;
+            }
+
+            if (content is not JsonArray blocks)
+                continue;
+
+            for (var blockIndex = blocks.Count - 1; blockIndex >= 0; blockIndex--)
+            {
+                if (blocks[blockIndex] is not JsonObject block)
+                    continue;
+
+                var blockType = block["type"]?.GetValue<string>();
+                if (blockType is not ("text" or "image" or "tool_result"))
+                    continue;
+
+                block["cache_control"] = new JsonObject { ["type"] = "ephemeral" };
+                return;
+            }
+        }
+    }
+
     private static bool TryFormatAnthropicBlock(ContentBlock block, out JsonNode? node)
     {
         switch (block)
@@ -677,6 +724,44 @@ internal static class ProviderMessageFormatter
                     ThoughtSignature = signature
                 }
             };
+    }
+
+    public static Dictionary<string, JsonElement> ParseToolInputObject(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new Dictionary<string, JsonElement>();
+
+        try
+        {
+            var trimmed = raw.Trim();
+            var element = JsonSerializer.Deserialize(trimmed, AppJsonContext.Default.JsonElement);
+
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                return JsonSerializer.Deserialize(trimmed, AppJsonContext.Default.DictionaryStringJsonElement)
+                    ?? new Dictionary<string, JsonElement>();
+            }
+
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                var nested = element.GetString();
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    var nestedTrimmed = nested.Trim();
+                    var nestedElement = JsonSerializer.Deserialize(nestedTrimmed, AppJsonContext.Default.JsonElement);
+                    if (nestedElement.ValueKind == JsonValueKind.Object)
+                    {
+                        return JsonSerializer.Deserialize(nestedTrimmed, AppJsonContext.Default.DictionaryStringJsonElement)
+                            ?? new Dictionary<string, JsonElement>();
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return new Dictionary<string, JsonElement>();
     }
 
     private static string SerializeInput(Dictionary<string, JsonElement> input)

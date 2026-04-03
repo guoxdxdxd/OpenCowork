@@ -26,13 +26,15 @@ public sealed class GeminiProvider : ILlmProvider
     {
         var requestStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         long? firstTokenAt = null;
+        var emittedMessageEnd = false;
 
-        var baseUrl = (config.BaseUrl ?? "https://generativelanguage.googleapis.com").TrimEnd('/');
-        var url = $"{baseUrl}/v1beta/models/{config.Model}:streamGenerateContent?alt=sse&key={config.ApiKey}";
+        var baseUrl = ResolveGeminiApiRoot(config.BaseUrl);
+        var url = $"{baseUrl}/models/{Uri.EscapeDataString(config.Model)}:streamGenerateContent";
 
         var headers = new Dictionary<string, string>
         {
-            ["Content-Type"] = "application/json"
+            ["Content-Type"] = "application/json",
+            ["x-goog-api-key"] = config.ApiKey
         };
 
         ProviderMessageFormatter.ApplyHeaderOverrides(headers, config);
@@ -45,6 +47,8 @@ public sealed class GeminiProvider : ILlmProvider
         };
 
         var client = _httpFactory.GetClient();
+
+        yield return new StreamEvent { Type = "message_start" };
 
         using var response = await SseStreamReader.SendStreamingRequestAsync(
             client, url, "POST", headers, bodyBytes, ct);
@@ -66,6 +70,8 @@ public sealed class GeminiProvider : ILlmProvider
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var outputTokens = 0;
+        GeminiUsageMetadata? usageMetadata = null;
+        string? pendingStopReason = null;
         var emittedThinkingEncrypted = new HashSet<string>(StringComparer.Ordinal);
         var emittedToolCalls = new HashSet<string>(StringComparer.Ordinal);
 
@@ -81,16 +87,18 @@ public sealed class GeminiProvider : ILlmProvider
             },
             ct))
         {
-            if (chunk.Candidates is null || chunk.Candidates.Count == 0) continue;
+            usageMetadata = chunk.UsageMetadata ?? usageMetadata;
 
-            var candidate = chunk.Candidates[0];
-            var parts = candidate.Content?.Parts;
-
-            if (parts is not null)
+            foreach (var candidate in chunk.Candidates ?? [])
             {
+                pendingStopReason = candidate.FinishReason ?? candidate.FinishReasonCompat ?? pendingStopReason;
+                var parts = candidate.Content?.Parts;
+                if (parts is null)
+                    continue;
+
                 foreach (var part in parts)
                 {
-                    var thoughtSignature = part.ThoughtSignature ?? part.ThoughtSignatureCompat;
+                    var thoughtSignature = (part.ThoughtSignature ?? part.ThoughtSignatureCompat)?.Trim();
                     if (!string.IsNullOrWhiteSpace(thoughtSignature) && emittedThinkingEncrypted.Add(thoughtSignature))
                     {
                         yield return new StreamEvent
@@ -169,35 +177,34 @@ public sealed class GeminiProvider : ILlmProvider
                     }
                 }
             }
+        }
 
-            if (candidate.FinishReason is not null || chunk.UsageMetadata is not null)
+        if (!emittedMessageEnd)
+        {
+            var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var promptTokenCount = usageMetadata?.PromptTokenCount ?? 0;
+            outputTokens = usageMetadata?.CandidatesTokenCount
+                ?? Math.Max((usageMetadata?.TotalTokenCount ?? 0) - promptTokenCount, 0);
+
+            yield return new StreamEvent
             {
-                var usage = chunk.UsageMetadata;
-                if (usage?.CandidatesTokenCount.HasValue == true)
-                    outputTokens = usage.CandidatesTokenCount.Value;
-
-                var completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                yield return new StreamEvent
-                {
-                    Type = "message_end",
-                    StopReason = candidate.FinishReason,
-                    Usage = usage is not null
-                        ? new TokenUsage
-                        {
-                            InputTokens = usage.PromptTokenCount ?? 0,
-                            OutputTokens = usage.CandidatesTokenCount ?? 0
-                        }
-                        : null,
-                    Timing = new RequestTiming
+                Type = "message_end",
+                StopReason = pendingStopReason ?? "stop",
+                Usage = usageMetadata is not null
+                    ? new TokenUsage
                     {
-                        TotalMs = completedAt - requestStartedAt,
-                        TtftMs = firstTokenAt.HasValue ? firstTokenAt.Value - requestStartedAt : null,
-                        Tps = outputTokens > 1 && firstTokenAt.HasValue
-                            ? (outputTokens - 1) / ((completedAt - firstTokenAt.Value) / 1000.0)
-                            : null
+                        InputTokens = promptTokenCount,
+                        OutputTokens = outputTokens,
+                        ReasoningTokens = usageMetadata.ThoughtsTokenCount
                     }
-                };
-            }
+                    : null,
+                Timing = new RequestTiming
+                {
+                    TotalMs = completedAt - requestStartedAt,
+                    TtftMs = firstTokenAt.HasValue ? firstTokenAt.Value - requestStartedAt : null,
+                    Tps = ComputeTps(outputTokens, firstTokenAt, completedAt)
+                }
+            };
         }
     }
 
@@ -236,7 +243,7 @@ public sealed class GeminiProvider : ILlmProvider
                 {
                     new JsonObject
                     {
-                        ["text"] = systemPrompt
+                        ["text"] = systemPrompt.Trim()
                     }
                 }
             };
@@ -260,17 +267,49 @@ public sealed class GeminiProvider : ILlmProvider
             };
         }
 
-        body["generationConfig"] = new JsonObject
-        {
-            ["maxOutputTokens"] = config.MaxTokens ?? 8192
-        };
-
+        var generationConfig = new JsonObject();
         if (config.Temperature.HasValue)
+            generationConfig["temperature"] = config.Temperature.Value;
+        if (config.MaxTokens is not null)
+            generationConfig["maxOutputTokens"] = config.MaxTokens.Value;
+        if (generationConfig.Count > 0)
+            body["generationConfig"] = generationConfig;
+
+        if (config.ThinkingEnabled == true && config.ThinkingConfig is not null)
         {
-            ((JsonObject)body["generationConfig"]!)["temperature"] = config.Temperature.Value;
+            foreach (var (key, value) in config.ThinkingConfig.BodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
+        }
+        else if (config.ThinkingEnabled != true && config.ThinkingConfig?.DisabledBodyParams is { Count: > 0 } disabledBodyParams)
+        {
+            foreach (var (key, value) in disabledBodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
         }
 
         ProviderMessageFormatter.ApplyRequestOverrides(body, config);
-        return Encoding.UTF8.GetBytes(body.ToJsonString());
+        using var ms = new System.IO.MemoryStream();
+        using (var w = new System.Text.Json.Utf8JsonWriter(ms))
+        { body.WriteTo(w); }
+        return ms.ToArray();
+    }
+
+    private static string ResolveGeminiApiRoot(string? baseUrl)
+    {
+        return (baseUrl ?? "https://generativelanguage.googleapis.com/v1beta")
+            .Trim()
+            .TrimEnd('/')
+            .Replace("/openai", string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static double? ComputeTps(int outputTokens, long? firstTokenAt, long completedAt)
+    {
+        if (firstTokenAt is null || outputTokens <= 0)
+            return null;
+
+        var durationMs = completedAt - firstTokenAt.Value;
+        if (durationMs <= 0)
+            return null;
+
+        return outputTokens / (durationMs / 1000.0);
     }
 }

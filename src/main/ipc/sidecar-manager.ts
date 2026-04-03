@@ -20,6 +20,7 @@ const SIDECAR_MAX_RESTARTS = 5
 const SIDECAR_PING_INTERVAL_MS = 30_000
 const SIDECAR_PING_TIMEOUT_MS = 5000
 const SIDECAR_RENDERER_REQUEST_TIMEOUT_MS = 10 * 60_000
+const SIDECAR_MAX_BUFFER_BYTES = 1024 * 1024 // 1 MB
 
 interface JsonRpcMessage {
   jsonrpc: '2.0'
@@ -138,7 +139,6 @@ export class SidecarManager {
           outputDir,
           '/p:PublishAot=true',
           '/p:TrimMode=full',
-          '/p:IlcOptimizationPreference=Speed',
           '/p:StripSymbols=true'
         ],
         {
@@ -292,6 +292,14 @@ export class SidecarManager {
 
       this.process.stdout!.on('data', (chunk: Buffer) => {
         this.buffer += chunk.toString()
+        // Guard against unbounded buffer growth if processBuffer() can't keep up
+        if (this.buffer.length > SIDECAR_MAX_BUFFER_BYTES) {
+          console.warn(
+            `[Sidecar] Buffer exceeded ${SIDECAR_MAX_BUFFER_BYTES} bytes, truncating to last newline`
+          )
+          const lastNewline = this.buffer.lastIndexOf('\n')
+          this.buffer = lastNewline >= 0 ? this.buffer.slice(lastNewline + 1) : ''
+        }
         this.processBuffer()
       })
 

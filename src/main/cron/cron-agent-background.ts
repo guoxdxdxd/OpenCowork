@@ -1218,6 +1218,31 @@ async function* sendAnthropic(
   }
   if (config.temperature !== undefined) body.temperature = config.temperature
   applyBodyOverrides(body, config)
+
+  const maxTokens =
+    typeof body.max_tokens === 'number'
+      ? Math.max(1, Math.floor(body.max_tokens))
+      : typeof body.max_tokens === 'string'
+        ? Math.max(1, Math.floor(Number(body.max_tokens) || (config.maxTokens ?? 4096)))
+        : Math.max(1, Math.floor(config.maxTokens ?? 4096))
+  body.max_tokens = maxTokens
+
+  if (typeof body.thinking === 'object' && body.thinking !== null) {
+    const thinking = { ...(body.thinking as Record<string, unknown>) }
+    const rawBudget =
+      typeof thinking.budget_tokens === 'number'
+        ? thinking.budget_tokens
+        : typeof thinking.budget_tokens === 'string'
+          ? Number(thinking.budget_tokens)
+          : undefined
+
+    if (rawBudget != null && Number.isFinite(rawBudget) && rawBudget > 0) {
+      thinking.budget_tokens = Math.max(1, Math.min(Math.floor(rawBudget), maxTokens - 1))
+    }
+
+    body.thinking = thinking
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'anthropic-version': '2023-06-01',

@@ -99,6 +99,7 @@ public static class AgentLoop
             var thinkingBuilder = new StringBuilder();
             var toolCalls = new List<ToolCallState>();
             var activeToolArgs = new Dictionary<string, StringBuilder>();
+            var lastParsedArgLen = new Dictionary<string, int>(); // Debounce partial JSON parse
             TokenUsage? usage = null;
             RequestTiming? timing = null;
             string? stopReason = null;
@@ -106,19 +107,47 @@ public static class AgentLoop
             string? thinkingEncryptedContent = null;
             string? thinkingEncryptedProvider = null;
 
+            // Micro-batch buffers: accumulate rapid deltas and flush less frequently.
+            // Reduces JSON-RPC messages from ~100/sec to ~10/sec while keeping smooth UI.
+            const int DeltaFlushThreshold = 64; // chars
+            var pendingTextDelta = new StringBuilder();
+            var pendingThinkingDelta = new StringBuilder();
+
             await foreach (var evt in config.Provider.SendMessageAsync(
                 conversationMessages, config.Tools, config.ProviderConfig, ct))
             {
+                // Flush accumulated deltas before processing any non-delta event
+                if (evt.Type != "text_delta" && pendingTextDelta.Length > 0)
+                {
+                    yield return new TextDeltaEvent { Text = pendingTextDelta.ToString() };
+                    pendingTextDelta.Clear();
+                }
+                if (evt.Type != "thinking_delta" && pendingThinkingDelta.Length > 0)
+                {
+                    yield return new ThinkingDeltaEvent { Thinking = pendingThinkingDelta.ToString() };
+                    pendingThinkingDelta.Clear();
+                }
+
                 switch (evt.Type)
                 {
                     case "text_delta":
                         textBuilder.Append(evt.Text);
-                        yield return new TextDeltaEvent { Text = evt.Text ?? "" };
+                        pendingTextDelta.Append(evt.Text);
+                        if (pendingTextDelta.Length >= DeltaFlushThreshold)
+                        {
+                            yield return new TextDeltaEvent { Text = pendingTextDelta.ToString() };
+                            pendingTextDelta.Clear();
+                        }
                         break;
 
                     case "thinking_delta":
                         thinkingBuilder.Append(evt.Thinking);
-                        yield return new ThinkingDeltaEvent { Thinking = evt.Thinking ?? "" };
+                        pendingThinkingDelta.Append(evt.Thinking);
+                        if (pendingThinkingDelta.Length >= DeltaFlushThreshold)
+                        {
+                            yield return new ThinkingDeltaEvent { Thinking = pendingThinkingDelta.ToString() };
+                            pendingThinkingDelta.Clear();
+                        }
                         break;
 
                     case "thinking_encrypted":
@@ -162,13 +191,21 @@ public static class AgentLoop
                             activeToolArgs.TryGetValue(evt.ToolCallId, out var argBuf))
                         {
                             argBuf.Append(evt.ArgumentsDelta);
-                            if (PartialJsonParser.TryParsePartial(argBuf.ToString(), out var partialInput) && partialInput is not null)
+
+                            // Debounce: only attempt partial JSON parse every 512 bytes
+                            // to avoid O(n²) ToString+parse on every tiny delta chunk
+                            var lastLen = lastParsedArgLen.GetValueOrDefault(evt.ToolCallId, 0);
+                            if (argBuf.Length - lastLen >= 512)
                             {
-                                yield return new ToolUseArgsDeltaEvent
+                                lastParsedArgLen[evt.ToolCallId] = argBuf.Length;
+                                if (PartialJsonParser.TryParsePartial(argBuf.ToString(), out var partialInput) && partialInput is not null)
                                 {
-                                    ToolCallId = evt.ToolCallId,
-                                    PartialInput = partialInput
-                                };
+                                    yield return new ToolUseArgsDeltaEvent
+                                    {
+                                        ToolCallId = evt.ToolCallId,
+                                        PartialInput = partialInput
+                                    };
+                                }
                             }
                         }
                         break;
@@ -228,12 +265,19 @@ public static class AgentLoop
                     case "error":
                         yield return new AgentErrorEvent
                         {
-                            Message = evt.Error?.Message ?? "Unknown error"
+                            Message = evt.Error?.Message ?? "Unknown error",
+                            ErrorType = evt.Error?.Type
                         };
                         yield return new LoopEndEvent { Reason = "error" };
                         yield break;
                 }
             }
+
+            // Flush any remaining micro-batched deltas after stream ends
+            if (pendingTextDelta.Length > 0)
+                yield return new TextDeltaEvent { Text = pendingTextDelta.ToString() };
+            if (pendingThinkingDelta.Length > 0)
+                yield return new ThinkingDeltaEvent { Thinking = pendingThinkingDelta.ToString() };
 
             // --- Build assistant message ---
             var assistantContent = new List<ContentBlock>();
@@ -380,16 +424,29 @@ public static class AgentLoop
         ApprovalHandler? onApproval,
         CancellationToken ct)
     {
+        var toolContext = new ToolContext
+        {
+            SessionId = config.ToolContext.SessionId,
+            WorkingFolder = config.ToolContext.WorkingFolder,
+            CurrentToolUseId = tc.Id,
+            AgentRunId = config.ToolContext.AgentRunId,
+            ElectronInvokeAsync = config.ToolContext.ElectronInvokeAsync,
+            RendererToolInvokeAsync = config.ToolContext.RendererToolInvokeAsync,
+            RendererToolRequiresApprovalAsync = config.ToolContext.RendererToolRequiresApprovalAsync,
+            InlineToolHandlers = config.ToolContext.InlineToolHandlers,
+            LocalToolHandlers = config.ToolContext.LocalToolHandlers
+        };
+
         // Check if approval is needed
         var rendererApproval = false;
-        if (config.ToolContext.RendererToolRequiresApprovalAsync is not null)
+        if (toolContext.RendererToolRequiresApprovalAsync is not null)
         {
-            rendererApproval = await config.ToolContext.RendererToolRequiresApprovalAsync(tc.Name, tc.Input, config.ToolContext, ct);
+            rendererApproval = await toolContext.RendererToolRequiresApprovalAsync(tc.Name, tc.Input, toolContext, ct);
         }
 
         var requiresApproval = config.ForceApproval ||
             rendererApproval ||
-            config.ToolRegistry.CheckRequiresApproval(tc.Name, tc.Input, config.ToolContext);
+            config.ToolRegistry.CheckRequiresApproval(tc.Name, tc.Input, toolContext);
 
         if (requiresApproval && onApproval is not null)
         {
@@ -413,7 +470,7 @@ public static class AgentLoop
         try
         {
             var result = await config.ToolRegistry.Execute(
-                tc.Name, tc.Input, config.ToolContext, ct);
+                tc.Name, tc.Input, toolContext, ct);
 
             tc.Status = result.IsError ? ToolCallStatus.Error : ToolCallStatus.Completed;
             tc.Error = result.IsError ? result.AsText() : null;
@@ -441,15 +498,19 @@ public static class AgentLoop
         }
     }
 
+    /// <summary>
+    /// Shallow clone for event reporting — avoids deep-copying Dictionary/JsonElement
+    /// since events are serialized immediately and the source is not mutated concurrently.
+    /// </summary>
     private static ToolCallState CloneToolCallState(ToolCallState source)
     {
         return new ToolCallState
         {
             Id = source.Id,
             Name = source.Name,
-            Input = source.Input.ToDictionary(static pair => pair.Key, static pair => pair.Value.Clone()),
+            Input = source.Input, // Shared ref — safe because source Input is replaced, not mutated
             Status = source.Status,
-            Output = source.Output?.Clone(),
+            Output = source.Output,
             Error = source.Error,
             RequiresApproval = source.RequiresApproval,
             StartedAt = source.StartedAt,

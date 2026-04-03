@@ -12,6 +12,9 @@ public static class Program
         // Redirect stderr for logging (stdout is reserved for JSON-RPC)
         var logWriter = Console.Error;
 
+        // Minimize thread pool reserved memory (each thread = 1MB stack)
+        ThreadPool.SetMinThreads(2, 2);
+
         if (args.Length > 0 && string.Equals(args[0], "benchmark", StringComparison.OrdinalIgnoreCase))
         {
             return await BenchmarkRunner.RunAsync(Console.Out);

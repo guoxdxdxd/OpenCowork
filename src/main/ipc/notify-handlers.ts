@@ -59,7 +59,7 @@ export function registerNotifyHandlers(): void {
     'notify:desktop',
     async (_event, args: { title: string; body: string; type?: string; duration?: number }) => {
       try {
-        showSystemNotification(args.title ?? 'OpenCowork', args.body ?? '')
+        showSystemNotification(args.title ?? 'OpenCoWork', args.body ?? '')
         return { success: true }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
@@ -76,7 +76,7 @@ export function registerNotifyHandlers(): void {
         }
         safeSendToAllWindows('notify:session-message', {
           sessionId: args.sessionId,
-          title: args.title ?? 'OpenCowork',
+          title: args.title ?? 'OpenCoWork',
           body: args.body ?? ''
         })
         return { success: true }

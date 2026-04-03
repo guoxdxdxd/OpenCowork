@@ -13,7 +13,7 @@ import {
 
 import { join, extname } from 'path'
 import { mkdirSync, writeFileSync } from 'fs'
-import { homedir } from 'os'
+import { homedir, totalmem } from 'os'
 import { randomUUID } from 'crypto'
 import { spawn } from 'child_process'
 
@@ -374,10 +374,12 @@ function configureChromiumCachePaths(): void {
   }
 }
 
-/** Raise V8 old-space limit (default ~4GB) to reduce renderer OOM on long sessions. Must run before ready. */
+/** Cap renderer V8 old-space to 1/4 of system RAM (min 512 MB, max 4 GB). Must run before ready. */
 function configureRendererHeapLimit(): void {
   try {
-    app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192')
+    const systemMemMb = Math.floor(totalmem() / (1024 * 1024))
+    const heapSizeMb = Math.max(512, Math.min(Math.floor(systemMemMb / 4), 4096))
+    app.commandLine.appendSwitch('js-flags', `--max-old-space-size=${heapSizeMb}`)
   } catch (error) {
     console.warn('[Main] Failed to set renderer heap limit:', error)
   }
@@ -416,7 +418,7 @@ function createTray(): void {
 
   tray = new Tray(getTrayIcon())
 
-  tray.setToolTip('OpenCowork')
+  tray.setToolTip('OpenCoWork')
 
   const contextMenu = Menu.buildFromTemplate([
     {

@@ -27,6 +27,8 @@ public sealed class AnthropicProvider : ILlmProvider
         var requestStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         long? firstTokenAt = null;
         var outputTokens = 0;
+        var promptCacheEnabled = config.EnablePromptCache != false;
+        var systemPromptCacheEnabled = promptCacheEnabled || config.EnableSystemPromptCache == true;
 
         var baseUrl = (config.BaseUrl ?? "https://api.anthropic.com").TrimEnd('/');
         var url = $"{baseUrl}/v1/messages";
@@ -73,9 +75,10 @@ public sealed class AnthropicProvider : ILlmProvider
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
 
         // Zero-copy SSE parsing: SseItemParser receives ReadOnlySpan<byte>
-        var pendingUsage = new TokenUsage();
+        var pendingUsage = new TokenUsage { InputTokens = 0, OutputTokens = 0 };
         var toolBuffers = new Dictionary<int, StringBuilder>();
         var toolCalls = new Dictionary<int, (string Id, string Name)>();
+        var emittedThinkingEncrypted = new HashSet<string>(StringComparer.Ordinal);
 
         await foreach (var payload in SseStreamReader.ReadAsync<AnthropicSsePayload>(
             stream,
@@ -96,10 +99,25 @@ public sealed class AnthropicProvider : ILlmProvider
                     if (msgUsage is not null)
                     {
                         pendingUsage.InputTokens = msgUsage.InputTokens ?? 0;
-                        if (msgUsage.CacheCreationInputTokens.HasValue)
+                        pendingUsage.ContextTokens = pendingUsage.InputTokens;
+
+                        if (msgUsage.CacheCreation?.Ephemeral5mInputTokens is { } cacheCreation5mTokens
+                            || msgUsage.CacheCreation?.Ephemeral1hInputTokens is { } cacheCreation1hTokens)
+                        {
+                            var totalCacheCreationTokens = (msgUsage.CacheCreation?.Ephemeral5mInputTokens ?? 0)
+                                + (msgUsage.CacheCreation?.Ephemeral1hInputTokens ?? 0);
+                            pendingUsage.CacheCreationTokens = totalCacheCreationTokens > 0 ? totalCacheCreationTokens : null;
+                        }
+                        else if (msgUsage.CacheCreationInputTokens.HasValue)
+                        {
                             pendingUsage.CacheCreationTokens = msgUsage.CacheCreationInputTokens;
+                        }
+
                         if (msgUsage.CacheReadInputTokens.HasValue)
                             pendingUsage.CacheReadTokens = msgUsage.CacheReadInputTokens;
+
+                        var billableInputTokens = pendingUsage.InputTokens - (pendingUsage.CacheReadTokens ?? 0);
+                        pendingUsage.BillableInputTokens = billableInputTokens >= 0 ? billableInputTokens : 0;
                     }
                     break;
 
@@ -120,8 +138,8 @@ public sealed class AnthropicProvider : ILlmProvider
                     }
                     else if (block?.Type == "thinking")
                     {
-                        var sig = block.Signature ?? block.EncryptedContent;
-                        if (sig is not null)
+                        var sig = (block.Signature ?? block.EncryptedContent)?.Trim();
+                        if (!string.IsNullOrWhiteSpace(sig) && emittedThinkingEncrypted.Add(sig))
                         {
                             yield return new StreamEvent
                             {
@@ -150,8 +168,8 @@ public sealed class AnthropicProvider : ILlmProvider
                     }
                     else if (delta?.Type == "signature_delta")
                     {
-                        var sig = delta.Signature ?? delta.EncryptedContent;
-                        if (sig is not null)
+                        var sig = (delta.Signature ?? delta.EncryptedContent)?.Trim();
+                        if (!string.IsNullOrWhiteSpace(sig) && emittedThinkingEncrypted.Add(sig))
                         {
                             yield return new StreamEvent
                             {
@@ -164,15 +182,17 @@ public sealed class AnthropicProvider : ILlmProvider
                     else if (delta?.Type == "input_json_delta" && idx >= 0)
                     {
                         if (toolBuffers.TryGetValue(idx, out var buf))
+                        {
                             buf.Append(delta.PartialJson);
 
-                        var tc = toolCalls.GetValueOrDefault(idx);
-                        yield return new StreamEvent
-                        {
-                            Type = "tool_call_delta",
-                            ToolCallId = tc.Id,
-                            ArgumentsDelta = delta.PartialJson
-                        };
+                            var tc = toolCalls.GetValueOrDefault(idx);
+                            yield return new StreamEvent
+                            {
+                                Type = "tool_call_delta",
+                                ToolCallId = tc.Id,
+                                ArgumentsDelta = delta.PartialJson
+                            };
+                        }
                     }
                     break;
                 }
@@ -183,19 +203,14 @@ public sealed class AnthropicProvider : ILlmProvider
                     if (toolCalls.TryGetValue(idx, out var tc))
                     {
                         var raw = toolBuffers.GetValueOrDefault(idx)?.ToString()?.Trim() ?? "";
-                        Dictionary<string, JsonElement>? input = null;
-                        if (!string.IsNullOrEmpty(raw))
-                        {
-                        try { input = JsonSerializer.Deserialize(raw, AppJsonContext.Default.DictionaryStringJsonElement); }
-                        catch { /* ignore parse failures */ }
-                        }
+                        var input = ProviderMessageFormatter.ParseToolInputObject(raw);
 
                         yield return new StreamEvent
                         {
                             Type = "tool_call_end",
                             ToolCallId = tc.Id,
                             ToolName = tc.Name,
-                            ToolCallInput = input ?? new Dictionary<string, JsonElement>()
+                            ToolCallInput = input
                         };
 
                         toolBuffers.Remove(idx);
@@ -221,8 +236,10 @@ public sealed class AnthropicProvider : ILlmProvider
                         {
                             InputTokens = pendingUsage.InputTokens,
                             OutputTokens = pendingUsage.OutputTokens,
+                            BillableInputTokens = pendingUsage.BillableInputTokens,
                             CacheCreationTokens = pendingUsage.CacheCreationTokens,
-                            CacheReadTokens = pendingUsage.CacheReadTokens
+                            CacheReadTokens = pendingUsage.CacheReadTokens,
+                            ContextTokens = pendingUsage.ContextTokens
                         },
                         Timing = new RequestTiming
                         {
@@ -274,13 +291,19 @@ public sealed class AnthropicProvider : ILlmProvider
         List<ToolDefinition> tools,
         ProviderConfig config)
     {
+        var promptCacheEnabled = config.EnablePromptCache != false;
+        var systemPromptCacheEnabled = promptCacheEnabled || config.EnableSystemPromptCache == true;
+        var maxTokens = ResolveAnthropicMaxTokens(config);
         var body = new JsonObject
         {
             ["model"] = config.Model,
-            ["max_tokens"] = config.MaxTokens ?? 32000,
+            ["max_tokens"] = maxTokens,
             ["stream"] = true,
-            ["messages"] = ProviderMessageFormatter.FormatAnthropicMessages(messages)
+            ["messages"] = ProviderMessageFormatter.FormatAnthropicMessages(messages, promptCacheEnabled)
         };
+
+        if (promptCacheEnabled)
+            body["cache_control"] = new JsonObject { ["type"] = "ephemeral" };
 
         if (config.SystemPrompt is not null)
         {
@@ -290,7 +313,7 @@ public sealed class AnthropicProvider : ILlmProvider
                 {
                     ["type"] = "text",
                     ["text"] = config.SystemPrompt,
-                    ["cache_control"] = config.EnableSystemPromptCache == true
+                    ["cache_control"] = systemPromptCacheEnabled
                         ? new JsonObject { ["type"] = "ephemeral" }
                         : null
                 }
@@ -300,29 +323,42 @@ public sealed class AnthropicProvider : ILlmProvider
         if (config.Temperature.HasValue)
             body["temperature"] = config.Temperature.Value;
 
-        if (config.ThinkingEnabled == true)
+        if (config.ThinkingEnabled == true && config.ThinkingConfig is not null)
         {
-            var budget = config.ThinkingConfig?.BodyParams?.TryGetValue("budget_tokens", out var budgetTokens) == true
-                && budgetTokens.ValueKind == JsonValueKind.Number
-                ? budgetTokens.GetInt32()
-                : Math.Min(config.MaxTokens ?? 32000, 32000);
-            body["thinking"] = new JsonObject
+            foreach (var (key, value) in config.ThinkingConfig.BodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
+
+            var effort = ResolveAnthropicEffort(config);
+            if (!string.IsNullOrWhiteSpace(effort))
             {
-                ["type"] = "enabled",
-                ["budget_tokens"] = budget
-            };
+                var outputConfig = body["output_config"] as JsonObject ?? new JsonObject();
+                outputConfig["effort"] = effort;
+                body["output_config"] = outputConfig;
+            }
+
+            if (config.ThinkingConfig.ForceTemperature is not null)
+                body["temperature"] = config.ThinkingConfig.ForceTemperature;
+        }
+        else if (config.ThinkingEnabled != true && config.ThinkingConfig?.DisabledBodyParams is { Count: > 0 } disabledBodyParams)
+        {
+            foreach (var (key, value) in disabledBodyParams)
+                body[key] = JsonNode.Parse(value.GetRawText());
         }
 
         if (tools.Count > 0)
         {
             var toolsArr = new JsonArray();
-            foreach (var t in tools)
+            for (var index = 0; index < tools.Count; index++)
             {
+                var t = tools[index];
                 toolsArr.Add(new JsonObject
                 {
                     ["name"] = t.Name,
                     ["description"] = t.Description,
-                    ["input_schema"] = ProviderMessageFormatter.NormalizeToolSchema(t.InputSchema, sanitizeForGemini: false)
+                    ["input_schema"] = ProviderMessageFormatter.NormalizeToolSchema(t.InputSchema, sanitizeForGemini: false),
+                    ["cache_control"] = promptCacheEnabled && index == tools.Count - 1
+                        ? new JsonObject { ["type"] = "ephemeral" }
+                        : null
                 });
             }
             body["tools"] = toolsArr;
@@ -330,13 +366,110 @@ public sealed class AnthropicProvider : ILlmProvider
         }
 
         ProviderMessageFormatter.ApplyRequestOverrides(body, config);
-        return Encoding.UTF8.GetBytes(body.ToJsonString());
+        NormalizeAnthropicThinkingRequest(body);
+
+        // Serialize directly to pooled buffer — avoids intermediate string from ToJsonString()
+        using var bufferWriter = new System.IO.MemoryStream();
+        using (var writer = new Utf8JsonWriter(bufferWriter))
+        {
+            body.WriteTo(writer);
+        }
+        return bufferWriter.ToArray();
+    }
+
+    private static int ResolveAnthropicMaxTokens(ProviderConfig config)
+    {
+        var configuredMaxTokens = config.MaxTokens ?? 32000;
+        if (config.ThinkingEnabled != true || config.ThinkingConfig is null)
+            return configuredMaxTokens;
+
+        if (!TryGetThinkingBudgetTokens(config.ThinkingConfig, out var budgetTokens))
+            return configuredMaxTokens;
+
+        return Math.Max(configuredMaxTokens, budgetTokens + 1);
+    }
+
+    private static bool TryGetThinkingBudgetTokens(ThinkingConfig config, out int budgetTokens)
+    {
+        budgetTokens = 0;
+
+        if (!config.BodyParams.TryGetValue("thinking", out var thinkingNode)
+            || thinkingNode.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!thinkingNode.TryGetProperty("budget_tokens", out var budgetNode))
+            return false;
+
+        return budgetNode.ValueKind switch
+        {
+            JsonValueKind.Number => budgetNode.TryGetInt32(out budgetTokens),
+            JsonValueKind.String => int.TryParse(budgetNode.GetString(), out budgetTokens),
+            _ => false
+        };
+    }
+
+    private static void NormalizeAnthropicThinkingRequest(JsonObject body)
+    {
+        if (body["thinking"] is not JsonObject thinking)
+            return;
+
+        if (!TryReadBudgetTokens(thinking["budget_tokens"], out var budgetTokens))
+            return;
+
+        var configuredMaxTokens = body["max_tokens"] switch
+        {
+            JsonValue value when value.TryGetValue<int>(out var intValue) => intValue,
+            JsonValue value when value.TryGetValue<string>(out var strValue) && int.TryParse(strValue, out var parsed) => parsed,
+            _ => 0
+        };
+
+        var normalizedMaxTokens = Math.Max(Math.Max(configuredMaxTokens, 1), budgetTokens + 1);
+        body["max_tokens"] = normalizedMaxTokens;
+    }
+
+    private static bool TryReadBudgetTokens(JsonNode? node, out int budgetTokens)
+    {
+        budgetTokens = 0;
+        return node switch
+        {
+            JsonValue value when value.TryGetValue<int>(out budgetTokens) => true,
+            JsonValue value when value.TryGetValue<string>(out var strValue) && int.TryParse(strValue, out budgetTokens) => true,
+            _ => false
+        };
+    }
+
+    private static string? ResolveAnthropicEffort(ProviderConfig config)
+    {
+        var levels = config.ThinkingConfig?.ReasoningEffortLevels;
+        if (levels is null || levels.Count == 0)
+            return null;
+
+        var selected = !string.IsNullOrWhiteSpace(config.ReasoningEffort) && levels.Contains(config.ReasoningEffort)
+            ? config.ReasoningEffort
+            : config.ThinkingConfig?.DefaultReasoningEffort ?? levels[0];
+
+        return selected switch
+        {
+            "low" => "low",
+            "medium" => "medium",
+            "high" => "high",
+            "max" => "max",
+            "xhigh" => "max",
+            _ => null
+        };
     }
 
     private static double? ComputeTps(int outputTokens, long? firstTokenAt, long completedAt)
     {
-        if (firstTokenAt is null || outputTokens <= 1) return null;
-        var durationSec = (completedAt - firstTokenAt.Value) / 1000.0;
-        return durationSec > 0 ? (outputTokens - 1) / durationSec : null;
+        if (firstTokenAt is null || outputTokens <= 0)
+            return null;
+
+        var durationMs = completedAt - firstTokenAt.Value;
+        if (durationMs <= 0)
+            return null;
+
+        return outputTokens / (durationMs / 1000.0);
     }
 }

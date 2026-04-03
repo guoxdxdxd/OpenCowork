@@ -50,9 +50,30 @@ public sealed class StdioJsonRpcTransport : IAsyncDisposable
                 JsonRpcMessage? msg = null;
                 try
                 {
-                    msg = JsonSerializer.Deserialize(
-                        new ReadOnlySpan<byte>(line.ToArray()),
-                        AppJsonContext.Default.JsonRpcMessage);
+                    // Fast path: single-segment sequences avoid heap allocation entirely
+                    if (line.IsSingleSegment)
+                    {
+                        msg = JsonSerializer.Deserialize(
+                            line.FirstSpan,
+                            AppJsonContext.Default.JsonRpcMessage);
+                    }
+                    else
+                    {
+                        // Multi-segment: rent pooled buffer instead of allocating
+                        var len = (int)line.Length;
+                        var rented = System.Buffers.ArrayPool<byte>.Shared.Rent(len);
+                        try
+                        {
+                            line.CopyTo(rented);
+                            msg = JsonSerializer.Deserialize(
+                                new ReadOnlySpan<byte>(rented, 0, len),
+                                AppJsonContext.Default.JsonRpcMessage);
+                        }
+                        finally
+                        {
+                            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                        }
+                    }
                 }
                 catch (JsonException ex)
                 {

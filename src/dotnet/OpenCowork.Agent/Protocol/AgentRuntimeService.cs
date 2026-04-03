@@ -51,6 +51,7 @@ public sealed class AgentRuntimeService
         "tool.CronList",
         "tool.Task",
         "tool.Skill",
+        "tool.ImageGenerate",
         "desktop.input",
         "provider.anthropic",
         "provider.openai-chat",
@@ -132,7 +133,13 @@ public sealed class AgentRuntimeService
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss.fff}] [AgentRuntime] run failed runId={runId}: {ex}");
-                await SendAgentEventAsync(runId, new AgentErrorEvent { Message = ex.Message }, CancellationToken.None);
+                await SendAgentEventAsync(runId, new AgentErrorEvent
+                {
+                    Message = BuildErrorMessage(ex),
+                    ErrorType = ex.GetType().Name,
+                    Details = BuildErrorDetails(ex),
+                    StackTrace = ex.StackTrace
+                }, CancellationToken.None);
                 await SendAgentEventAsync(runId, new LoopEndEvent { Reason = "error" }, CancellationToken.None);
             }
             finally
@@ -140,6 +147,9 @@ public sealed class AgentRuntimeService
                 Console.Error.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss.fff}] [AgentRuntime] cleaning up runId={runId}");
                 if (_activeRuns.TryRemove(runId, out var linkedCts))
                     linkedCts.Dispose();
+                // Return heap memory to OS after run completes
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
             }
         }, CancellationToken.None);
 
@@ -717,6 +727,7 @@ public sealed class AgentRuntimeService
         RegisterRendererBridgedTool("CronList", "List scheduled cron jobs.", ParseSchema("""{"type":"object","properties":{}}"""));
         RegisterRendererBridgedTool("Task", "Run a sub-agent task.", ParseSchema("""{"type":"object","properties":{"subagent_type":{"type":"string"},"description":{"type":"string"},"prompt":{"type":"string"},"model":{"type":"string"},"resume":{"type":"string"},"readonly":{"type":"boolean"},"attachments":{"type":"array","items":{"type":"string"}},"run_in_background":{"type":"boolean"}},"required":["subagent_type","description","prompt"]}"""));
         RegisterRendererBridgedTool("Skill", "Load a skill by name.", ParseSchema("""{"type":"object","properties":{"SkillName":{"type":"string"}},"required":["SkillName"]}"""));
+        RegisterRendererBridgedTool("ImageGenerate", "Generate images from a complete visual prompt.", ParseSchema("""{"type":"object","properties":{"prompt":{"type":"string"},"count":{"type":"number"}},"required":["prompt"]}"""));
     }
 
     private void RegisterRendererBridgedTool(string name, string description, JsonElement inputSchema)
@@ -950,6 +961,50 @@ public sealed class AgentRuntimeService
         var full = Path.GetFullPath(path);
         return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
             || string.Equals(full, root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildErrorMessage(Exception ex)
+    {
+        var message = string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message.Trim();
+        var innerMessages = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var current = ex.InnerException;
+
+        while (current is not null && innerMessages.Count < 3)
+        {
+            var currentMessage = string.IsNullOrWhiteSpace(current.Message)
+                ? current.GetType().Name
+                : current.Message.Trim();
+
+            if (!string.Equals(currentMessage, message, StringComparison.Ordinal) && seen.Add(currentMessage))
+                innerMessages.Add($"{current.GetType().Name}: {currentMessage}");
+
+            current = current.InnerException;
+        }
+
+        return innerMessages.Count == 0
+            ? message
+            : $"{message} | {string.Join(" | ", innerMessages)}";
+    }
+
+    private static string? BuildErrorDetails(Exception ex)
+    {
+        var lines = new List<string>();
+        var current = ex;
+        var depth = 0;
+
+        while (current is not null && depth < 5)
+        {
+            var message = string.IsNullOrWhiteSpace(current.Message)
+                ? current.GetType().Name
+                : current.Message.Trim();
+            var label = depth == 0 ? "Error" : $"Inner[{depth}]";
+            lines.Add($"{label}: {current.GetType().Name}: {message}");
+            current = current.InnerException;
+            depth++;
+        }
+
+        return lines.Count > 1 ? string.Join(Environment.NewLine, lines) : null;
     }
 
     private async Task SendAgentEventAsync(string runId, AgentEvent evt, CancellationToken ct)

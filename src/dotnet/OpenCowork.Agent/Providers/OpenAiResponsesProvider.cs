@@ -365,7 +365,10 @@ public sealed class OpenAiResponsesProvider : ILlmProvider
         }
 
         ProviderMessageFormatter.ApplyRequestOverrides(body, config);
-        return Encoding.UTF8.GetBytes(body.ToJsonString());
+        using var ms = new System.IO.MemoryStream();
+        using (var w = new System.Text.Json.Utf8JsonWriter(ms))
+        { body.WriteTo(w); }
+        return ms.ToArray();
     }
 
     private static JsonArray BuildToolsPayload(List<ToolDefinition> tools, bool includeComputerTool)
