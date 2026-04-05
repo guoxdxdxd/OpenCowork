@@ -12,7 +12,6 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY docs/ .
 RUN npm rebuild esbuild lightningcss
-RUN npm run postinstall
 RUN npm run build
 
 # ── runner ────────────────────────────────────────────
