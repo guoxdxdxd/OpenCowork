@@ -4,7 +4,8 @@ import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool
 import { teamEvents } from '../events'
 import { useTeamStore } from '../../../../stores/team-store'
 import type { TeamMessage, TeamMessageType } from '../types'
-import { appendTeamRuntimeMessage } from '../runtime-client'
+import type { TeamRuntimePermissionMode, TeamRuntimePermissionUpdatePayload } from '../../../../../../shared/team-runtime-types'
+import { appendTeamRuntimeMessage, updateTeamRuntimeManifest } from '../runtime-client'
 
 const VALID_TYPES: TeamMessageType[] = [
   'message',
@@ -78,14 +79,48 @@ export const sendMessageTool: ToolHandler = {
       return encodeToolError(`Invalid message type: ${input.type}`)
     }
 
-    const recipient = msgType === 'broadcast' ? 'all' : String(input.recipient ?? 'all')
+    let recipient = msgType === 'broadcast' ? 'all' : String(input.recipient ?? 'all')
+    let content = String(input.content)
+
+    if (msgType === 'mode_set_request' || msgType === 'team_permission_update') {
+      recipient = 'all'
+      const raw = typeof input.content === 'string' ? input.content : JSON.stringify(input.content)
+      let payload: TeamRuntimePermissionUpdatePayload | null = null
+      try {
+        payload = JSON.parse(raw) as TeamRuntimePermissionUpdatePayload
+      } catch {
+        if (msgType === 'mode_set_request') {
+          const mode = raw.trim()
+          if (mode === 'default' || mode === 'plan') {
+            payload = { permissionMode: mode as TeamRuntimePermissionMode }
+          }
+        }
+      }
+
+      if (!payload) {
+        return encodeToolError('Invalid permission update payload')
+      }
+
+      await updateTeamRuntimeManifest({
+        teamName: team.name,
+        patch: {
+          ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+          ...(payload.teamAllowedPaths ? { teamAllowedPaths: payload.teamAllowedPaths } : {})
+        }
+      })
+      useTeamStore.getState().updateTeamMeta({
+        ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+        ...(payload.teamAllowedPaths ? { teamAllowedPaths: payload.teamAllowedPaths } : {})
+      })
+      content = JSON.stringify(payload)
+    }
 
     const msg: TeamMessage = {
       id: nanoid(8),
       from: input.sender ? String(input.sender) : 'lead',
       to: recipient,
       type: msgType,
-      content: String(input.content),
+      content,
       summary: input.summary ? String(input.summary) : undefined,
       timestamp: Date.now()
     }

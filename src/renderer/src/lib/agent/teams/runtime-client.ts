@@ -7,6 +7,7 @@ import type {
   TeamRuntimeCreateResult,
   TeamRuntimeMessageRecord,
   TeamRuntimeSnapshot,
+  UpdateTeamRuntimeManifestArgs,
   UpdateTeamRuntimeMemberArgs
 } from '../../../../../shared/team-runtime-types'
 
@@ -36,6 +37,12 @@ export async function updateTeamRuntimeMember(
   args: UpdateTeamRuntimeMemberArgs
 ): Promise<{ success: true }> {
   return window.api.teamRuntimeUpdateMember(args)
+}
+
+export async function updateTeamRuntimeManifest(
+  args: UpdateTeamRuntimeManifestArgs
+): Promise<{ success: true }> {
+  return window.api.teamRuntimeUpdateManifest(args)
 }
 
 export async function consumeTeamRuntimeMessages(

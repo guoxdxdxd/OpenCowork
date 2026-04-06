@@ -79,10 +79,24 @@ export interface StopIsolatedTeamWorkerArgs {
   workerId: string
 }
 
+export interface StopIsolatedTeamWorkersArgs {
+  teamName: string
+}
+
+export interface TeamRuntimePermissionUpdatePayload {
+  permissionMode?: TeamRuntimePermissionMode
+  teamAllowedPaths?: string[]
+}
+
 export interface UpdateTeamRuntimeMemberArgs {
   teamName: string
   memberId: string
   patch: Partial<TeamRuntimeMemberRecord>
+}
+
+export interface UpdateTeamRuntimeManifestArgs {
+  teamName: string
+  patch: Partial<Pick<TeamRuntimeManifest, 'permissionMode' | 'teamAllowedPaths' | 'updatedAt'>>
 }
 
 export interface TeamRuntimeManifest {

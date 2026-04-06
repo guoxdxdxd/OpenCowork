@@ -1,5 +1,8 @@
 import type { ToolCallState } from '../types'
-import type { TeamRuntimePlanApprovalRequestPayload } from '../../../../../shared/team-runtime-types'
+import type {
+  TeamRuntimePermissionUpdatePayload,
+  TeamRuntimePlanApprovalRequestPayload
+} from '../../../../../shared/team-runtime-types'
 import { useAgentStore } from '../../../stores/agent-store'
 import { useTeamStore } from '../../../stores/team-store'
 import type { TeamMessage } from './types'
@@ -16,6 +19,16 @@ function parseToolCall(content: string): ToolCallState | null {
     if (!parsed || typeof parsed !== 'object') return null
     if (typeof parsed.id !== 'string' || typeof parsed.name !== 'string') return null
     if (!parsed.input || typeof parsed.input !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function parsePermissionUpdate(content: string): TeamRuntimePermissionUpdatePayload | null {
+  try {
+    const parsed = JSON.parse(content) as TeamRuntimePermissionUpdatePayload
+    if (!parsed || typeof parsed !== 'object') return null
     return parsed
   } catch {
     return null
@@ -80,6 +93,17 @@ async function handleLeadMessage(message: TeamMessage): Promise<void> {
     })
 
     registerPendingApproval(message.id, toolCall.id, message.from)
+    return
+  }
+
+  if (message.type === 'team_permission_update') {
+    const payload = parsePermissionUpdate(message.content)
+    if (!payload) return
+
+    useTeamStore.getState().updateTeamMeta({
+      ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+      ...(payload.teamAllowedPaths ? { teamAllowedPaths: payload.teamAllowedPaths } : {})
+    })
     return
   }
 

@@ -13,6 +13,7 @@ import type {
   TeamRuntimeManifest,
   TeamRuntimeMessageRecord,
   TeamRuntimeSnapshot,
+  UpdateTeamRuntimeManifestArgs,
   UpdateTeamRuntimeMemberArgs
 } from '../../shared/team-runtime-types'
 
@@ -228,6 +229,22 @@ async function getTeamSnapshot(args: GetTeamRuntimeSnapshotArgs): Promise<TeamRu
   }
 }
 
+async function updateTeamManifest(args: UpdateTeamRuntimeManifestArgs): Promise<{ success: true }> {
+  const teamFilePath = getTeamFilePath(args.teamName)
+  await withJsonFileLock(teamFilePath, async () => {
+    const manifest = readManifest(args.teamName)
+    if (!manifest) {
+      throw new Error(`Team "${args.teamName}" does not exist`)
+    }
+
+    Object.assign(manifest, args.patch)
+    manifest.updatedAt = Date.now()
+    writeJsonFile(teamFilePath, manifest)
+  })
+
+  return { success: true }
+}
+
 async function updateTeamMember(args: UpdateTeamRuntimeMemberArgs): Promise<{ success: true }> {
   const teamFilePath = getTeamFilePath(args.teamName)
   await withJsonFileLock(teamFilePath, async () => {
@@ -303,6 +320,10 @@ export function registerTeamRuntimeHandlers(): void {
 
   ipcMain.handle('team-runtime:member:update', async (_event, args: UpdateTeamRuntimeMemberArgs) => {
     return updateTeamMember(args)
+  })
+
+  ipcMain.handle('team-runtime:manifest:update', async (_event, args: UpdateTeamRuntimeManifestArgs) => {
+    return updateTeamManifest(args)
   })
 
   ipcMain.handle(

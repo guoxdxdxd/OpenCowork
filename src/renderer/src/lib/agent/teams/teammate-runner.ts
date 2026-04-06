@@ -15,10 +15,11 @@ import { buildRuntimeCompression } from '../context-compression-runtime'
 import { subAgentRegistry } from '../sub-agents/registry'
 import { resolveSubAgentTools } from '../sub-agents/resolve-tools'
 import { runSharedAgentRuntime } from '../shared-runtime'
-import { appendTeamRuntimeMessage } from './runtime-client'
+import { appendTeamRuntimeMessage, updateTeamRuntimeMember } from './runtime-client'
 import { requestTeammatePermission, stopWorkerPermissionPoller } from './permission-bridge'
 import { requestPlanApproval, stopWorkerPlanApprovalPoller } from './plan-approval-bridge'
 import { buildTeammateAddendum } from './prompts'
+import { startWorkerInboxPoller, stopWorkerInboxPoller } from './worker-inbox'
 
 // --- AbortController registry for individual teammates ---
 const teammateAbortControllers = new Map<string, AbortController>()
@@ -29,6 +30,24 @@ const teammateAbortControllers = new Map<string, AbortController>()
 const teammateShutdownRequested = new Set<string>()
 // 0 => unlimited iterations (teammate stops only on completion/shutdown/error/abort)
 const DEFAULT_TEAMMATE_MAX_ITERATIONS = 0
+
+async function syncRuntimeMemberState(
+  memberId: string,
+  patch: Parameters<typeof updateTeamRuntimeMember>[0]['patch']
+): Promise<void> {
+  const team = useTeamStore.getState().activeTeam
+  if (!team?.name) return
+
+  try {
+    await updateTeamRuntimeMember({
+      teamName: team.name,
+      memberId,
+      patch
+    })
+  } catch (error) {
+    console.error('[TeamRuntime] Failed to sync teammate runtime member state:', error)
+  }
+}
 
 /**
  * Request graceful shutdown: teammate finishes current iteration then stops.
@@ -112,7 +131,7 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
   // them into the agent loop at iteration boundaries (between turns).
   const messageQueue = new MessageQueue()
 
-  // Listen for team messages targeting this teammate
+  // Listen for in-process team events targeting this teammate
   const unsubMessages = teamEvents.on((event) => {
     if (event.type !== 'team_message') return
     const msg = event.message
@@ -122,12 +141,25 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
 
     if (msg.type === 'shutdown_request') {
       teammateShutdownRequested.add(memberId)
-    } else {
+    } else if (msg.type !== 'permission_response' && msg.type !== 'plan_approval_response') {
       messageQueue.push({
         id: nanoid(),
         role: 'user',
         content: `[Team message from ${msg.from}]: ${msg.content}`,
         createdAt: msg.timestamp
+      })
+    }
+  })
+
+  startWorkerInboxPoller({
+    memberId,
+    memberName,
+    onMessage: (content, createdAt) => {
+      messageQueue.push({
+        id: nanoid(),
+        role: 'user',
+        content,
+        createdAt
       })
     }
   })
@@ -155,6 +187,10 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
           memberId,
           patch: { currentTaskId: initialTask.id }
         })
+        await syncRuntimeMemberState(memberId, {
+          currentTaskId: initialTask.id,
+          status: 'working'
+        })
       }
     }
 
@@ -180,20 +216,32 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
     else if (result.reason === 'shutdown') endReason = 'shutdown'
     else if (result.reason === 'error') endReason = 'error'
 
+    const completedAt = Date.now()
     teamEvents.emit({
       type: 'team_member_update',
       memberId,
-      patch: { status: 'stopped', completedAt: Date.now() }
+      patch: { status: 'stopped', completedAt }
+    })
+    await syncRuntimeMemberState(memberId, {
+      status: 'stopped',
+      completedAt,
+      isActive: false
     })
   } catch (error) {
     endReason = 'error'
     if (!abortController.signal.aborted) {
       console.error(`[Teammate ${memberName}] Error:`, error)
     }
+    const completedAt = Date.now()
     teamEvents.emit({
       type: 'team_member_update',
       memberId,
-      patch: { status: 'stopped', completedAt: Date.now() }
+      patch: { status: 'stopped', completedAt }
+    })
+    await syncRuntimeMemberState(memberId, {
+      status: 'stopped',
+      completedAt,
+      isActive: false
     })
   } finally {
     teammateAbortControllers.delete(memberId)
@@ -201,6 +249,7 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
     unsubMessages()
     stopWorkerPermissionPoller(memberName)
     stopWorkerPlanApprovalPoller(memberName)
+    stopWorkerInboxPoller(memberId)
 
     if (endReason !== 'aborted') {
       emitCompletionMessage(memberName, endReason, {
@@ -396,6 +445,10 @@ async function runSingleTaskLoop(opts: {
     memberId,
     patch: { status: 'working', iteration: 0 }
   })
+  await syncRuntimeMemberState(memberId, {
+    status: 'working',
+    currentTaskId: taskId
+  })
 
   let streamingText = ''
   let taskCompleted = false
@@ -471,6 +524,10 @@ async function runSingleTaskLoop(opts: {
               memberId,
               patch: { iteration: state.iteration, status: 'working', streamingText: '' }
             })
+            await syncRuntimeMemberState(memberId, {
+              status: 'working',
+              currentTaskId: taskId
+            })
             break
 
           case 'text_delta':
@@ -508,6 +565,10 @@ async function runSingleTaskLoop(opts: {
                 memberId,
                 patch: { usage: { ...state.usage } }
               })
+              await syncRuntimeMemberState(memberId, {
+                status: 'working',
+                currentTaskId: taskId
+              })
             }
             break
 
@@ -520,6 +581,11 @@ async function runSingleTaskLoop(opts: {
                 patch: { status: 'completed' }
               })
               taskCompleted = true
+            }
+            if (taskCompleted) {
+              await syncRuntimeMemberState(memberId, {
+                currentTaskId: null
+              })
             }
             break
         }

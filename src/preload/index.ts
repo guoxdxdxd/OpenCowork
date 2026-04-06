@@ -8,6 +8,8 @@ import type {
   GetTeamRuntimeSnapshotArgs,
   SpawnIsolatedTeamWorkerArgs,
   StopIsolatedTeamWorkerArgs,
+  StopIsolatedTeamWorkersArgs,
+  UpdateTeamRuntimeManifestArgs,
   UpdateTeamRuntimeMemberArgs
 } from '../shared/team-runtime-types'
 
@@ -26,12 +28,16 @@ const api = {
     ipcRenderer.invoke('team-runtime:snapshot', args),
   teamRuntimeUpdateMember: (args: UpdateTeamRuntimeMemberArgs) =>
     ipcRenderer.invoke('team-runtime:member:update', args),
+  teamRuntimeUpdateManifest: (args: UpdateTeamRuntimeManifestArgs) =>
+    ipcRenderer.invoke('team-runtime:manifest:update', args),
   teamRuntimeConsumeMessages: (args: ConsumeTeamRuntimeMessagesArgs) =>
     ipcRenderer.invoke('team-runtime:messages:consume', args),
   teamWorkerSpawn: (args: SpawnIsolatedTeamWorkerArgs) =>
     ipcRenderer.invoke('team-worker:spawn', args),
   teamWorkerStop: (args: StopIsolatedTeamWorkerArgs) =>
-    ipcRenderer.invoke('team-worker:stop', args)
+    ipcRenderer.invoke('team-worker:stop', args),
+  teamWorkerStopTeam: (args: StopIsolatedTeamWorkersArgs) =>
+    ipcRenderer.invoke('team-worker:stop-team', args)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

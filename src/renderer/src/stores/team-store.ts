@@ -46,6 +46,7 @@ interface TeamStore {
   /** Unified event handler — called from use-chat-actions subscription */
   handleTeamEvent: (event: TeamEvent, sessionId?: string) => void
   syncRuntimeSnapshot: (snapshot: TeamRuntimeSnapshot, sessionId?: string) => void
+  updateTeamMeta: (patch: Partial<Pick<ActiveTeam, 'permissionMode' | 'teamAllowedPaths'>>) => void
 
   /** Remove all team data that belongs to the given session */
   clearSessionTeam: (sessionId: string) => void
@@ -207,7 +208,29 @@ export const useTeamStore = create<TeamStore>()(
             teamAllowedPaths: [...snapshot.team.teamAllowedPaths],
             createdAt: snapshot.team.createdAt,
             lastRuntimeSyncAt: Date.now(),
-            members: previous?.members ?? [],
+            members: snapshot.team.members.map((member) => {
+              const previousMember = previous?.members.find(
+                (item) => item.id === member.agentId || item.name === member.name
+              )
+              return {
+                id: member.agentId,
+                name: member.name,
+                model: member.model ?? previousMember?.model ?? 'default',
+                ...(member.agentType || previousMember?.agentName
+                  ? { agentName: member.agentType ?? previousMember?.agentName }
+                  : {}),
+                backendType: member.backendType,
+                role: member.role,
+                status: member.status,
+                currentTaskId: member.currentTaskId ?? null,
+                iteration: previousMember?.iteration ?? 0,
+                toolCalls: previousMember?.toolCalls ?? [],
+                streamingText: previousMember?.streamingText ?? '',
+                startedAt: member.startedAt,
+                completedAt: member.completedAt ?? null,
+                ...(previousMember?.usage ? { usage: previousMember.usage } : {})
+              }
+            }),
             tasks: previous?.tasks ?? [],
             messages: snapshot.recentMessages.map((msg) => ({
               id: msg.id,
@@ -219,6 +242,13 @@ export const useTeamStore = create<TeamStore>()(
               timestamp: msg.timestamp
             }))
           }
+        })
+      },
+      updateTeamMeta: (patch) => {
+        set((state) => {
+          if (!state.activeTeam) return
+          Object.assign(state.activeTeam, patch)
+          state.activeTeam.lastRuntimeSyncAt = Date.now()
         })
       },
       clearSessionTeam: (sessionId) => {
