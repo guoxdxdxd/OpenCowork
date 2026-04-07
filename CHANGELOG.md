@@ -3,27 +3,25 @@
 All notable changes to **OpenCowork** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
-## [0.7.14] - 2026-04-07
+## [0.7.15] - 2026-04-08
 
 ### Added
 
-- Added a clearer comparison-style preview flow for `AskUserQuestion`, including safer single-select preview handling and improved option presentation across chat surfaces.
-- Added stronger OpenAI chat provider payload typing and indexing support in the `.NET` sidecar to better preserve structured tool and streaming data.
+- Added **LongCat AI** built-in provider preset with 6 models including vision capabilities (Flash Chat, Flash Thinking series, Flash Lite, Flash Omni with image support).
+- Added **Claude Code CLI** source code analysis project for learning and research purposes with TypeScript implementation and MCP protocol support.
 
 ### Changed
 
-- Bumped the app version to `v0.7.14`.
-- Updated the docs homepage release badge from `v0.7.13` to `v0.7.14`.
-- Refined task, teammate, and follow-up interaction flow across renderer and main-process team runtime paths.
+- Bumped the app version to `v0.7.15`.
+- Updated the docs homepage release badge from `v0.7.14` to `v0.7.15`.
 
 ### Fixed
 
-- Improved ask-user interaction stability in chat, settings, and workspace flows to reduce edge-case state mismatches.
-- Improved tool-call handling and replay consistency in the agent runtime and OpenAI provider integration.
+- No fixes in this release.
 
 ### Notes
 
-- This release focuses on agent interaction flow polish, ask-user UX reliability, and provider/runtime consistency updates.
+- This release enhances the platform's AI provider ecosystem and adds valuable learning resources for developers interested in high-quality CLI tool implementations.
 
 ## [0.7.13] - 2026-04-06
 
